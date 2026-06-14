@@ -1,0 +1,30 @@
+[
+  {
+    "id": "chat-msg-001",
+    "sender": "alice@example.com",
+    "createTime": "2026-06-13T09:15:00Z",
+    "text": "Hey, quick heads up — the Acme data pipeline credentials are still blocked. I've escalated to their IT team.",
+    "spaceName": "Acme Delivery Team"
+  },
+  {
+    "id": "chat-msg-002",
+    "sender": "bob@example.com",
+    "createTime": "2026-06-13T09:20:00Z",
+    "text": "Got it. I'll adjust the timeline in the SOW if this isn't resolved by EOD.",
+    "spaceName": "Acme Delivery Team"
+  },
+  {
+    "id": "chat-msg-003",
+    "sender": "manager@example.com",
+    "createTime": "2026-06-13T11:00:00Z",
+    "text": "David, can you give me an update on your allocation next week? I'm seeing 120% in the forecast.",
+    "spaceName": "Manager DMs"
+  },
+  {
+    "id": "chat-msg-004",
+    "sender": "david@example.com",
+    "createTime": "2026-06-13T11:05:00Z",
+    "text": "Yeah I'm overloaded. The Big Retail project is taking more time than estimated. Need help.",
+    "spaceName": "Manager DMs"
+  }
+]

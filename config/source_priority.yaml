@@ -1,0 +1,54 @@
+# Source priority configuration
+# Controls confidence weights and conflict resolution when the same signal appears in multiple sources
+
+# Confidence weights per source (0.0 - 1.0)
+# Higher weight = more authoritative
+confidence_weights:
+  obsidian: 0.9
+  workspace_summary: 0.7
+  deals: 1.0
+  forecast: 1.0
+  gws: 0.8
+  rule: 1.0
+  llm: 0.7
+
+# When the same entity is updated by multiple sources on the same day,
+# prefer sources earlier in this list
+conflict_resolution_order:
+  - obsidian
+  - deals
+  - forecast
+  - gws
+  - workspace_summary
+
+# Column name aliases for CSV ingestion
+# Maps non-standard CSV column names to the canonical internal field names
+forecast_column_aliases:
+  "Person": "person"
+  "Name": "person"
+  "Employee": "person"
+  "Week": "week_start"
+  "Week Start": "week_start"
+  "Client": "client"
+  "Project": "project"
+  "Allocation": "allocation_pct"
+  "Allocation %": "allocation_pct"
+  "Pct Allocated": "allocation_pct"
+  "Type": "forecast_type"
+  "Status": "forecast_type"
+
+deal_column_aliases:
+  "Account": "account"
+  "Deal": "deal_name"
+  "Deal Name": "deal_name"
+  "Opportunity": "deal_name"
+  "Stage": "stage"
+  "Close Date": "close_date"
+  "Expected Close": "close_date"
+  "Tech Owner": "technical_owner"
+  "Technical Owner": "technical_owner"
+  "Engineer": "technical_owner"
+  "AE": "ae_name"
+  "Account Executive": "ae_name"
+  "LOE Status": "loe_status"
+  "SOW Status": "sow_status"

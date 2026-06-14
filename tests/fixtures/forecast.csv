@@ -1,0 +1,10 @@
+person,week_start,client,project,allocation_pct,forecast_type
+Alice Chen,2026-06-16,Acme Corp,ML Platform Build,100,confirmed
+Alice Chen,2026-06-23,Acme Corp,ML Platform Build,100,confirmed
+Bob Martinez,2026-06-16,Acme Corp,ML Platform Build,80,confirmed
+Bob Martinez,2026-06-23,Acme Corp,ML Platform Build,80,confirmed
+Carmen Liu,2026-06-16,FinServ Partners,Fraud Detection Platform,100,confirmed
+Carmen Liu,2026-06-23,FinServ Partners,Fraud Detection Platform,50,likely
+David Park,2026-06-16,Big Retail Co,Recommendation Engine,120,confirmed
+Elena Torres,2026-06-16,Big Retail Co,Recommendation Engine,100,confirmed
+Elena Torres,2026-07-07,Big Retail Co,Recommendation Engine Phase 2,100,likely

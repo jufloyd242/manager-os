@@ -1,0 +1,6 @@
+account,deal_name,stage,close_date,technical_owner,ae_name,loe_status,sow_status
+Big Retail Co,Big Retail Recs v2,SOW Review,2026-06-17,Elena Torres,Sarah Johnson,signed,pending
+Acme Corp,ACME ML Platform Q3,Closed Won,2026-05-01,Alice Chen,Mike Adams,signed,signed
+FinServ Partners,FinServ Fraud Detection,Proposal,2026-07-15,Carmen Liu,Jessica Lee,in-review,not-started
+MedTech Solutions,MedTech NLP - SOW 2,SOW Review,2026-06-20,David Park,Rachel Kim,signed,pending
+Global Logistics Inc,GLI Supply Chain POC,Discovery,2026-08-01,,Tom Wilson,not-started,not-started

@@ -1,0 +1,22 @@
+# Client organizations
+# Fields: name (canonical), aliases (list of strings for entity resolution), engagement
+
+- name: "Acme Corp"
+  aliases: ["Acme", "acme", "ACME", "Acme Corp", "acme-corp"]
+  engagement: "ML Platform Build"
+
+- name: "Big Retail Co"
+  aliases: ["Big Retail", "big retail", "BRC", "Big Retail Co", "bigretail"]
+  engagement: "Recommendation Engine"
+
+- name: "FinServ Partners"
+  aliases: ["FinServ", "finserv", "FSP", "FinServ Partners", "fin serv"]
+  engagement: "Fraud Detection Platform"
+
+- name: "MedTech Solutions"
+  aliases: ["MedTech", "medtech", "MTS", "MedTech Solutions", "med tech"]
+  engagement: "Clinical NLP Pipeline"
+
+- name: "Global Logistics Inc"
+  aliases: ["Global Logistics", "global logistics", "GLI", "Global Logistics Inc"]
+  engagement: "Supply Chain Optimization"

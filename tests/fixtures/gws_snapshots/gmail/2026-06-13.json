@@ -1,0 +1,35 @@
+[
+  {
+    "id": "thread-001",
+    "snippet": "Re: Big Retail SOW — signed copy attached",
+    "messages": [
+      {
+        "id": "msg-001a",
+        "from": "ae@bigretail.com",
+        "subject": "Re: Big Retail SOW — signed copy attached",
+        "date": "2026-06-13",
+        "body": "Hi team,\n\nPlease find the signed SOW attached. We're ready to proceed.\n\nThanks,\nAE"
+      },
+      {
+        "id": "msg-001b",
+        "from": "manager@example.com",
+        "subject": "Re: Big Retail SOW — signed copy attached",
+        "date": "2026-06-13",
+        "body": "Great news! I'll notify Alice and Bob so they can plan the kickoff."
+      }
+    ]
+  },
+  {
+    "id": "thread-002",
+    "snippet": "Acme data pipeline — risk of delay",
+    "messages": [
+      {
+        "id": "msg-002a",
+        "from": "alice@example.com",
+        "subject": "Acme data pipeline — risk of delay",
+        "date": "2026-06-12",
+        "body": "The Acme data access credentials are still blocked. This is at risk of delaying the milestone by at least a week."
+      }
+    ]
+  }
+]

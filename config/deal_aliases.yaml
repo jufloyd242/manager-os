@@ -1,0 +1,10 @@
+# Deal name normalization
+# Maps raw deal names (as they appear in CSVs or notes) to canonical deal names
+# Format: "raw name": "canonical name"
+
+"ACME ML Platform Q3": "Acme Corp — ML Platform Build"
+"Big Retail Recs v2": "Big Retail Co — Recommendation Engine Phase 2"
+"FinServ Fraud Detection": "FinServ Partners — Fraud Detection Platform"
+"MedTech NLP - SOW 2": "MedTech Solutions — Clinical NLP SOW 2"
+"GLI Supply Chain POC": "Global Logistics Inc — Supply Chain POC"
+"Acme Corp Expansion": "Acme Corp — Platform Expansion"

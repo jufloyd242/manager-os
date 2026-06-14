@@ -1,0 +1,33 @@
+[
+  {
+    "id": "cal-event-001",
+    "summary": "1:1 with Alice Chen",
+    "start": {"dateTime": "2026-06-13T10:00:00-07:00"},
+    "end":   {"dateTime": "2026-06-13T10:30:00-07:00"},
+    "attendees": [
+      {"email": "alice@example.com", "displayName": "Alice Chen"},
+      {"email": "manager@example.com", "displayName": "Manager"}
+    ],
+    "description": "Weekly 1:1 — check in on Acme pipeline milestone and morale."
+  },
+  {
+    "id": "cal-event-002",
+    "summary": "Acme Corp Weekly Sync",
+    "start": {"dateTime": "2026-06-13T14:00:00-07:00"},
+    "end":   {"dateTime": "2026-06-13T15:00:00-07:00"},
+    "attendees": [
+      {"email": "alice@example.com", "displayName": "Alice Chen"},
+      {"email": "bob@example.com", "displayName": "Bob Martinez"},
+      {"email": "acme-pm@acme.com", "displayName": "Acme PM"}
+    ],
+    "description": "Discuss feature store milestone and data access blockers."
+  },
+  {
+    "id": "cal-event-003",
+    "summary": "No-attendee event",
+    "start": {"date": "2026-06-13"},
+    "end":   {"date": "2026-06-14"},
+    "attendees": [],
+    "description": ""
+  }
+]

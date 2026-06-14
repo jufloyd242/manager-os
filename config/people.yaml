@@ -1,0 +1,27 @@
+# Team members
+# Fields: name (canonical), aliases (list of strings for entity resolution), role, level
+
+- name: "Alice Chen"
+  aliases: ["Alice", "alice", "alice.chen", "Alice Chen"]
+  role: "Senior ML Engineer"
+  level: "L5"
+
+- name: "Bob Martinez"
+  aliases: ["Bob", "bob", "bob.martinez", "Bob Martinez"]
+  role: "ML Engineer"
+  level: "L4"
+
+- name: "Carmen Liu"
+  aliases: ["Carmen", "carmen", "carmen.liu", "Carmen Liu"]
+  role: "Senior Data Engineer"
+  level: "L5"
+
+- name: "David Park"
+  aliases: ["David", "david", "david.park", "David Park"]
+  role: "AI/ML Consultant"
+  level: "L4"
+
+- name: "Elena Torres"
+  aliases: ["Elena", "elena", "elena.torres", "Elena Torres"]
+  role: "Staff ML Engineer"
+  level: "L6"
