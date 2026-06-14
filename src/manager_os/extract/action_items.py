@@ -121,6 +121,7 @@ class ExtractionResult:
     skipped: int = 0
     failed: int = 0
     action_items: list[ActionItem] = field(default_factory=list)
+    skip_reasons: dict[str, int] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------
@@ -203,6 +204,9 @@ def extract_action_items(note: NoteRecord, conn, force: bool = False) -> Extract
         desc_key = ai.description.lower().strip()
         if desc_key in seen_descriptions:
             result.skipped += 1
+            result.skip_reasons["duplicate_within_note"] = (
+                result.skip_reasons.get("duplicate_within_note", 0) + 1
+            )
             continue
         seen_descriptions.add(desc_key)
 
@@ -211,6 +215,9 @@ def extract_action_items(note: NoteRecord, conn, force: bool = False) -> Extract
 
         if not force and _ai_exists(conn, ai_id):
             result.skipped += 1
+            result.skip_reasons["action_item_already_exists"] = (
+                result.skip_reasons.get("action_item_already_exists", 0) + 1
+            )
             continue
 
         try:
@@ -253,5 +260,7 @@ def extract_action_items_from_all_notes(
         combined.skipped += r.skipped
         combined.failed += r.failed
         combined.action_items.extend(r.action_items)
+        for reason, count in r.skip_reasons.items():
+            combined.skip_reasons[reason] = combined.skip_reasons.get(reason, 0) + count
 
     return combined

@@ -65,6 +65,7 @@ class ExtractionResult:
     skipped: int = 0
     failed: int = 0
     items: list[Decision] = field(default_factory=list)
+    skip_reasons: dict[str, int] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------
@@ -107,6 +108,9 @@ def extract_decisions(note: NoteRecord, conn, force: bool = False) -> Extraction
 
         if exists and not force:
             result.skipped += 1
+            result.skip_reasons["decision_already_exists"] = (
+                result.skip_reasons.get("decision_already_exists", 0) + 1
+            )
             continue
 
         decision = Decision(
@@ -186,6 +190,8 @@ def extract_decisions_from_all_notes(
             total.skipped += r.skipped
             total.failed += r.failed
             total.items.extend(r.items)
+            for reason, count in r.skip_reasons.items():
+                total.skip_reasons[reason] = total.skip_reasons.get(reason, 0) + count
         except Exception as exc:
             logger.warning("Skipping note %s during decision extraction: %s", row[0], exc)
             total.failed += 1

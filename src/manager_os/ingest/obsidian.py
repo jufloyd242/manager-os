@@ -57,6 +57,7 @@ class IngestResult:
     skipped: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
+    skip_reasons: dict[str, int] = field(default_factory=dict)
 
 
 def _infer_note_type(fm: dict, file_path: Path) -> str:
@@ -185,6 +186,9 @@ def _ingest_file(
 
     if not force and _doc_exists(conn, source_path, c_hash):
         result.skipped += 1
+        result.skip_reasons["duplicate_content_hash"] = (
+            result.skip_reasons.get("duplicate_content_hash", 0) + 1
+        )
         return
 
     # Parse frontmatter — raises if YAML is malformed

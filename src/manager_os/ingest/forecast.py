@@ -22,6 +22,7 @@ class IngestResult:
     skipped: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
+    skip_reasons: dict[str, int] = field(default_factory=dict)
 
 
 # Default canonical column name mapping
@@ -151,6 +152,9 @@ def ingest_forecast(
 
             if not force and _row_exists(conn, row.id):
                 result.skipped += 1
+                result.skip_reasons["already_exists"] = (
+                    result.skip_reasons.get("already_exists", 0) + 1
+                )
                 continue
 
             conn.execute(

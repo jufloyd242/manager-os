@@ -26,6 +26,7 @@ class IngestResult:
     skipped: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
+    skip_reasons: dict[str, int] = field(default_factory=dict)
 
 
 def _find_summary_file(summary_dir: Path, target_date: date) -> Path | None:
@@ -86,6 +87,9 @@ def ingest_summary(
 
         if not force and _doc_exists(conn, doc_id):
             result.skipped += 1
+            result.skip_reasons["already_exists"] = (
+                result.skip_reasons.get("already_exists", 0) + 1
+            )
             return result
 
         mtime = datetime.fromtimestamp(

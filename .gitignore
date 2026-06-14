@@ -11,7 +11,19 @@ htmlcov/
 .pytest_cache/
 .ruff_cache/
 .pyright/
+
+# ── Data directories ──────────────────────────────────────────────────────
+# Keep placeholder .gitkeep files; exclude all real data.
+data/raw/*
+!data/raw/.gitkeep
+
+# Processed and demo databases
 data/processed/
+data/demo/
+
+# ── Generated output ──────────────────────────────────────────────────────
 output/
+
+# ── DuckDB files ──────────────────────────────────────────────────────────
 *.duckdb
 *.duckdb.wal

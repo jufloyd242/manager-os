@@ -97,6 +97,7 @@ class ExtractionResult:
     skipped: int = 0
     failed: int = 0
     signals: list[Signal] = field(default_factory=list)
+    skip_reasons: dict[str, int] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------
@@ -326,6 +327,9 @@ def run_rule_extraction(conn, run_date: date | None = None) -> ExtractionResult:
         try:
             if _signal_exists(conn, signal.id):
                 result.skipped += 1
+                result.skip_reasons["signal_already_exists"] = (
+                    result.skip_reasons.get("signal_already_exists", 0) + 1
+                )
             else:
                 _write_signal(conn, signal)
                 result.written += 1

@@ -67,6 +67,7 @@ class IngestResult:
     skipped: int = 0
     failed: int = 0
     source: str = "gws"
+    skip_reasons: dict[str, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,9 @@ def _ingest_calendar_file(path: Path, conn, force: bool) -> IngestResult:
         exists = conn.execute("SELECT id FROM meetings WHERE id = ?", [row_id]).fetchone()
         if exists and not force:
             result.skipped += 1
+            result.skip_reasons["already_exists"] = (
+                result.skip_reasons.get("already_exists", 0) + 1
+            )
             continue
 
         try:
@@ -230,6 +234,9 @@ def _ingest_gmail_file(path: Path, conn, force: bool) -> IngestResult:
         ).fetchone()
         if existing and existing[0] == doc_hash and not force:
             result.skipped += 1
+            result.skip_reasons["duplicate_content_hash"] = (
+                result.skip_reasons.get("duplicate_content_hash", 0) + 1
+            )
             continue
 
         try:
@@ -298,6 +305,9 @@ def _ingest_chat_file(path: Path, conn, force: bool) -> IngestResult:
         ).fetchone()
         if existing and existing[0] == doc_hash and not force:
             result.skipped += 1
+            result.skip_reasons["duplicate_content_hash"] = (
+                result.skip_reasons.get("duplicate_content_hash", 0) + 1
+            )
             continue
 
         try:
@@ -368,5 +378,7 @@ def ingest_gws_snapshots(
         total.ingested += r.ingested
         total.skipped += r.skipped
         total.failed += r.failed
+        for reason, count in r.skip_reasons.items():
+            total.skip_reasons[reason] = total.skip_reasons.get(reason, 0) + count
 
     return total
