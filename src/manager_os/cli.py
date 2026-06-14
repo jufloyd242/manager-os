@@ -98,6 +98,341 @@ def main(ctx: typer.Context) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Dry-run helpers
+# ---------------------------------------------------------------------------
+
+# Directories skipped when scanning an Obsidian vault for dry-run preview.
+_DRY_RUN_OBSIDIAN_SKIP_DIRS: frozenset[str] = frozenset({".obsidian", ".git", ".trash"})
+
+
+def _dry_run_open_ro(db_path: str):
+    """Open the existing database in read-only mode for duplicate checks.
+
+    Returns an open connection or None if the DB does not exist / cannot
+    be opened (e.g. first run before any ingest).
+    """
+    import duckdb as _duckdb
+
+    if db_path == ":memory:":
+        return None
+    p = Path(db_path)
+    if not p.exists():
+        return None
+    try:
+        return _duckdb.connect(str(p), read_only=True)
+    except Exception:
+        return None
+
+
+def _scan_obsidian_dry(vault_path: str, ro_conn) -> tuple[int, int, list[str]]:
+    """Scan an Obsidian vault without writing. Returns (new, dup, warnings)."""
+    from manager_os.db import content_hash as _ch
+
+    vault = Path(vault_path)
+    if not vault.exists():
+        return 0, 0, [f"Vault not found: {vault_path}"]
+
+    new_count = dup_count = 0
+    for md_file in vault.rglob("*.md"):
+        if any(part.startswith(".") for part in md_file.parts):
+            continue
+        if any(skip in md_file.parts for skip in _DRY_RUN_OBSIDIAN_SKIP_DIRS):
+            continue
+        if ro_conn is not None:
+            try:
+                raw_text = md_file.read_text(encoding="utf-8", errors="replace")
+                c_hash = _ch(raw_text)
+                source_path = str(md_file.resolve())
+                row = ro_conn.execute(
+                    "SELECT id FROM raw_documents "
+                    "WHERE source_path = ? AND content_hash = ?",
+                    [source_path, c_hash],
+                ).fetchone()
+                if row:
+                    dup_count += 1
+                else:
+                    new_count += 1
+            except Exception:
+                new_count += 1
+        else:
+            new_count += 1
+    return new_count, dup_count, []
+
+
+def _scan_csv_dry(
+    csv_path: Optional[str],
+    ro_conn,
+    db_table: str,
+) -> tuple[int, int, list[str]]:
+    """Read a CSV and report row count. Returns (rows, 0, warnings).
+
+    Exact duplicate checking is omitted because it requires fully parsing each
+    row and computing its stable ID — that is equivalent to running the real
+    ingestor. Instead, if a DB connection is available we show how many rows
+    are already in the target table as a reference.
+    """
+    import pandas as _pd
+
+    if not csv_path:
+        return 0, 0, ["path not configured"]
+    try:
+        df = _pd.read_csv(csv_path, dtype=str)
+    except Exception as exc:
+        return 0, 0, [f"could not read: {exc}"]
+
+    n = len(df)
+    notes: list[str] = []
+    if ro_conn is not None:
+        try:
+            existing = ro_conn.execute(
+                f"SELECT COUNT(*) FROM {db_table}"
+            ).fetchone()[0]
+            if existing:
+                notes.append(f"{existing} already in DB")
+        except Exception:
+            pass
+    return n, 0, notes
+
+
+def _scan_summary_dry(
+    summary_dir: Optional[str],
+    target_date: "date",
+    ro_conn,
+) -> tuple[int, int, list[str]]:
+    """Check whether a summary file exists for target_date. Returns (new, dup, warnings)."""
+    from manager_os.db import content_hash as _ch
+
+    if not summary_dir:
+        return 0, 0, ["path not configured"]
+    for ext in (".md", ".txt"):
+        candidate = Path(summary_dir) / f"{target_date.isoformat()}{ext}"
+        if candidate.exists():
+            if ro_conn is not None:
+                try:
+                    doc_id = _ch(str(candidate.resolve()))
+                    row = ro_conn.execute(
+                        "SELECT id FROM raw_documents WHERE id = ?", [doc_id]
+                    ).fetchone()
+                    if row:
+                        return 0, 1, []
+                except Exception:
+                    pass
+            return 1, 0, []
+    return 0, 0, [f"no summary file for {target_date}"]
+
+
+def _scan_gws_dry(gws_dir: Optional[str]) -> tuple[int, int, list[str]]:
+    """Count GWS snapshot JSON files without reading them."""
+    if not gws_dir:
+        return 0, 0, ["path not configured"]
+    d = Path(gws_dir)
+    if not d.exists():
+        return 0, 0, [f"directory not found: {gws_dir}"]
+    count = sum(1 for _ in d.rglob("*.json"))
+    return count, 0, []
+
+
+def _do_dry_run_ingest(
+    source: str,
+    target_date: "date",
+    settings,
+) -> None:
+    """Print a dry-run preview table for ingest — no DB writes."""
+    from rich import box as rich_box
+    from rich.panel import Panel
+
+    ro_conn = _dry_run_open_ro(settings.db_path)
+    db_status = (
+        "read-only duplicate check against existing DB"
+        if ro_conn is not None
+        else "no existing DB — all items assumed new"
+    )
+
+    console.print()
+    console.print(
+        Panel.fit(
+            "[bold]Manager OS — Dry Run: Ingest Preview[/bold]",
+            box=rich_box.ROUNDED,
+            border_style="yellow",
+        )
+    )
+    console.print(f"  [dim]Date:[/dim]    {target_date}")
+    console.print(f"  [dim]Source:[/dim]  {source}")
+    console.print(f"  [dim]DB:[/dim]      {settings.db_path}  [{db_status}]")
+    console.print()
+
+    tbl = Table(
+        title=f"Would ingest — {target_date}  (dry run, nothing written)",
+        show_header=True,
+        header_style="bold",
+        box=rich_box.SIMPLE,
+        show_edge=False,
+        pad_edge=False,
+    )
+    tbl.add_column("Source", style="cyan")
+    tbl.add_column("Would Write", justify="right", style="green")
+    tbl.add_column("Would Skip", justify="right", style="yellow")
+    tbl.add_column("Notes", style="dim")
+
+    if source in ("all", "obsidian"):
+        if settings.vault_path:
+            new, dup, warns = _scan_obsidian_dry(settings.vault_path, ro_conn)
+            tbl.add_row("obsidian", str(new), str(dup), "; ".join(warns))
+        else:
+            tbl.add_row("obsidian", "—", "—", "MANAGER_OS_VAULT_PATH not set")
+
+    if source in ("all", "forecast"):
+        new, dup, warns = _scan_csv_dry(
+            settings.forecast_csv, ro_conn, "staffing_forecast"
+        )
+        tbl.add_row("forecast", str(new), str(dup), "; ".join(warns))
+
+    if source in ("all", "deals"):
+        new, dup, warns = _scan_csv_dry(settings.deals_csv, ro_conn, "deals")
+        tbl.add_row("deals", str(new), str(dup), "; ".join(warns))
+
+    if source in ("all", "summary"):
+        new, dup, warns = _scan_summary_dry(
+            settings.workspace_summary_dir, target_date, ro_conn
+        )
+        tbl.add_row("summary", str(new), str(dup), "; ".join(warns))
+
+    if source in ("all", "gws"):
+        new, dup, warns = _scan_gws_dry(settings.gws_snapshot_dir)
+        tbl.add_row("gws", str(new), str(dup), "; ".join(warns))
+
+    if ro_conn is not None:
+        ro_conn.close()
+
+    console.print(tbl)
+    console.print()
+    console.print(
+        "[yellow bold]⚠  Dry run — nothing was written to the database.[/yellow bold]"
+    )
+    console.print()
+
+
+def _do_dry_run_extract(settings, run_date: "date", mode: str) -> None:
+    """Print a dry-run preview for extract — copies notes to in-memory DB,
+    runs extraction there, reports counts. The real DB is never written."""
+    import duckdb as _duckdb
+
+    from manager_os.db import init_schema
+    from manager_os.extract.signals import run_rule_extraction
+    from manager_os.extract.action_items import extract_action_items_from_all_notes
+    from manager_os.extract.decisions import extract_decisions_from_all_notes
+    from rich import box as rich_box
+    from rich.panel import Panel
+
+    ro_conn = _dry_run_open_ro(settings.db_path)
+    if ro_conn is None:
+        console.print(
+            "[yellow]No existing database found. "
+            "Run 'manager-os ingest' first.[/yellow]"
+        )
+        return
+
+    try:
+        note_count = ro_conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+    except Exception:
+        note_count = 0
+
+    if note_count == 0:
+        console.print(
+            "[red]No notes found. Run 'manager-os ingest' first.[/red]"
+        )
+        ro_conn.close()
+        raise typer.Exit(1)
+
+    # Build an in-memory DB and copy the tables the extraction rules need.
+    mem_conn = _duckdb.connect(":memory:")
+    init_schema(mem_conn)
+    for tbl_name in ("notes", "staffing_forecast", "deals", "people", "clients"):
+        try:
+            ro_conn.execute(f"SELECT * FROM {tbl_name}")
+            col_names = [desc[0] for desc in ro_conn.description]
+            rows = ro_conn.fetchall()
+            if not rows:
+                continue
+            quoted = ", ".join(f'"{c}"' for c in col_names)
+            placeholders = ", ".join("?" for _ in col_names)
+            for row in rows:
+                mem_conn.execute(
+                    f"INSERT OR IGNORE INTO {tbl_name} ({quoted}) "
+                    f"VALUES ({placeholders})",
+                    list(row),
+                )
+        except Exception:
+            pass
+
+    ro_conn.close()
+
+    console.print()
+    console.print(
+        Panel.fit(
+            "[bold]Manager OS — Dry Run: Extract Preview[/bold]",
+            box=rich_box.ROUNDED,
+            border_style="yellow",
+        )
+    )
+    console.print(f"  [dim]Date:[/dim]   {run_date}")
+    console.print(f"  [dim]Notes:[/dim]  {note_count} note(s) in database")
+    console.print()
+
+    tbl = Table(
+        title=f"Would extract — {run_date}  (dry run, nothing written)",
+        show_header=True,
+        header_style="bold",
+        box=rich_box.SIMPLE,
+        show_edge=False,
+        pad_edge=False,
+    )
+    tbl.add_column("Step", style="cyan")
+    tbl.add_column("Would Write", justify="right", style="green")
+    tbl.add_column("Would Skip", justify="right", style="yellow")
+    tbl.add_column("Failed", justify="right", style="red")
+
+    _step_results: list[tuple[str, object]] = []
+
+    if mode in ("rules", "both"):
+        result = run_rule_extraction(mem_conn, run_date=run_date)
+        tbl.add_row(
+            "signals (rules)",
+            str(result.written),
+            str(result.skipped),
+            str(result.failed),
+        )
+        _step_results.append(("signals (rules)", result))
+
+    ai_result = extract_action_items_from_all_notes(mem_conn)
+    tbl.add_row(
+        "action items",
+        str(ai_result.written),
+        str(ai_result.skipped),
+        str(ai_result.failed),
+    )
+    _step_results.append(("action items", ai_result))
+
+    dec_result = extract_decisions_from_all_notes(mem_conn)
+    tbl.add_row(
+        "decisions",
+        str(dec_result.written),
+        str(dec_result.skipped),
+        str(dec_result.failed),
+    )
+    _step_results.append(("decisions", dec_result))
+
+    mem_conn.close()
+
+    console.print(tbl)
+    console.print()
+    console.print(
+        "[yellow bold]⚠  Dry run — nothing was written to the database.[/yellow bold]"
+    )
+    console.print()
+
+
+# ---------------------------------------------------------------------------
 # manager-os ingest
 # ---------------------------------------------------------------------------
 
@@ -125,6 +460,11 @@ def ingest(
         "-v",
         help="Show skip reason details after the results table.",
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview what would be ingested without writing to the database.",
+    ),
 ) -> None:
     """Ingest data from configured sources into DuckDB."""
     from manager_os.config import (
@@ -144,6 +484,10 @@ def ingest(
     if source not in valid_sources:
         console.print(f"[red]Unknown source '{source}'. Must be one of: {', '.join(sorted(valid_sources))}[/red]")
         raise typer.Exit(1)
+
+    if dry_run:
+        _do_dry_run_ingest(source, target_date, settings)
+        return
 
     try:
         sp = load_source_priority(settings)
@@ -251,6 +595,11 @@ def extract(
         "-v",
         help="Show skip reason details after the results table.",
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview what would be extracted without writing to the database.",
+    ),
 ) -> None:
     """Extract signals and action items from ingested documents."""
     from manager_os.config import get_settings
@@ -265,6 +614,11 @@ def extract(
 
     settings = get_settings()
     run_date = date.fromisoformat(extract_date) if extract_date else date.today()
+
+    if dry_run:
+        _do_dry_run_extract(settings, run_date, mode)
+        return
+
     conn = get_connection(settings.db_path)
 
     # Check that documents exist
