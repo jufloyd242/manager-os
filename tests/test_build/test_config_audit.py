@@ -185,6 +185,102 @@ class TestScanVault:
         # Template should be in skipped count
         assert result.notes_skipped >= 1
 
+    # -----------------------------------------------------------------------
+    # New: deal false-positive suppression
+    # -----------------------------------------------------------------------
+
+    def test_deal_scraper_file_not_a_deal_candidate(self) -> None:
+        """deals/deal_scraper.md — tool file, must NOT become a deal candidate."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        deal_names = [e.name.lower() for e in result.candidate_deals]
+        assert "deal scraper" not in deal_names
+
+    def test_deal_sheet_scraper_file_not_a_deal_candidate(self) -> None:
+        """deals/deal-sheet-scraper-v2.md — tool file, must NOT become a deal candidate."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        deal_names = [e.name.lower() for e in result.candidate_deals]
+        assert not any("scraper" in n for n in deal_names)
+
+    def test_real_deal_frontmatter_still_works(self) -> None:
+        """deals/deal_atlas_sow.md has entity frontmatter → should still appear."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        deal_names = [e.name for e in result.candidate_deals]
+        assert "Atlas Robotics SOW" in deal_names
+
+    # -----------------------------------------------------------------------
+    # New: team/directs false-positive suppression
+    # -----------------------------------------------------------------------
+
+    def test_numeric_prefixed_file_not_a_person_candidate(self) -> None:
+        """team/directs/11-questions.md — starts with digit, must NOT be a person."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        people_names = [e.name.lower() for e in result.candidate_people]
+        assert "11 questions" not in people_names
+
+    def test_generic_topic_file_not_a_person_candidate(self) -> None:
+        """team/directs/new-team-member.md and letters-for-2026.md are topics, not people."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        people_names = [e.name.lower() for e in result.candidate_people]
+        assert "new team member" not in people_names
+        assert "letters for 2026" not in people_names
+
+    def test_real_person_directs_file_still_works(self) -> None:
+        """team/directs/kevin-tuuri.md — real name, must appear as person candidate."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        people_names = [e.name for e in result.candidate_people]
+        assert "Kevin Tuuri" in people_names, f"Expected 'Kevin Tuuri' in {people_names}"
+
+    # -----------------------------------------------------------------------
+    # New: underscore-prefixed files skipped
+    # -----------------------------------------------------------------------
+
+    def test_underscore_prefixed_files_are_skipped(self) -> None:
+        """Any file starting with '_' (not just _TEMPLATE.md) should be skipped."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        all_candidate_names = [e.name for e in result.all_candidates()]
+        # _onboarding-template.md in team/directs should not produce a candidate
+        assert "Onboarding Template" not in all_candidate_names
+        assert result.notes_skipped >= 1
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: helper functions
+# ---------------------------------------------------------------------------
+
+
+class TestHelpers:
+    def test_looks_like_person_name_accepts_two_word(self) -> None:
+        from manager_os.build.config_audit import _looks_like_person_name
+        assert _looks_like_person_name("Morgan Patel") is True
+
+    def test_looks_like_person_name_accepts_single_word(self) -> None:
+        from manager_os.build.config_audit import _looks_like_person_name
+        assert _looks_like_person_name("Satya") is True
+
+    def test_looks_like_person_name_rejects_digit_prefix(self) -> None:
+        from manager_os.build.config_audit import _looks_like_person_name
+        assert _looks_like_person_name("11 Questions") is False
+
+    def test_looks_like_person_name_rejects_denylist(self) -> None:
+        from manager_os.build.config_audit import _looks_like_person_name
+        assert _looks_like_person_name("New Team Member") is False
+
+    def test_looks_like_person_name_rejects_year_word(self) -> None:
+        from manager_os.build.config_audit import _looks_like_person_name
+        assert _looks_like_person_name("Letters For 2026") is False
+
+    def test_is_generic_deal_name_rejects_scraper(self) -> None:
+        from manager_os.build.config_audit import _is_generic_deal_name
+        assert _is_generic_deal_name("deal_scraper") is True
+
+    def test_is_generic_deal_name_rejects_versioned_scraper(self) -> None:
+        from manager_os.build.config_audit import _is_generic_deal_name
+        assert _is_generic_deal_name("Deal Sheet Scraper v2.0") is True
+
+    def test_is_generic_deal_name_accepts_real_deal(self) -> None:
+        from manager_os.build.config_audit import _is_generic_deal_name
+        assert _is_generic_deal_name("atlas-acme-sow") is False
+
 
 # ---------------------------------------------------------------------------
 # Render report

@@ -94,6 +94,38 @@ _GENERIC_NOTE_NAMES: frozenset[str] = frozenset({
     "template",
 })
 
+# Stems that look like tools / process docs — should NOT become deal candidates.
+_GENERIC_DEAL_NAMES: frozenset[str] = frozenset({
+    "deal scraper",
+    "deal sheet scraper",
+    "scraper",
+    "automation",
+    "tool",
+    "script",
+    "template",
+    "readme",
+    "process",
+    "workflow",
+})
+
+# Stems (under team/directs etc.) that look like note topics, not person names.
+_GENERIC_PEOPLE_TOPIC_NAMES: frozenset[str] = frozenset({
+    "11 questions",
+    "questions",
+    "new team member",
+    "letters for 2026",
+    "letters",
+    "template",
+    "onboarding",
+    "goals",
+    "review",
+    "reviews",
+    "feedback",
+    "1on1",
+    "one on one",
+    "notes",
+})
+
 # Body-text keywords (only used when include_body_signals=True)
 _BODY_PERSON_PATTERNS = [re.compile(r"\b1[:\-–—]1\b", re.IGNORECASE)]
 _BODY_CLIENT_PATTERNS = [
@@ -189,8 +221,8 @@ def scan_vault(
         if any(skip in md_file.parts for skip in _SKIP_DIRS):
             result.notes_skipped += 1
             continue
-        # Skip template files
-        if md_file.name == "_TEMPLATE.md" or md_file.stem.upper() == "_TEMPLATE":
+        # Skip template files and any file whose name starts with "_"
+        if md_file.stem.startswith("_"):
             result.notes_skipped += 1
             continue
 
@@ -363,7 +395,11 @@ def _scan_file(
             )
         else:
             stem_name = _clean_stem(md_file.stem)
-            if stem_name and not _is_generic_name(md_file.stem):
+            if (
+                stem_name
+                and not _is_generic_name(md_file.stem)
+                and not _is_generic_deal_name(md_file.stem)
+            ):
                 _add_candidate(
                     result, seen_names,
                     CandidateEntry(
@@ -681,6 +717,57 @@ def _is_generic_name(stem: str) -> bool:
     return normalised in _GENERIC_NOTE_NAMES
 
 
+def _is_generic_deal_name(stem: str) -> bool:
+    """Return True if stem looks like a tool/process name, not a business deal."""
+    normalised = re.sub(
+        r"\s+", " ",
+        stem.lower().replace("_", " ").replace("-", " "),
+    ).strip()
+    # Strip trailing version numbers, e.g. "v2.0", "v3"
+    normalised = re.sub(r"\bv\d+(\.\d+)*\b", "", normalised).strip()
+    if normalised in _GENERIC_DEAL_NAMES:
+        return True
+    # Substring match: "deal sheet scraper v2.0" contains "scraper"
+    for generic in _GENERIC_DEAL_NAMES:
+        if generic in normalised:
+            return True
+    return False
+
+
+def _looks_like_person_name(name: str) -> bool:
+    """Return True if *name* looks like a real person name.
+
+    Accepts:
+        - Morgan Patel, Kevin Tuuri, Satya
+    Rejects:
+        - 11 Questions (starts with digit)
+        - New Team Member (in people-topic denylist)
+        - Letters For 2026 (contains digit-only word)
+    """
+    if not name:
+        return False
+    # Reject if in people-topic denylist
+    if name.lower() in _GENERIC_PEOPLE_TOPIC_NAMES:
+        return False
+    words = name.split()
+    if not words:
+        return False
+    # Reject if first character is a digit
+    if words[0][0].isdigit():
+        return False
+    # Reject if any word is purely numeric (e.g. "2026")
+    for word in words:
+        stripped = re.sub(r"[^\w]", "", word)
+        if stripped.isdigit():
+            return False
+    # Person names are typically 1-4 words; all start with a letter
+    if len(words) > 4:
+        return False
+    if not all(re.match(r"^[A-Za-z]", w) for w in words):
+        return False
+    return True
+
+
 def _extract_client_folder_candidate(
     md_file: Path, vault: Path
 ) -> tuple[str, str] | None:
@@ -751,7 +838,7 @@ def _extract_directs_candidate(md_file: Path, vault: Path) -> str | None:
             if i + 1 == len(rel_parts) - 1:
                 stem = rel_parts[-1].replace(".md", "") if rel_parts[-1].endswith(".md") else md_file.stem
                 name = _clean_stem(stem)
-                if name and not _is_generic_name(stem):
+                if name and not _is_generic_name(stem) and _looks_like_person_name(name):
                     return name
     return None
 
