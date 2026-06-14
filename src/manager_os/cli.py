@@ -1230,5 +1230,266 @@ def readiness() -> None:
     console.print()
 
 
+# ---------------------------------------------------------------------------
+# manager-os profile-forecast
+# ---------------------------------------------------------------------------
+
+# Maps canonical internal field name → display label used in the output table.
+_FORECAST_FIELD_DISPLAY: dict[str, str] = {
+    "person_name": "person",
+    "week_start": "start_date",
+    "client": "client",
+    "project": "engagement",
+    "allocation_pct": "allocation",
+    "forecast_type": "status",
+    "notes": "notes",
+}
+
+# Issue type → short display label for the issues table.
+_ISSUE_LABEL: dict[str, str] = {
+    "overallocated": "overallocated",
+    "zero_allocation": "zero allocation",
+    "missing_allocation": "missing allocation",
+    "malformed_allocation": "malformed allocation",
+    "missing_date": "missing date",
+    "malformed_date": "malformed date",
+    "unknown_person": "unknown person",
+    "unknown_client": "unknown client",
+}
+
+
+@app.command(name="profile-forecast")
+def profile_forecast(
+    path: Optional[str] = typer.Option(
+        None,
+        "--path",
+        help="Path to forecast CSV. Defaults to MANAGER_OS_FORECAST_CSV.",
+    ),
+    sample_size: int = typer.Option(
+        10,
+        "--sample-size",
+        help="Number of sample rows to display.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output results as JSON.",
+    ),
+) -> None:
+    """Validate the configured forecast CSV before ingesting real data.
+
+    Reads headers and a sample of rows without writing to the database.
+    Shows detected columns, field mapping, allocation sanity checks, and
+    any unknown person or client names compared to config/people.yaml and
+    config/clients.yaml.
+
+    Exits 0 when profiling completes (even with warnings).
+    Exits 1 only if the file cannot be read or required columns are missing.
+    """
+    import json as _json
+
+    from manager_os.config import get_settings, load_clients, load_people, load_source_priority
+    from manager_os.profile import ForecastProfile, RowIssue, profile_forecast_csv, _FIELD_DISPLAY
+    from rich import box as rich_box
+    from rich.panel import Panel
+
+    settings = get_settings()
+    csv_path = path or settings.forecast_csv
+
+    if not csv_path:
+        console.print("[red]No forecast CSV path set. Use --path or set MANAGER_OS_FORECAST_CSV.[/red]")
+        raise typer.Exit(1)
+
+    # Load config (best-effort — missing config is non-fatal)
+    try:
+        people = load_people(settings)
+    except Exception:
+        people = None
+
+    try:
+        clients = load_clients(settings)
+    except Exception:
+        clients = None
+
+    try:
+        sp = load_source_priority(settings)
+    except Exception:
+        sp = None
+
+    # Run the profiler
+    try:
+        result: ForecastProfile = profile_forecast_csv(
+            csv_path,
+            people=people,
+            clients=clients,
+            source_priority=sp,
+            sample_size=sample_size,
+        )
+    except RuntimeError as exc:
+        if json_output:
+            console.print_json(_json.dumps({"error": str(exc), "can_ingest": False}))
+        else:
+            console.print(f"[red]✗  {exc}[/red]")
+        raise typer.Exit(1)
+
+    # ── JSON output ──────────────────────────────────────────────────────────
+    if json_output:
+        console.print_json(_json.dumps(result.to_dict()))
+        if not result.can_ingest:
+            raise typer.Exit(1)
+        return
+
+    # ── Human-readable output ────────────────────────────────────────────────
+    console.print()
+    console.print(Panel.fit(
+        "[bold]Manager OS — Forecast CSV Profile[/bold]",
+        box=rich_box.ROUNDED,
+        border_style="cyan",
+    ))
+    console.print(f"  [dim]File:[/dim]    {result.path}")
+    console.print(f"  [dim]Rows:[/dim]    {result.total_rows}")
+    console.print(f"  [dim]Sample:[/dim]  {result.sample_size} of {result.total_rows}")
+    console.print()
+
+    # Column mapping table
+    col_tbl = Table(
+        title="Column Mapping",
+        show_header=True,
+        header_style="bold",
+        box=rich_box.SIMPLE,
+        show_edge=False,
+        pad_edge=False,
+    )
+    col_tbl.add_column("Raw Column", style="dim", no_wrap=True)
+    col_tbl.add_column("Normalised", no_wrap=True)
+    col_tbl.add_column("Field", style="cyan", no_wrap=True)
+
+    for raw, norm in result.column_mapping.items():
+        display = _FIELD_DISPLAY.get(norm, "")
+        changed = raw != norm
+        norm_display = f"[green]{norm}[/green]" if changed else f"[dim]{norm}[/dim]"
+        col_tbl.add_row(raw, norm_display, display)
+    console.print(col_tbl)
+    console.print()
+
+    # Required fields status
+    req_tbl = Table(
+        title="Required Fields",
+        show_header=False,
+        box=None,
+        pad_edge=False,
+        show_edge=False,
+    )
+    req_tbl.add_column("Status", no_wrap=True)
+    req_tbl.add_column("Field")
+
+    _REQ = ["person_name", "week_start"]
+    for canonical in _REQ:
+        display = _FIELD_DISPLAY.get(canonical, canonical)
+        if canonical in result.fields_found:
+            req_tbl.add_row("[green]✓ FOUND[/green]", f"{display} ({canonical})")
+        else:
+            req_tbl.add_row("[red]✗ MISSING[/red]", f"[red]{display} ({canonical})[/red]")
+    console.print(req_tbl)
+    console.print()
+
+    # Optional fields coverage
+    opt_tbl = Table(
+        title="Optional Fields",
+        show_header=False,
+        box=None,
+        pad_edge=False,
+        show_edge=False,
+    )
+    opt_tbl.add_column("Status", no_wrap=True)
+    opt_tbl.add_column("Field")
+
+    _OPT_DISPLAY = [
+        ("client", "client"),
+        ("project", "engagement"),
+        ("allocation_pct", "allocation"),
+        ("forecast_type", "status"),
+    ]
+    for canonical, display in _OPT_DISPLAY:
+        if canonical in result.fields_found:
+            opt_tbl.add_row("[green]✓[/green]", f"{display} ({canonical})")
+        else:
+            opt_tbl.add_row("[dim]–[/dim]", f"[dim]{display} (not in CSV)[/dim]")
+    console.print(opt_tbl)
+    console.print()
+
+    # Issues table
+    if result.issues:
+        issue_tbl = Table(
+            title=f"Issues ({len(result.issues)} found)",
+            show_header=True,
+            header_style="bold",
+            box=rich_box.SIMPLE,
+            show_edge=False,
+            pad_edge=False,
+        )
+        issue_tbl.add_column("Row", justify="right", style="dim", no_wrap=True)
+        issue_tbl.add_column("Type", no_wrap=True)
+        issue_tbl.add_column("Field", style="dim", no_wrap=True)
+        issue_tbl.add_column("Value")
+        issue_tbl.add_column("Detail")
+
+        _ISSUE_STYLE = {
+            "overallocated": "red",
+            "zero_allocation": "yellow",
+            "missing_allocation": "yellow",
+            "malformed_allocation": "red",
+            "missing_date": "yellow",
+            "malformed_date": "red",
+            "unknown_person": "yellow",
+            "unknown_client": "yellow",
+        }
+        for issue in result.issues:
+            label = _ISSUE_LABEL.get(issue.issue_type, issue.issue_type)
+            style = _ISSUE_STYLE.get(issue.issue_type, "white")
+            issue_tbl.add_row(
+                str(issue.row_index + 2),   # +2: 1-based + header row
+                f"[{style}]{label}[/{style}]",
+                issue.field,
+                issue.value,
+                f"[dim]{issue.detail}[/dim]",
+            )
+        console.print(issue_tbl)
+        console.print()
+    else:
+        console.print("[dim]  No issues found.[/dim]")
+        console.print()
+
+    # Summary line
+    if not result.can_ingest:
+        console.print(
+            f"[red bold]✗  Missing required fields: "
+            f"{', '.join(result.fields_missing)}. Cannot ingest.[/red bold]"
+        )
+        raise typer.Exit(1)
+
+    warn_count = len([i for i in result.issues if i.issue_type in (
+        "unknown_person", "unknown_client", "overallocated",
+        "zero_allocation", "missing_date",
+    )])
+    error_count = len([i for i in result.issues if i.issue_type in (
+        "malformed_date", "malformed_allocation",
+    )])
+
+    if error_count:
+        console.print(
+            f"[yellow]⚠  {error_count} error-level issue(s). "
+            f"Affected rows will fail during ingest.[/yellow]"
+        )
+    if warn_count:
+        console.print(
+            f"[yellow]⚠  {warn_count} warning-level issue(s). "
+            f"Review before running manager-os ingest.[/yellow]"
+        )
+    if not result.issues:
+        console.print("[green bold]✓  No issues. Safe to run manager-os ingest.[/green bold]")
+    console.print()
+
+
 if __name__ == "__main__":
     app()
