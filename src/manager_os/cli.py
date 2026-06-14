@@ -931,5 +931,304 @@ def status() -> None:
     console.print()
 
 
+# ---------------------------------------------------------------------------
+# Readiness check helpers
+# ---------------------------------------------------------------------------
+
+
+class _Check:
+    """A single PASS / WARN / FAIL result for the readiness command."""
+
+    __slots__ = ("label", "status", "note")
+
+    def __init__(self, label: str, status: str, note: str = "") -> None:
+        self.label = label
+        self.status = status  # "PASS" | "WARN" | "FAIL"
+        self.note = note
+
+
+# Canonical sample/fixture person names shipped with the repo.
+# If any of these appear in the live config, warn the user to replace them.
+_SAMPLE_PERSON_NAMES: frozenset[str] = frozenset({
+    "alice chen",
+    "bob martinez",
+    "carmen liu",
+    "david park",
+    "elena torres",
+})
+
+# Canonical sample/fixture client names shipped with the repo.
+_SAMPLE_CLIENT_NAMES: frozenset[str] = frozenset({
+    "acme corp",
+    "big retail co",
+    "finserv partners",
+    "medtech solutions",
+    "global logistics inc",
+})
+
+# (display_label, exact gitignore pattern that must be present)
+_REQUIRED_GITIGNORE_RULES: list[tuple[str, str]] = [
+    (".env", ".env"),
+    ("data/raw/", "data/raw/"),
+    ("data/processed/", "data/processed/"),
+    ("output/", "output/"),
+    ("*.duckdb", "*.duckdb"),
+    ("*.duckdb.wal", "*.duckdb.wal"),
+]
+
+
+def _gitignore_lines(gitignore_path: Path) -> frozenset[str]:
+    """Return active (non-comment, non-blank) lines from a .gitignore file."""
+    if not gitignore_path.exists():
+        return frozenset()
+    return frozenset(
+        line.strip()
+        for line in gitignore_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    )
+
+
+def _check_gitignore(gitignore_path: Path) -> list[_Check]:
+    """Return one _Check per required gitignore pattern."""
+    if not gitignore_path.exists():
+        return [
+            _Check(f".gitignore: {label}", "FAIL", ".gitignore not found")
+            for label, _ in _REQUIRED_GITIGNORE_RULES
+        ]
+    lines = _gitignore_lines(gitignore_path)
+    results: list[_Check] = []
+    for label, pattern in _REQUIRED_GITIGNORE_RULES:
+        covered = (
+            pattern in lines
+            # Accept "data/raw/*" or "data/raw/" for the "data/raw/" check
+            or (pattern.endswith("/") and (pattern + "*") in lines)
+            or (pattern.endswith("/") and (pattern.rstrip("/") + "/*") in lines)
+        )
+        results.append(_Check(
+            f".gitignore: {label}",
+            "PASS" if covered else "FAIL",
+            "" if covered else f"Pattern '{pattern}' not found in .gitignore",
+        ))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# manager-os readiness
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def readiness() -> None:
+    """Check whether Manager OS is safe and ready for real local data sources.
+
+    Inspects environment variables, source paths, config files, and .gitignore
+    rules. Prints a PASS / WARN / FAIL row for each check.
+
+    Exits 0 when no blocking failures are found (warnings are allowed).
+    Exits 1 when one or more checks are FAIL.
+
+    Run this before your first real-data ingest.
+    """
+    import os
+
+    from manager_os.config import get_settings, load_clients, load_people
+    from rich import box as rich_box
+    from rich.panel import Panel
+
+    settings = get_settings()
+    checks: list[_Check] = []
+
+    # ── 1. .env file or env vars present ─────────────────────────────────────
+    env_file = _REPO_ROOT / ".env"
+    _required_env_vars = [
+        "MANAGER_OS_VAULT_PATH",
+        "MANAGER_OS_DB_PATH",
+        "MANAGER_OS_FORECAST_CSV",
+        "MANAGER_OS_DEALS_CSV",
+    ]
+    if env_file.exists():
+        checks.append(_Check(".env file", "PASS"))
+    else:
+        missing_vars = [v for v in _required_env_vars if not os.environ.get(v)]
+        if missing_vars:
+            checks.append(_Check(
+                ".env file",
+                "FAIL",
+                f"No .env and missing vars: {', '.join(missing_vars)}",
+            ))
+        else:
+            checks.append(_Check(
+                ".env file",
+                "WARN",
+                "No .env — required vars found in environment",
+            ))
+
+    # ── 2. Vault path ─────────────────────────────────────────────────────────
+    vault = settings.vault_path
+    if not vault:
+        checks.append(_Check("MANAGER_OS_VAULT_PATH", "FAIL", "Not set"))
+    else:
+        vp = Path(vault)
+        checks.append(_Check("MANAGER_OS_VAULT_PATH", "PASS"))
+        if not vp.exists():
+            checks.append(_Check("vault directory exists", "FAIL", f"Not found: {vault}"))
+        else:
+            checks.append(_Check("vault directory exists", "PASS"))
+            if _within_repo(vp):
+                checks.append(_Check(
+                    "vault not in repo",
+                    "WARN",
+                    "Vault is inside the repo — notes may be accidentally staged",
+                ))
+            vault_lower = vault.lower()
+            if "googledrive" in vault_lower or "google drive" in vault_lower:
+                checks.append(_Check(
+                    "vault sync",
+                    "WARN",
+                    "Path appears Google Drive synced — sync conflicts possible; safe to continue",
+                ))
+
+    # ── 3. Forecast CSV ───────────────────────────────────────────────────────
+    fcsv = settings.forecast_csv
+    if not fcsv:
+        checks.append(_Check("MANAGER_OS_FORECAST_CSV", "FAIL", "Not set"))
+    else:
+        fp = Path(fcsv)
+        if not fp.exists():
+            checks.append(_Check("MANAGER_OS_FORECAST_CSV", "FAIL", f"File not found: {fcsv}"))
+        else:
+            checks.append(_Check("MANAGER_OS_FORECAST_CSV", "PASS"))
+
+    # ── 4. Deals CSV ──────────────────────────────────────────────────────────
+    dcsv = settings.deals_csv
+    if not dcsv:
+        checks.append(_Check("MANAGER_OS_DEALS_CSV", "FAIL", "Not set"))
+    else:
+        dp = Path(dcsv)
+        if not dp.exists():
+            checks.append(_Check("MANAGER_OS_DEALS_CSV", "FAIL", f"File not found: {dcsv}"))
+        else:
+            checks.append(_Check("MANAGER_OS_DEALS_CSV", "PASS"))
+
+    # ── 5. DB path is in a gitignored location ────────────────────────────────
+    db_str = settings.db_path
+    db_p = Path(db_str)
+    db_norm = db_str.replace("\\", "/")
+    db_gitignored = (
+        db_str.endswith(".duckdb")           # covered by *.duckdb rule
+        or not _within_repo(db_p)            # outside repo entirely
+        or "data/processed" in db_norm       # gitignored dir
+        or "data/demo" in db_norm            # gitignored dir
+    )
+    checks.append(_Check(
+        "DB path gitignored",
+        "PASS" if db_gitignored else "WARN",
+        "" if db_gitignored else (
+            f"'{db_str}' inside repo without .duckdb extension — verify .gitignore covers it"
+        ),
+    ))
+
+    # ── 6. config/people.yaml ─────────────────────────────────────────────────
+    try:
+        people = load_people(settings)
+        names_lower = {p.name.lower() for p in people}
+        overlap = names_lower & _SAMPLE_PERSON_NAMES
+        if overlap:
+            checks.append(_Check(
+                "config/people.yaml",
+                "WARN",
+                f"Contains sample names: {', '.join(sorted(overlap))}",
+            ))
+        else:
+            checks.append(_Check("config/people.yaml", "PASS", f"{len(people)} person(s)"))
+    except FileNotFoundError:
+        checks.append(_Check("config/people.yaml", "FAIL", "File not found"))
+    except Exception as exc:
+        checks.append(_Check("config/people.yaml", "FAIL", str(exc)))
+
+    # ── 7. config/clients.yaml ────────────────────────────────────────────────
+    try:
+        clients = load_clients(settings)
+        names_lower = {c.name.lower() for c in clients}
+        overlap = names_lower & _SAMPLE_CLIENT_NAMES
+        if overlap:
+            checks.append(_Check(
+                "config/clients.yaml",
+                "WARN",
+                f"Contains sample names: {', '.join(sorted(overlap))}",
+            ))
+        else:
+            checks.append(_Check("config/clients.yaml", "PASS", f"{len(clients)} client(s)"))
+    except FileNotFoundError:
+        checks.append(_Check("config/clients.yaml", "FAIL", "File not found"))
+    except Exception as exc:
+        checks.append(_Check("config/clients.yaml", "FAIL", str(exc)))
+
+    # ── 8. config/deal_aliases.yaml ───────────────────────────────────────────
+    config_dir_p = Path(settings.config_dir)
+    aliases_path = config_dir_p / "deal_aliases.yaml"
+    if aliases_path.exists():
+        checks.append(_Check("config/deal_aliases.yaml", "PASS"))
+    else:
+        checks.append(_Check("config/deal_aliases.yaml", "FAIL", f"Not found: {aliases_path}"))
+
+    # ── 9. .gitignore rules ───────────────────────────────────────────────────
+    checks.extend(_check_gitignore(_REPO_ROOT / ".gitignore"))
+
+    # ── Render results table ──────────────────────────────────────────────────
+    _STATUS_STYLE = {"PASS": "green", "WARN": "yellow", "FAIL": "red bold"}
+    _STATUS_ICON = {"PASS": "✓", "WARN": "⚠", "FAIL": "✗"}
+
+    console.print()
+    console.print(Panel.fit(
+        "[bold]Manager OS — Readiness Check[/bold]",
+        box=rich_box.ROUNDED,
+        border_style="cyan",
+    ))
+    console.print()
+
+    tbl = Table(
+        show_header=True,
+        header_style="bold",
+        box=rich_box.SIMPLE,
+        show_edge=False,
+        pad_edge=False,
+    )
+    tbl.add_column("Check", style="dim", no_wrap=True, min_width=35)
+    tbl.add_column("Status", no_wrap=True, min_width=8)
+    tbl.add_column("Notes")
+
+    for chk in checks:
+        style = _STATUS_STYLE.get(chk.status, "white")
+        icon = _STATUS_ICON.get(chk.status, "?")
+        tbl.add_row(
+            chk.label,
+            f"[{style}]{icon} {chk.status}[/{style}]",
+            f"[dim]{chk.note}[/dim]" if chk.note else "",
+        )
+    console.print(tbl)
+    console.print()
+
+    fails = [c for c in checks if c.status == "FAIL"]
+    warns = [c for c in checks if c.status == "WARN"]
+
+    if fails:
+        console.print(
+            f"[red bold]✗  {len(fails)} blocking failure(s).[/red bold] "
+            "Fix the items above before running ingest."
+        )
+        raise typer.Exit(1)
+    elif warns:
+        console.print(
+            f"[yellow]⚠  {len(warns)} warning(s) — review before connecting real data.[/yellow]\n"
+            "[green]   No blocking failures. Safe to proceed.[/green]"
+        )
+    else:
+        console.print(
+            "[green bold]✓  All checks passed. Safe to run manager-os ingest.[/green bold]"
+        )
+    console.print()
+
+
 if __name__ == "__main__":
     app()
