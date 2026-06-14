@@ -2220,6 +2220,153 @@ def signal_feedback() -> None:
     console.print()
 
 
+# ---------------------------------------------------------------------------
+# config-audit
+# ---------------------------------------------------------------------------
+
+@app.command("config-audit")
+def config_audit(
+    real_data_preview: bool = typer.Option(
+        False,
+        "--real-data-preview",
+        help="Scan vault and generate a suggestion report (no config writes).",
+    ),
+    vault_path_override: Optional[str] = typer.Option(
+        None,
+        "--vault-path",
+        help="Override MANAGER_OS_VAULT_PATH for this scan.",
+    ),
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        help="Maximum number of notes to scan.",
+    ),
+    output_json: bool = typer.Option(
+        False,
+        "--json",
+        help="Print summary as JSON instead of Rich text.",
+    ),
+    include_body_signals: bool = typer.Option(
+        False,
+        "--include-body-signals",
+        help="Also scan body text for additional candidates (light scan only; no body in output).",
+    ),
+) -> None:
+    """Scan Obsidian vault metadata and suggest config entries. Read-only; never modifies config."""
+    import json as _json
+    from datetime import date as _date
+    from pathlib import Path as _Path
+
+    from manager_os.config import get_settings, load_people, load_clients, load_deal_aliases
+    from manager_os.build.config_audit import scan_vault, render_report
+
+    if not real_data_preview:
+        console.print("[yellow]Use --real-data-preview to run the scan.[/yellow]")
+        console.print("Example:")
+        console.print("  manager-os config-audit --real-data-preview")
+        raise typer.Exit(0)
+
+    settings = get_settings()
+
+    # Determine vault path
+    vault = vault_path_override or settings.vault_path
+    if not vault:
+        console.print(
+            "[red]No vault path configured. "
+            "Set MANAGER_OS_VAULT_PATH in .env or use --vault-path.[/red]"
+        )
+        raise typer.Exit(1)
+
+    # Safety: output/ must be gitignored
+    output_root = _Path("output")
+    gitignore = _Path(".gitignore")
+    if gitignore.exists():
+        gitignore_text = gitignore.read_text(encoding="utf-8")
+        if "output/" not in gitignore_text and "output" not in gitignore_text:
+            console.print(
+                "[red]Safety check failed: output/ is not listed in .gitignore. "
+                "Add 'output/' to .gitignore before running config-audit.[/red]"
+            )
+            raise typer.Exit(1)
+    else:
+        console.print("[yellow]Warning: no .gitignore found. Proceeding, but ensure output/ is excluded from git.[/yellow]")
+
+    # Load existing config for gap analysis
+    try:
+        people = load_people(settings)
+        existing_people = [p.name for p in people]
+    except Exception:
+        existing_people = []
+    try:
+        clients = load_clients(settings)
+        existing_clients = [c.name for c in clients]
+    except Exception:
+        existing_clients = []
+    try:
+        deal_aliases = load_deal_aliases(settings)
+        existing_deals = list(deal_aliases.values())
+    except Exception:
+        existing_deals = []
+
+    console.print(f"[dim]Scanning vault: {vault}[/dim]")
+    if limit:
+        console.print(f"[dim]Limit: {limit} notes[/dim]")
+
+    try:
+        result = scan_vault(
+            vault_path=vault,
+            existing_people=existing_people,
+            existing_clients=existing_clients,
+            existing_deals=existing_deals,
+            limit=limit,
+            include_body_signals=include_body_signals,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    # Write report
+    today = _date.today()
+    report_dir = output_root / "config_audit"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / f"{today.isoformat()}-real-data-preview.md"
+    report_text = render_report(result, report_date=today)
+    report_path.write_text(report_text, encoding="utf-8")
+
+    if output_json:
+        summary = {
+            "notes_scanned": result.notes_scanned,
+            "notes_skipped": result.notes_skipped,
+            "candidate_people": len(result.candidate_people),
+            "candidate_clients": len(result.candidate_clients),
+            "candidate_deals": len(result.candidate_deals),
+            "config_gaps": len(result.config_gaps),
+            "report_path": str(report_path),
+        }
+        console.print(_json.dumps(summary, indent=2))
+    else:
+        console.print()
+        console.print(f"[green]Report written to:[/green] {report_path}")
+        console.print()
+
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column("Metric", style="dim")
+        table.add_column("Value", style="bold")
+        table.add_row("Notes scanned", str(result.notes_scanned))
+        table.add_row("Notes skipped", str(result.notes_skipped))
+        table.add_row("Candidate people", str(len(result.candidate_people)))
+        table.add_row("Candidate clients", str(len(result.candidate_clients)))
+        table.add_row("Candidate deals", str(len(result.candidate_deals)))
+        table.add_row("Config gaps", str(len(result.config_gaps)))
+        console.print(table)
+        console.print()
+        console.print(
+            "[yellow bold]⚠  This report may contain real names from your vault. "
+            "Do not commit output/config_audit/.[/yellow bold]"
+        )
+        console.print()
+
+
 if __name__ == "__main__":
     app()
 
