@@ -60,6 +60,40 @@ _DIR_TYPE_MAP = {
 
 _SKIP_DIRS = {".obsidian", ".git", ".trash"}
 
+# Filenames that look like note topics, not entity names.  Any stem that
+# normalises to one of these strings (after lowercasing and stripping
+# punctuation) should NOT become a client/deal candidate.
+_GENERIC_NOTE_NAMES: frozenset[str] = frozenset({
+    "engagement status", "engagement-status",
+    "discovery",
+    "kickoff", "kick off",
+    "weekly status", "weekly-status",
+    "sales handover", "sales-handover",
+    "transition notes", "transition-notes",
+    "general",
+    "sync",
+    "about",
+    "backlog",
+    "staffing",
+    "escalation",
+    "support",
+    "proposal",
+    "billing",
+    "issues",
+    "feedback",
+    "sprint retro", "sprint-retro",
+    "sprint review", "sprint-review",
+    "stand ups", "stand-ups", "standups",
+    "tech review", "tech-review",
+    "intro",
+    "tasks",
+    "notes",
+    "overview",
+    "readme",
+    "index",
+    "template",
+})
+
 # Body-text keywords (only used when include_body_signals=True)
 _BODY_PERSON_PATTERNS = [re.compile(r"\b1[:\-–—]1\b", re.IGNORECASE)]
 _BODY_CLIENT_PATTERNS = [
@@ -155,6 +189,10 @@ def scan_vault(
         if any(skip in md_file.parts for skip in _SKIP_DIRS):
             result.notes_skipped += 1
             continue
+        # Skip template files
+        if md_file.name == "_TEMPLATE.md" or md_file.stem.upper() == "_TEMPLATE":
+            result.notes_skipped += 1
+            continue
 
         result.notes_scanned += 1
         _scan_file(
@@ -197,6 +235,63 @@ def _scan_file(
     note_type = _infer_note_type(fm, md_file)
     category = _TYPE_MAP.get(note_type)
 
+    tags = fm.get("tags", [])
+    if isinstance(tags, str):
+        tags = [tags]
+
+    # -----------------------------------------------------------------------
+    # Folder-aware heuristics (run before generic category logic)
+    # -----------------------------------------------------------------------
+
+    # 1. clients/<client-folder>/<note>.md
+    #    → use <client-folder> as client candidate; skip generic note filenames.
+    client_folder_candidate = _extract_client_folder_candidate(md_file, vault)
+    if client_folder_candidate is not None:
+        folder_name, fm_entity = client_folder_candidate
+        if fm_entity:
+            # Frontmatter entity beats folder name → high confidence
+            # Record folder name as an alias suggestion in extra
+            _add_candidate(
+                result, seen_names,
+                CandidateEntry(
+                    name=fm_entity, confidence="high",
+                    source="frontmatter:entity", note_path=rel_path,
+                    category="client", note_type=note_type,
+                    extra=f"folder_alias={folder_name}",
+                ),
+            )
+        else:
+            # No frontmatter entity → use folder name (medium confidence)
+            _add_candidate(
+                result, seen_names,
+                CandidateEntry(
+                    name=folder_name, confidence="medium",
+                    source="folder", note_path=rel_path,
+                    category="client", note_type=note_type,
+                ),
+            )
+        return  # handled; skip generic logic below
+
+    # 2. team/directs/<person>.md  → candidate person from stem
+    direct_name = _extract_directs_candidate(md_file, vault)
+    if direct_name is not None:
+        fm_entity = _first_value(fm, _FM_PERSON_KEYS)
+        name = fm_entity or direct_name
+        confidence = "high" if fm_entity else "medium"
+        source = "frontmatter:entity" if fm_entity else "folder:team/directs"
+        _add_candidate(
+            result, seen_names,
+            CandidateEntry(
+                name=name, confidence=confidence,
+                source=source, note_path=rel_path,
+                category="person", note_type=note_type,
+            ),
+        )
+        return  # handled
+
+    # -----------------------------------------------------------------------
+    # Generic category logic (existing behaviour)
+    # -----------------------------------------------------------------------
     # Infer category from directory if not set by note_type
     if category is None:
         for part in reversed(md_file.parts):
@@ -204,17 +299,6 @@ def _scan_file(
             if cat:
                 category = cat
                 break
-
-    # Title: from frontmatter > first heading > filename
-    title = (
-        str(fm.get("title", "")).strip()
-        or _first_heading(body)
-        or md_file.stem.replace("_", " ").replace("-", " ")
-    )
-
-    tags = fm.get("tags", [])
-    if isinstance(tags, str):
-        tags = [tags]
 
     # --- High confidence: explicit frontmatter entity field ---
     if category == "person":
@@ -230,9 +314,9 @@ def _scan_file(
                 ),
             )
         else:
-            # Medium: infer from filename / title
+            # Medium: infer from filename / title only if not generic
             stem_name = _clean_stem(md_file.stem)
-            if stem_name:
+            if stem_name and not _is_generic_name(md_file.stem):
                 _add_candidate(
                     result, seen_names,
                     CandidateEntry(
@@ -254,8 +338,9 @@ def _scan_file(
                 ),
             )
         else:
+            # Only use filename if it is NOT a generic topic name
             stem_name = _clean_stem(md_file.stem)
-            if stem_name:
+            if stem_name and not _is_generic_name(md_file.stem):
                 _add_candidate(
                     result, seen_names,
                     CandidateEntry(
@@ -278,7 +363,7 @@ def _scan_file(
             )
         else:
             stem_name = _clean_stem(md_file.stem)
-            if stem_name:
+            if stem_name and not _is_generic_name(md_file.stem):
                 _add_candidate(
                     result, seen_names,
                     CandidateEntry(
@@ -376,6 +461,12 @@ def _compute_gaps(
         if nl not in existing_clients:
             result.config_gaps.append(f"client: {entry.name!r} not in config/clients.yaml")
             aliases = list({entry.name, entry.name.lower(), entry.name.replace(" ", "").lower()})
+            # If the folder name was recorded as an alias, include it
+            if entry.extra and entry.extra.startswith("folder_alias="):
+                folder_alias = entry.extra.split("=", 1)[1].strip()
+                for a in (folder_alias, folder_alias.lower(), folder_alias.replace(" ", "").lower()):
+                    if a not in aliases:
+                        aliases.append(a)
             result.possible_aliases.append({
                 "category": "client",
                 "name": entry.name,
@@ -582,3 +673,85 @@ def _guess_category_from_context(note_type: str, tags: list) -> str | None:
     if "deal" in tags_lower or "sow" in tags_lower:
         return "deal"
     return None
+
+
+def _is_generic_name(stem: str) -> bool:
+    """Return True if the filename stem is a generic note-topic name."""
+    normalised = stem.lower().replace("_", " ").replace("-", " ").strip()
+    return normalised in _GENERIC_NOTE_NAMES
+
+
+def _extract_client_folder_candidate(
+    md_file: Path, vault: Path
+) -> tuple[str, str] | None:
+    """Detect clients/<folder>/<note>.md pattern.
+
+    Returns (folder_display_name, fm_entity) if the pattern matches and the
+    filename stem is generic (or any note inside that folder), else None.
+
+    folder_display_name — cleaned form of the folder name
+    fm_entity           — entity from frontmatter (may be empty string)
+    """
+    try:
+        rel_parts = md_file.relative_to(vault).parts
+    except ValueError:
+        return None
+
+    # Need at least clients/<folder>/<note>.md  → 3 parts
+    if len(rel_parts) < 3:
+        return None
+
+    # Find 'clients' anywhere in the relative path (not just top-level)
+    try:
+        clients_idx = next(
+            i for i, p in enumerate(rel_parts) if p.lower() == "clients"
+        )
+    except StopIteration:
+        return None
+
+    # The client folder is the part right after 'clients'
+    folder_idx = clients_idx + 1
+    if folder_idx >= len(rel_parts) - 1:
+        # Nothing after folder (i.e., the file IS the folder)
+        return None
+
+    folder_stem = rel_parts[folder_idx]
+    folder_display = _clean_stem(folder_stem) or folder_stem.replace("-", " ").replace("_", " ").title()
+
+    # Read frontmatter entity for this note
+    try:
+        raw = md_file.read_text(encoding="utf-8", errors="replace")
+        fm, _ = _parse_frontmatter(raw)
+        fm_entity = _first_value(fm, _FM_CLIENT_KEYS)
+    except OSError:
+        fm_entity = ""
+
+    return folder_display, fm_entity
+
+
+def _extract_directs_candidate(md_file: Path, vault: Path) -> str | None:
+    """Detect team/directs/<person>.md pattern.
+
+    Returns the cleaned person name from the stem, or None if the pattern
+    does not match or the stem is generic.
+    """
+    try:
+        rel_parts = md_file.relative_to(vault).parts
+    except ValueError:
+        return None
+
+    # Need team/directs/<person>.md → at least 3 parts
+    if len(rel_parts) < 3:
+        return None
+
+    # Find 'directs' in path with a 'team' parent
+    for i, part in enumerate(rel_parts):
+        if part.lower() == "directs" and i > 0 and rel_parts[i - 1].lower() == "team":
+            # The note must be directly inside directs/ (one level only)
+            if i + 1 == len(rel_parts) - 1:
+                stem = rel_parts[-1].replace(".md", "") if rel_parts[-1].endswith(".md") else md_file.stem
+                name = _clean_stem(stem)
+                if name and not _is_generic_name(stem):
+                    return name
+    return None
+

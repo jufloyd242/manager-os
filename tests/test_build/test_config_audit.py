@@ -127,6 +127,64 @@ class TestScanVault:
         assert "Delivery on track" not in report
         assert "SOW review" not in report
 
+    # -----------------------------------------------------------------------
+    # New: folder heuristics
+    # -----------------------------------------------------------------------
+
+    def test_client_folder_becomes_client_candidate(self) -> None:
+        """clients/zephyr-dynamics/<notes>.md → 'Zephyr Dynamics' as client."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        client_names = [e.name for e in result.candidate_clients]
+        # The folder name should surface the client
+        assert any("Zephyr" in n for n in client_names), f"Expected Zephyr in {client_names}"
+
+    def test_generic_filename_under_client_folder_not_a_client_candidate(self) -> None:
+        """engagement-status.md and kickoff.md inside clients/ folder must NOT become candidates."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        client_names = [e.name.lower() for e in result.candidate_clients]
+        assert "engagement status" not in client_names
+        assert "engagement-status" not in client_names
+        assert "kickoff" not in client_names
+        assert "weekly status" not in client_names
+
+    def test_frontmatter_entity_beats_folder_name(self) -> None:
+        """clients/nova-systems/weekly-status.md has entity=Nova Systems Inc → prefer that."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        client_names = [e.name for e in result.candidate_clients]
+        # Should have the frontmatter entity name
+        assert "Nova Systems Inc" in client_names, f"Expected 'Nova Systems Inc' in {client_names}"
+        # Should NOT have just the folder name as canonical
+        assert "Nova Systems" not in client_names
+
+    def test_folder_name_becomes_alias_when_frontmatter_overrides(self) -> None:
+        """When frontmatter entity overrides folder, folder name appears in aliases."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        nova_entry = next((e for e in result.candidate_clients if e.name == "Nova Systems Inc"), None)
+        assert nova_entry is not None
+        assert "folder_alias=Nova Systems" in nova_entry.extra or nova_entry.extra.startswith("folder_alias=")
+
+    def test_team_directs_creates_candidate_person(self) -> None:
+        """team/directs/morgan-patel.md → 'Morgan Patel' as candidate person."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        people_names = [e.name for e in result.candidate_people]
+        assert "Morgan Patel" in people_names, f"Expected 'Morgan Patel' in {people_names}"
+
+    def test_team_directs_confidence_is_medium_without_frontmatter(self) -> None:
+        result = scan_vault(str(FIXTURE_VAULT))
+        morgan = next((e for e in result.candidate_people if e.name == "Morgan Patel"), None)
+        assert morgan is not None
+        assert morgan.confidence == "medium"
+        assert "directs" in morgan.source
+
+    def test_template_files_are_ignored(self) -> None:
+        """_TEMPLATE.md should be skipped, not scanned as a candidate."""
+        result = scan_vault(str(FIXTURE_VAULT))
+        all_candidate_names = [e.name for e in result.all_candidates()]
+        # The template has entity='CLIENT_NAME' — should not appear
+        assert "CLIENT_NAME" not in all_candidate_names
+        # Template should be in skipped count
+        assert result.notes_skipped >= 1
+
 
 # ---------------------------------------------------------------------------
 # Render report
