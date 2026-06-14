@@ -39,12 +39,14 @@ manager-os dashboard
 
 | Command | Description |
 |---------|-------------|
-| `manager-os ingest [--source all\|obsidian\|forecast\|deals\|summary\|gws]` | Ingest from configured sources |
-| `manager-os extract [--mode rules\|llm\|both]` | Run signal + action item + decision extraction |
+| `manager-os ingest [--source all\|obsidian\|forecast\|deals\|summary\|gws] [--verbose]` | Ingest from configured sources; `-v` shows per-source skip reasons |
+| `manager-os extract [--mode rules\|llm\|both] [--verbose]` | Run signal + action item + decision extraction; `-v` shows skip reasons |
 | `manager-os brief [--date YYYY-MM-DD]` | Generate today's markdown daily brief |
 | `manager-os dashboard` | Launch the Streamlit dashboard |
 | `manager-os meeting-prep [--date] [--meeting SLUG] [--llm]` | Generate meeting prep docs |
 | `manager-os closeout [--date] [--weekly\|--no-weekly]` | Generate EOD closeout + optional weekly exec update |
+| `manager-os status` | Show DB table counts, open signals/actions, and mode (demo/sample/production) |
+| `manager-os demo-reset [--date] [--dry-run] [--yes-demo]` | Rebuild demo DB + sample artifacts from fixture data |
 
 ---
 
@@ -126,7 +128,7 @@ See [AGENTS.md](AGENTS.md) for the full module map and design decisions.
 ## Testing
 
 ```bash
-pytest tests/                    # 304 tests, all in-memory DuckDB
+pytest tests/                    # 426 tests, all in-memory DuckDB
 pytest tests/ --cov --cov-report=html
 ```
 
