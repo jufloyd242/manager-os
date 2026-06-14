@@ -165,3 +165,159 @@ def test_write_brief_default_path(conn, tmp_path: Path, monkeypatch) -> None:
     out_file = write_brief_to_file(brief)
     assert out_file.name == "2026-06-13.md"
     assert out_file.exists()
+
+
+# ===========================================================================
+# New: ranking, limits, filters, source evidence
+# ===========================================================================
+
+
+def _seed_signal_ext(
+    conn,
+    entity_name: str,
+    signal_type: str = "risk",
+    severity: str = "high",
+    summary: str = "Test signal",
+    why_it_matters: str = "Because it matters",
+    requires_manager_attention: bool = False,
+    confidence: float = 1.0,
+    source_path: str = "",
+    due_date: date | None = None,
+    status: str = "open",
+) -> str:
+    """Seed a signal with full control over ranking-relevant fields."""
+    sig_id = content_hash(f"ext::{entity_name}::{severity}::{summary}::{source_path}")
+    conn.execute(
+        """
+        INSERT INTO signals
+            (id, signal_date, source, source_path, entity_type, entity_name,
+             signal_type, severity, summary, why_it_matters,
+             requires_manager_attention, confidence, due_date, status,
+             created_at, updated_at)
+        VALUES (?, ?, 'rule', ?, 'client', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """,
+        [
+            sig_id,
+            date.today().isoformat(),
+            source_path,
+            entity_name,
+            signal_type,
+            severity,
+            summary,
+            why_it_matters,
+            requires_manager_attention,
+            confidence,
+            due_date,
+            status,
+        ],
+    )
+    return sig_id
+
+
+# ------------------------------------------------------------------
+# Ranking
+# ------------------------------------------------------------------
+
+
+class TestSignalRanking:
+    def test_high_ranks_above_medium(self, conn) -> None:
+        _seed_signal_ext(conn, "Medium Corp", severity="medium", summary="Medium signal")
+        _seed_signal_ext(conn, "High Corp", severity="high", summary="High signal")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert brief.content.index("High signal") < brief.content.index("Medium signal")
+
+    def test_requires_manager_ranks_higher(self, conn) -> None:
+        _seed_signal_ext(conn, "Normal Corp", severity="high",
+                         summary="Normal signal", requires_manager_attention=False)
+        _seed_signal_ext(conn, "Urgent Corp", severity="high",
+                         summary="Urgent signal", requires_manager_attention=True)
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert brief.content.index("Urgent signal") < brief.content.index("Normal signal")
+
+    def test_due_soon_ranks_higher(self, conn) -> None:
+        today = date.today()
+        _seed_signal_ext(conn, "Far Corp", severity="high", summary="Far signal",
+                         due_date=today + timedelta(days=30))
+        _seed_signal_ext(conn, "Near Corp", severity="high", summary="Near signal",
+                         due_date=today + timedelta(days=2))
+        brief = generate_daily_brief(conn, target_date=today)
+        assert brief.content.index("Near signal") < brief.content.index("Far signal")
+
+
+# ------------------------------------------------------------------
+# Section limits and overflow
+# ------------------------------------------------------------------
+
+
+class TestSectionLimits:
+    def test_default_limit_truncates_risks(self, conn) -> None:
+        for i in range(5):
+            _seed_signal_ext(conn, f"Corp{i}", severity="high", summary=f"Risk alpha{i}")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        shown = sum(1 for i in range(5) if f"Risk alpha{i}" in brief.content)
+        assert shown == 3  # default risk limit is 3
+
+    def test_overflow_line_shown_when_items_hidden(self, conn) -> None:
+        for i in range(5):
+            _seed_signal_ext(conn, f"Corp{i}", severity="high", summary=f"Risk beta{i}")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        # 5 total - 3 shown = 2 hidden
+        assert "2 additional risk signal(s) hidden" in brief.content
+
+    def test_max_items_overrides_default_limit(self, conn) -> None:
+        for i in range(6):
+            _seed_signal_ext(conn, f"Corp{i}", severity="high", summary=f"Risk gamma{i}")
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=5)
+        shown = sum(1 for i in range(6) if f"Risk gamma{i}" in brief.content)
+        assert shown == 5
+
+    def test_max_items_one_reduces_to_one(self, conn) -> None:
+        for i in range(4):
+            _seed_signal_ext(conn, f"Corp{i}", severity="high", summary=f"Risk delta{i}")
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=1)
+        shown = sum(1 for i in range(4) if f"Risk delta{i}" in brief.content)
+        assert shown == 1
+        assert "3 additional risk signal(s) hidden" in brief.content
+
+
+# ------------------------------------------------------------------
+# Low-priority filter
+# ------------------------------------------------------------------
+
+
+class TestLowPriorityFilter:
+    def test_low_severity_hidden_by_default(self, conn) -> None:
+        _seed_signal_ext(conn, "Low Corp", severity="low", summary="Low-priority signal")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert "Low-priority signal" not in brief.content
+
+    def test_include_low_priority_shows_low_signals(self, conn) -> None:
+        _seed_signal_ext(conn, "Low Corp", severity="low", summary="Low-priority signal")
+        brief = generate_daily_brief(conn, target_date=date.today(), include_low_priority=True)
+        assert "Low-priority signal" in brief.content
+
+    def test_high_signals_always_shown(self, conn) -> None:
+        _seed_signal_ext(conn, "High Corp", severity="high", summary="High-priority signal")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert "High-priority signal" in brief.content
+
+
+# ------------------------------------------------------------------
+# Source evidence
+# ------------------------------------------------------------------
+
+
+class TestSourceEvidence:
+    def test_source_path_basename_shown_in_brief(self, conn) -> None:
+        _seed_signal_ext(conn, "Source Corp", severity="high", summary="Risky thing",
+                         source_path="/vault/client_notes.md")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert "client_notes.md" in brief.content
+
+    def test_no_source_path_does_not_error(self, conn) -> None:
+        _seed_signal_ext(conn, "No Source Corp", severity="high", summary="No source sig",
+                         source_path="")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert "No source sig" in brief.content
+

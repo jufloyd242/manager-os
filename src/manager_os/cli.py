@@ -673,6 +673,16 @@ def extract(
 def brief(
     brief_date: Optional[str] = typer.Option(None, "--date"),
     output: Optional[str] = typer.Option(None, "--output"),
+    max_items: Optional[int] = typer.Option(
+        None,
+        "--max-items",
+        help="Override the per-section item limit (default: risks=3, people=3, deals=3, follow-ups=3, meetings=5).",
+    ),
+    include_low_priority: bool = typer.Option(
+        False,
+        "--include-low-priority",
+        help="Include severity='low' signals that are normally hidden.",
+    ),
 ) -> None:
     """Generate a daily markdown brief."""
     from manager_os.config import get_settings
@@ -683,7 +693,12 @@ def brief(
     target_date = date.fromisoformat(brief_date) if brief_date else date.today()
     conn = get_connection(settings.db_path)
 
-    b = generate_daily_brief(conn, target_date=target_date)
+    b = generate_daily_brief(
+        conn,
+        target_date=target_date,
+        max_items=max_items,
+        include_low_priority=include_low_priority,
+    )
     out_path = write_brief_to_file(b, output_path=output)
     console.print(f"[green]Brief written to:[/green] {out_path}")
     console.print(f"  {len(b.signal_ids)} signal(s) included")
