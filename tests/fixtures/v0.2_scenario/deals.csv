@@ -1,0 +1,6 @@
+account,deal_name,stage,close_date,technical_owner,ae_name,loe_status,sow_status
+CloudCo,CloudCo Customer Support AI,SOW Review,2026-06-20,Morgan Patel,Taylor Kim,not-started,pending
+NovaTech Inc,NovaTech AI Platform Phase 2,Proposal,2026-08-15,Jordan Lee,Alex Nguyen,in-review,not-started
+RetailStream,RetailStream Data Platform,Closed Won,2026-05-01,Casey Wong,Jamie Ortiz,signed,signed
+PharmaGen,PharmaGen Clinical NLP,Discovery,2026-09-30,,Chris Yamamoto,not-started,not-started
+Global Media Group,GMG Content Intelligence,SOW Review,2026-06-22,Sam Rivera,Dana Park,signed,pending

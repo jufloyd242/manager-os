@@ -1,0 +1,37 @@
+[
+  {
+    "id": "v02-cal-001",
+    "summary": "1:1 with Jordan Lee",
+    "start": {"dateTime": "2026-06-14T09:00:00-07:00"},
+    "end":   {"dateTime": "2026-06-14T09:30:00-07:00"},
+    "attendees": [
+      {"email": "jordan@example.com", "displayName": "Jordan Lee"},
+      {"email": "manager@example.com", "displayName": "Manager"}
+    ],
+    "description": "Weekly 1:1 — check in on NovaTech milestone, morale, and career progression."
+  },
+  {
+    "id": "v02-cal-002",
+    "summary": "CloudCo Deal Sync with Taylor Kim",
+    "start": {"dateTime": "2026-06-14T14:00:00-07:00"},
+    "end":   {"dateTime": "2026-06-14T14:30:00-07:00"},
+    "attendees": [
+      {"email": "taylor@cloudco.com", "displayName": "Taylor Kim"},
+      {"email": "morgan@example.com", "displayName": "Morgan Patel"},
+      {"email": "manager@example.com", "displayName": "Manager"}
+    ],
+    "description": "Review SOW redlines and LOE sign-off status. Close date June 20. Need AE to unblock legal."
+  },
+  {
+    "id": "v02-cal-003",
+    "summary": "NovaTech Weekly Status Call",
+    "start": {"dateTime": "2026-06-14T15:00:00-07:00"},
+    "end":   {"dateTime": "2026-06-14T16:00:00-07:00"},
+    "attendees": [
+      {"email": "jordan@example.com", "displayName": "Jordan Lee"},
+      {"email": "sam@example.com", "displayName": "Sam Rivera"},
+      {"email": "vp-data@novatech.com", "displayName": "NovaTech VP of Data"}
+    ],
+    "description": "Discuss model drift issue, data pipeline delay, and Phase 1 milestone risk."
+  }
+]

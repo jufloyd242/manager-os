@@ -1,0 +1,10 @@
+person,week_start,client,project,allocation_pct,forecast_type
+Jordan Lee,2026-06-16,NovaTech Inc,AI Platform Phase 1,100,confirmed
+Jordan Lee,2026-06-23,NovaTech Inc,AI Platform Phase 1,100,confirmed
+Sam Rivera,2026-06-16,NovaTech Inc,AI Platform Phase 1,80,confirmed
+Sam Rivera,2026-06-23,NovaTech Inc,AI Platform Phase 1,80,confirmed
+Morgan Patel,2026-06-16,CloudCo,Customer Support Automation,20,likely
+Casey Wong,2026-06-16,RetailStream,Data Warehouse Modernization,100,confirmed
+Casey Wong,2026-06-23,RetailStream,Data Warehouse Modernization,100,confirmed
+Casey Wong,2026-06-16,NovaTech Inc,AI Platform Phase 1 — Surge,60,likely
+Riley Santos,2026-06-23,,Bench,0,confirmed
