@@ -121,6 +121,7 @@ def _load_signals(conn, target_date: date) -> list[Signal]:
                created_at, updated_at
         FROM signals
         WHERE status = 'open'
+          AND (rating IS NULL OR rating NOT IN ('not_useful', 'duplicate', 'wrong_entity', 'resolved'))
         ORDER BY
             CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
                           WHEN 'medium' THEN 2 ELSE 3 END,

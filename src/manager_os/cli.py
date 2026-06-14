@@ -2112,5 +2112,114 @@ def profile_deals(
     console.print()
 
 
+# ---------------------------------------------------------------------------
+# signal-rate
+# ---------------------------------------------------------------------------
+
+@app.command("signal-rate")
+def signal_rate(
+    signal_id: str = typer.Argument(..., help="ID of the signal to rate."),
+    rating: str = typer.Argument(..., help="Rating: useful | not_useful | duplicate | wrong_entity | too_low_priority | snoozed | resolved"),
+    note: Optional[str] = typer.Option(None, "--note", help="Optional free-text note about this rating."),
+    snooze_until: Optional[str] = typer.Option(
+        None,
+        "--snooze-until",
+        metavar="YYYY-MM-DD",
+        help="Date until which to snooze the signal (only valid for rating='snoozed').",
+    ),
+) -> None:
+    """Rate a signal's usefulness to measure Manager OS output quality."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.signal_feedback import rate_signal, VALID_RATINGS
+
+    if rating not in VALID_RATINGS:
+        console.print(f"[red]Invalid rating {rating!r}.[/red]")
+        console.print(f"Valid values: {', '.join(sorted(VALID_RATINGS))}")
+        raise typer.Exit(1)
+
+    snooze_date: Optional[date] = None
+    if snooze_until:
+        try:
+            snooze_date = date.fromisoformat(snooze_until)
+        except ValueError:
+            console.print(f"[red]Invalid --snooze-until date {snooze_until!r}. Use YYYY-MM-DD.[/red]")
+            raise typer.Exit(1)
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+
+    try:
+        rate_signal(conn, signal_id=signal_id, rating=rating, note=note, snooze_until=snooze_date)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[green]✓[/green]  Signal [bold]{signal_id[:16]}...[/bold] rated [bold]{rating}[/bold]")
+    if note:
+        console.print(f"   Note: {note}")
+    if snooze_date:
+        console.print(f"   Snoozed until: {snooze_date}")
+
+
+# ---------------------------------------------------------------------------
+# signal-feedback
+# ---------------------------------------------------------------------------
+
+@app.command("signal-feedback")
+def signal_feedback() -> None:
+    """Show a concise signal usefulness report."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.signal_feedback import get_feedback_report
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+    report = get_feedback_report(conn)
+
+    console.print()
+    console.print("[bold cyan]Signal Usefulness Report[/bold cyan]")
+    console.print("─" * 40)
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("Metric", style="dim")
+    table.add_column("Value", style="bold")
+
+    table.add_row("Unrated open signals", str(report["unrated_open"]))
+    console.print(table)
+    console.print()
+
+    rated_table = Table(show_header=True, header_style="bold")
+    rated_table.add_column("Rating", style="dim")
+    rated_table.add_column("Count", justify="right")
+
+    rated_table.add_row("useful", str(report["useful"]))
+    rated_table.add_row("not_useful", str(report["not_useful"]))
+    rated_table.add_row("duplicate", str(report["duplicate"]))
+    rated_table.add_row("wrong_entity", str(report["wrong_entity"]))
+    rated_table.add_row("too_low_priority", str(report["too_low_priority"]))
+    rated_table.add_row("snoozed", str(report["snoozed"]))
+    rated_table.add_row("resolved", str(report["resolved"]))
+    rated_table.add_row("─" * 20, "─" * 6)
+    rated_table.add_row("[bold]Total rated[/bold]", f"[bold]{report['total_rated']}[/bold]")
+    console.print(rated_table)
+    console.print()
+
+    usefulness_pct = report["usefulness_pct"]
+    color = "green" if usefulness_pct >= 70 else ("yellow" if usefulness_pct >= 40 else "red")
+    console.print(
+        f"[bold]Usefulness:[/bold] [{color}]{usefulness_pct:.0f}%[/{color}]"
+        f"  (useful / rated, excluding snoozed + resolved)"
+    )
+
+    if report["top_rejection_reasons"]:
+        console.print()
+        console.print("[bold]Top rejection reasons:[/bold]")
+        for reason, count in report["top_rejection_reasons"]:
+            console.print(f"  {reason}: {count}")
+    console.print()
+
+
 if __name__ == "__main__":
     app()
+

@@ -200,6 +200,12 @@ CREATE TABLE IF NOT EXISTS signal_status_log (
 );
 """
 
+# Migrations applied after the main DDL.  Each statement must be idempotent.
+_MIGRATIONS_DDL = """
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS rating VARCHAR;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS snooze_until DATE;
+"""
+
 _ALL_TABLES = [
     "raw_documents",
     "people",
@@ -234,9 +240,14 @@ def get_connection(db_path: str = ":memory:") -> duckdb.DuckDBPyConnection:
 
 
 def init_schema(conn: duckdb.DuckDBPyConnection) -> None:
-    """Create all tables if they don't already exist."""
+    """Create all tables if they don't already exist, then apply migrations."""
     conn.executemany("", [])  # no-op to ensure connection is alive
     for statement in _SCHEMA_DDL.strip().split(";\n\n"):
+        stmt = statement.strip()
+        if stmt:
+            conn.execute(stmt)
+    # Idempotent column additions / schema migrations
+    for statement in _MIGRATIONS_DDL.strip().split(";"):
         stmt = statement.strip()
         if stmt:
             conn.execute(stmt)
