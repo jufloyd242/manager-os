@@ -88,6 +88,11 @@ _NOISY_TITLE_LOWER = [
     "standup",
     "leadership standup",
     "flex pitch",
+    # Support/process notes that are process documentation, not live risks
+    "google support",
+    "support process",
+    "escalation process",
+    "transition",
 ]
 
 # A snippet is only actionable if it contains one of these phrases,

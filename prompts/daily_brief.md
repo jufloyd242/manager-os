@@ -1,7 +1,11 @@
 # Daily Brief -- {{ brief_date }}
 
+{% if quality_filtered %}
+Showing {{ shown_total }} of {{ total_candidates }} candidate item(s) after quality filters.
+{% else %}
 Showing {{ shown_total }} of {{ total_candidates }} candidate item(s).
-Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Decisions: {{ total_decisions }} | Meetings today: {{ meeting_count }}
+{% endif %}
+Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Waiting on: {{ total_waiting_on }} | Decisions: {{ total_decisions }} | Meetings today: {{ meeting_count }}
 {% if total_hidden > 0 %}
 *{{ total_hidden }} item(s) not shown -- see dashboard*
 {% endif %}
@@ -107,6 +111,9 @@ Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Decisions: {
 - **{{ ai.assigned_to }}**: {{ ai.description }}
 {% if ai.due_date %}  - By: {{ ai.due_date }}
 {% endif %}{% endfor %}
+{% if overflow.waiting_on > 0 %}
+*{{ overflow.waiting_on }} additional waiting-on item(s) not shown.*
+{% endif %}
 
 {% endif %}
 {% if other_signals %}
@@ -122,4 +129,4 @@ Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Decisions: {
 {% endif %}
 
 ---
-*Generated {{ generated_at }} | showing {{ shown_total }} of {{ total_candidates }} items ({{ total_signals }} signals · {{ total_follow_ups }} follow-ups)*
+*Generated {{ generated_at }} | {{ shown_total }} of {{ total_candidates }} items shown ({{ total_signals }} signals · {{ total_follow_ups }} follow-ups · {{ total_waiting_on }} waiting-on)*

@@ -670,3 +670,135 @@ class TestJunkActionItemSuppression:
         assert "Alice" in brief.content or "staffing gap" in brief.content
 
 
+# ---------------------------------------------------------------------------
+# TestItemCounting — Requirements: counting/budgeting correctness
+# ---------------------------------------------------------------------------
+
+def _count_primary_bullets(content: str) -> int:
+    """Count top-level bullet lines (lines starting with '- ') in the brief content.
+
+    Excludes sub-bullets (lines with leading spaces before '- ') and overflow
+    notice lines that start with '*'.
+    """
+    return sum(
+        1 for line in content.splitlines()
+        if line.startswith("- ") and not line.startswith("-  ")
+    )
+
+
+def _seed_waiting_on(conn, assignee: str, description: str) -> None:
+    """Seed a non-manager action item (waiting-on)."""
+    ai_id = content_hash(f"wo::{assignee}::{description}")
+    conn.execute(
+        """
+        INSERT INTO action_items
+            (id, assigned_to, description, status, created_at)
+        VALUES (?, ?, ?, 'open', CURRENT_TIMESTAMP)
+        """,
+        [ai_id, assignee, description],
+    )
+
+
+class TestItemCounting:
+    """Primary bullet count must match header shown_total, and max_items is global."""
+
+    def test_shown_total_equals_rendered_bullets(self, conn) -> None:
+        """brief.shown_signals must equal the number of rendered primary bullets."""
+        # Mix of signals, follow-ups, and waiting-on
+        for i in range(6):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Risk {i}")
+        _seed_action_item(conn, "Follow up with Bob about contract renewal")
+        _seed_action_item(conn, "Follow up with Carol on SOW signature")
+        _seed_waiting_on(conn, "Alice", "Waiting on Alice to return signed contract")
+        _seed_waiting_on(conn, "Bob", "Waiting on Bob to confirm budget approval")
+
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=20)
+        rendered = _count_primary_bullets(brief.content)
+        assert brief.shown_signals == rendered, (
+            f"shown_signals={brief.shown_signals} but rendered {rendered} bullets"
+        )
+
+    def test_max_items_never_exceeded(self, conn) -> None:
+        """--max-items 10 must never render more than 10 primary bullets."""
+        for i in range(20):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Risk {i}")
+        for i in range(10):
+            _seed_action_item(conn, f"Follow up with person {i} about project")
+        for i in range(10):
+            _seed_waiting_on(conn, f"Vendor{i}", f"Waiting on Vendor{i} to approve invoice {i}")
+
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=10)
+        rendered = _count_primary_bullets(brief.content)
+        assert rendered <= 10, f"Rendered {rendered} bullets but max_items=10"
+        assert brief.shown_signals <= 10
+
+    def test_hidden_count_math(self, conn) -> None:
+        """total_hidden = total_candidates - shown_total."""
+        for i in range(8):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Risk {i}")
+        _seed_action_item(conn, "Follow up with Dave about renewal")
+        _seed_waiting_on(conn, "Legal", "Waiting on Legal to review the SOW draft")
+
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=5)
+        # Parse header line: "Showing N of M candidate item(s)"
+        import re
+        m = re.search(r"Showing (\d+) of (\d+) candidate", brief.content)
+        assert m, "Header line not found in brief"
+        shown = int(m.group(1))
+        total = int(m.group(2))
+        assert shown == brief.shown_signals
+        hidden_in_brief = total - shown
+        # hidden count must be non-negative
+        assert hidden_in_brief >= 0
+        # brief.shown_signals must not exceed total_candidates
+        assert brief.shown_signals <= total
+
+    def test_quality_filtered_phrase_when_fewer_than_max(self, conn) -> None:
+        """When shown < max_items due to filters, header says 'after quality filters'."""
+        # Seed only 2 high-quality signals but ask for 20
+        _seed_signal_ext(conn, "Acme Corp", summary="Contract unsigned — deal at risk")
+        _seed_signal_ext(conn, "Bob Smith", signal_type="people_health",
+                         summary="Stale 1:1 with Bob Smith", severity="medium")
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=20)
+        assert "after quality filters" in brief.content
+
+    def test_no_quality_filtered_phrase_when_max_reached(self, conn) -> None:
+        """When shown == max_items, the 'after quality filters' phrase is absent."""
+        for i in range(25):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Contract at risk {i}")
+        for i in range(10):
+            _seed_action_item(conn, f"Follow up with person {i} about urgent contract")
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=5)
+        # shown should equal max_items (5) since we have many more candidates
+        assert brief.shown_signals == 5
+        assert "after quality filters" not in brief.content
+
+    def test_waiting_on_capped_within_global_budget(self, conn) -> None:
+        """Waiting-on items must be capped by the global budget."""
+        # Seed many signals and many waiting-on items
+        for i in range(15):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Risk {i}")
+        for i in range(10):
+            _seed_waiting_on(conn, f"Vendor{i}", f"Waiting on Vendor{i} to deliver item {i}")
+
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=8)
+        rendered = _count_primary_bullets(brief.content)
+        assert rendered <= 8, f"Rendered {rendered} bullets but max_items=8"
+
+    def test_cli_and_markdown_candidate_counts_agree(self, conn) -> None:
+        """shown_signals on DailyBrief matches the header line in the markdown."""
+        for i in range(5):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Risk {i}")
+        _seed_action_item(conn, "Follow up with manager about Q3 review")
+        _seed_waiting_on(conn, "Legal", "Waiting on Legal to sign off on contract")
+
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=20)
+        import re
+        m = re.search(r"Showing (\d+) of (\d+) candidate", brief.content)
+        assert m, "Header 'Showing N of M' line not found"
+        header_shown = int(m.group(1))
+        assert header_shown == brief.shown_signals, (
+            f"Markdown header says {header_shown} but brief.shown_signals={brief.shown_signals}"
+        )
+
+

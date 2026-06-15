@@ -426,22 +426,30 @@ def _section_alloc(bucketed: dict, total: int) -> dict[str, int]:
     }
 
 
-def _global_alloc(bucketed: dict, n_decisions: int, n_follow_ups: int, total: int) -> dict[str, int]:
-    """Allocate *total* primary items across ALL sections including decisions and follow-ups.
+def _global_alloc(
+    bucketed: dict,
+    n_decisions: int,
+    n_follow_ups: int,
+    n_waiting_on: int,
+    total: int,
+) -> dict[str, int]:
+    """Allocate *total* primary items across ALL sections.
 
-    The budget is: deals + utilization + people + risks + other + decisions + follow_ups = total
-    Section priorities: structured signals first, then decisions, then follow-ups, then risks.
+    Budget: deals + utilization + people + risks + other
+            + decisions + follow_ups + waiting_on = total
+    Priority: structured signals > decisions > follow_ups > waiting_on > risks.
     """
     has = {k: len(v) for k, v in bucketed.items()}
 
-    # Fixed floors for structured non-risk sections
+    # Fixed floors for high-priority sections
     alloc: dict[str, int] = {
-        "deals":       min(has["deal_signals"],       4),
-        "utilization": min(has["utilization_signals"], 3),
-        "people":      min(has["people_signals"],      2),
-        "other":       min(has["other_signals"],       1),
-        "decisions":   min(n_decisions,                3),
-        "follow_ups":  min(n_follow_ups,               4),
+        "deals":       min(has["deal_signals"],        4),
+        "utilization": min(has["utilization_signals"],  3),
+        "people":      min(has["people_signals"],       2),
+        "other":       min(has["other_signals"],        1),
+        "decisions":   min(n_decisions,                 3),
+        "follow_ups":  min(n_follow_ups,                4),
+        "waiting_on":  min(n_waiting_on,                3),
     }
     used = sum(alloc.values())
     remaining = max(0, total - used)
@@ -451,12 +459,16 @@ def _global_alloc(bucketed: dict, n_decisions: int, n_follow_ups: int, total: in
     alloc["risks"] = risk_alloc
     remaining -= risk_alloc
 
-    # Any further leftover goes to deals → people → utilization → follow_ups
-    for key, pool_key in (("deals", "deal_signals"), ("people", "people_signals"),
-                          ("utilization", "utilization_signals"), ("follow_ups", None)):
+    # Leftover goes to deals → people → utilization → follow_ups → waiting_on
+    for key, pool in (
+        ("deals",       has.get("deal_signals", 0)),
+        ("people",      has.get("people_signals", 0)),
+        ("utilization", has.get("utilization_signals", 0)),
+        ("follow_ups",  n_follow_ups),
+        ("waiting_on",  n_waiting_on),
+    ):
         if remaining <= 0:
             break
-        pool = has.get(pool_key, n_follow_ups) if pool_key else n_follow_ups
         extra = min(pool - alloc[key], remaining)
         if extra > 0:
             alloc[key] += extra
@@ -527,15 +539,21 @@ def generate_daily_brief(
     manager_ais = [ai for ai in all_action_items if ai.assigned_to in ("manager", "Manager")]
     manager_ais_ranked = sorted(manager_ais, key=lambda ai: _score_action_item(ai, target_date), reverse=True)
 
-    # All other open action items (not manager)
+    # Waiting-on items (all AIs not assigned to manager), junk-filtered
     other_ais = [ai for ai in all_action_items if ai.assigned_to not in ("manager", "Manager")]
 
     overflow: dict[str, int] = {}
 
     if max_items is not None:
-        # ---- Global budget: decisions + follow-ups + signals all count toward max_items ----
+        # ---- Global budget: all primary sections count toward max_items ----
         bucketed_all = _bucket_signals(visible_signals)
-        alloc = _global_alloc(bucketed_all, len(decisions), len(manager_ais_ranked), max_items)
+        alloc = _global_alloc(
+            bucketed_all,
+            len(decisions),
+            len(manager_ais_ranked),
+            len(other_ais),
+            max_items,
+        )
 
         critical_shown    = bucketed_all["critical_signals"]  # criticals always included
         risks_shown       = bucketed_all["risk_signals"][:alloc["risks"]]
@@ -545,16 +563,18 @@ def generate_daily_brief(
         other_shown       = bucketed_all["other_signals"][:alloc["other"]]
         decisions_shown   = decisions[:alloc["decisions"]]
         follow_ups_shown  = manager_ais_ranked[:alloc["follow_ups"]]
+        other_ais_shown   = other_ais[:alloc["waiting_on"]]
 
         overflow = {
             "critical":    0,
-            "risks":       max(0, len(bucketed_all["risk_signals"])       - len(risks_shown)),
-            "people":      max(0, len(bucketed_all["people_signals"])     - len(people_shown)),
-            "deals":       max(0, len(bucketed_all["deal_signals"])       - len(deals_shown)),
-            "utilization": max(0, len(bucketed_all["utilization_signals"])- len(utilization_shown)),
-            "other":       max(0, len(bucketed_all["other_signals"])      - len(other_shown)),
-            "decisions":   max(0, len(decisions)         - len(decisions_shown)),
-            "follow_ups":  max(0, len(manager_ais_ranked)- len(follow_ups_shown)),
+            "risks":       max(0, len(bucketed_all["risk_signals"])        - len(risks_shown)),
+            "people":      max(0, len(bucketed_all["people_signals"])      - len(people_shown)),
+            "deals":       max(0, len(bucketed_all["deal_signals"])        - len(deals_shown)),
+            "utilization": max(0, len(bucketed_all["utilization_signals"]) - len(utilization_shown)),
+            "other":       max(0, len(bucketed_all["other_signals"])       - len(other_shown)),
+            "decisions":   max(0, len(decisions)           - len(decisions_shown)),
+            "follow_ups":  max(0, len(manager_ais_ranked)  - len(follow_ups_shown)),
+            "waiting_on":  max(0, len(other_ais)            - len(other_ais_shown)),
         }
 
     else:
@@ -585,8 +605,11 @@ def generate_daily_brief(
         overflow["decisions"] = max(0, len(decisions) - len(decisions_shown))
         follow_ups_shown = manager_ais_ranked[: limits["follow_ups"]]
         overflow["follow_ups"] = max(0, len(manager_ais_ranked) - len(follow_ups_shown))
+        # In per-section mode show up to 5 waiting-on items (uncapped, not in signal budget)
+        other_ais_shown = other_ais[:5]
+        overflow["waiting_on"] = max(0, len(other_ais) - len(other_ais_shown))
 
-    # Meetings are shown up to the default limit in both modes (not counted against signal budget)
+    # Meetings are always shown up to their default limit, never counted against item budget
     meet_limit = _DEFAULT_LIMITS["meetings"]
     meetings_shown = meetings[:meet_limit]
     overflow["meetings"] = max(0, len(meetings) - len(meetings_shown))
@@ -596,12 +619,26 @@ def generate_daily_brief(
         len(critical_shown) + len(risks_shown) + len(people_shown)
         + len(deals_shown) + len(utilization_shown) + len(other_shown)
     )
-    # Total primary items shown = signals + decisions + follow-ups (not meetings, not other_ais)
-    shown_total = shown_signal_count + len(decisions_shown) + len(follow_ups_shown)
-    # Candidate pool = everything available before limits
-    total_candidates = len(all_signals) + len(manager_ais_ranked) + len(decisions) + len(meetings)
-    total_hidden = sum(overflow.values())
+    # Total primary items shown = signals + decisions + follow-ups + waiting-on
+    # (meetings excluded — they're always shown separately, not budgeted)
+    shown_total = (
+        shown_signal_count
+        + len(decisions_shown)
+        + len(follow_ups_shown)
+        + len(other_ais_shown)
+    )
+    # Candidate pool = signals + manager AIs + decisions + waiting-on
+    # (meetings excluded from candidate pool — always rendered uncapped)
+    total_candidates = (
+        len(all_signals)
+        + len(manager_ais_ranked)
+        + len(decisions)
+        + len(other_ais)
+    )
+    total_hidden = total_candidates - shown_total
     total_open_action_items = len(all_action_items)
+    # Quality-filter flag: shown < max_items means filters suppressed some items
+    quality_filtered = max_items is not None and shown_total < max_items
 
     # Render template
     env = Environment(
@@ -638,10 +675,12 @@ def generate_daily_brief(
         shown_total=shown_total,
         total_follow_ups=len(manager_ais_ranked),
         total_decisions=len(decisions),
+        total_waiting_on=len(other_ais),
         suppressed_count=suppressed_count,
         open_action_items=total_open_action_items,
         meeting_count=len(meetings),
         total_hidden=total_hidden,
+        quality_filtered=quality_filtered,
         # Sections
         critical_signals=critical_shown,
         risk_signals=risks_shown,
@@ -651,7 +690,7 @@ def generate_daily_brief(
         other_signals=other_shown,
         decisions=decisions_shown,
         follow_ups=follow_ups_shown,
-        other_action_items=other_ais,
+        other_action_items=other_ais_shown,
         meetings=meetings_shown,
         # Overflow counts per section
         overflow=overflow,
@@ -664,7 +703,7 @@ def generate_daily_brief(
         brief_date=target_date,
         content=content,
         signal_ids=signal_ids,
-        shown_signals=shown_total,
+        shown_signals=shown_total,  # total primary bullets rendered
     )
 
     _write_brief_to_db(conn, brief)
