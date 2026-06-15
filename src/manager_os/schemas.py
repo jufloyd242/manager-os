@@ -63,7 +63,7 @@ SourceType = Literal[
     "calendar",
 ]
 NoteType = Literal["1on1", "client", "deal", "meeting", "team", "practice"]
-ForecastType = Literal["confirmed", "likely", "pipeline"]
+ForecastType = Literal["confirmed", "likely", "pipeline", "capacity"]
 HealthType = Literal["green", "yellow", "red"]
 MoraleType = Literal["green", "yellow", "red"]
 StaffingFeasibilityType = Literal["feasible", "at-risk", "blocked"]

@@ -84,6 +84,10 @@ class ForecastProfile:
     issues: list[RowIssue]
     can_ingest: bool                           # False when required cols missing
 
+    # Wide-format metadata (populated only when detected_format == "wide")
+    detected_format: str = "normalized"        # "normalized" | "wide"
+    wide_summary: dict = field(default_factory=dict)
+
     # Convenience grouping for rendering
     @property
     def unknown_people(self) -> list[RowIssue]:
@@ -160,6 +164,9 @@ def profile_forecast_csv(
 ) -> ForecastProfile:
     """Profile a forecast CSV without writing to the database.
 
+    Auto-detects whether the CSV is in normalized long format or wide
+    planning-spreadsheet format, and profiles accordingly.
+
     Args:
         csv_path:        Path to the CSV file.
         people:          Team member config for entity resolution (optional).
@@ -173,6 +180,134 @@ def profile_forecast_csv(
     Raises:
         RuntimeError: If the CSV file cannot be read.
     """
+    from manager_os.ingest.forecast_wide import is_wide_format
+
+    if is_wide_format(csv_path):
+        return _profile_wide_forecast(
+            csv_path,
+            people=people,
+            sample_size=sample_size,
+        )
+
+    return _profile_normalized_forecast(
+        csv_path,
+        people=people,
+        clients=clients,
+        source_priority=source_priority,
+        sample_size=sample_size,
+    )
+
+
+def _profile_wide_forecast(
+    csv_path: str,
+    *,
+    people: list[PersonConfig] | None = None,
+    sample_size: int = 10,
+) -> ForecastProfile:
+    """Profile a wide-format planning spreadsheet CSV."""
+    from manager_os.ingest.forecast_wide import parse_wide_forecast
+
+    parse_result = parse_wide_forecast(csv_path)
+
+    # Resolve person name sets for validation
+    person_names_lower: set[str] = set()
+    person_aliases_lower: set[str] = set()
+    if people:
+        for p in people:
+            person_names_lower.add(p.name.lower())
+            for alias in p.aliases:
+                person_aliases_lower.add(alias.lower())
+
+    issues: list[RowIssue] = []
+    seen_unknown_people: set[str] = set()
+
+    # Validate capacity row engineer names
+    if people is not None:
+        for record in parse_result.capacity_records:
+            pn = record.person_name.strip()
+            if pn and pn.lower() not in seen_unknown_people:
+                if not _person_known(pn, person_names_lower, person_aliases_lower):
+                    seen_unknown_people.add(pn.lower())
+                    issues.append(RowIssue(
+                        row_index=0,
+                        issue_type="unknown_person",
+                        field="person_name",
+                        value=_truncate(pn),
+                        detail=f"Capacity row: not in config/people.yaml (section={record.section})",
+                    ))
+
+    # Validate pipeline assignees (only non-empty ones)
+    if people is not None:
+        for record in parse_result.pipeline_records:
+            pn = record.person_name.strip()
+            if pn and pn.lower() not in seen_unknown_people:
+                if not _person_known(pn, person_names_lower, person_aliases_lower):
+                    seen_unknown_people.add(pn.lower())
+                    issues.append(RowIssue(
+                        row_index=0,
+                        issue_type="unknown_person",
+                        field="person_name",
+                        value=_truncate(pn),
+                        detail=f"Pipeline assignee: not in config/people.yaml (prospect={record.prospect_label!r})",
+                    ))
+
+    # Year typo warnings → informational only (not error-level issues since they
+    # were auto-corrected successfully).  They surface in wide_summary["warnings"].
+
+    # Build normalized fields list for wide format
+    normalized_columns = [
+        "person_name", "week_start", "allocation", "forecast_type",
+        "section", "prospect_label", "probability", "skillset",
+    ]
+
+    # Sample rows from capacity records
+    sample_capacity = parse_result.capacity_records[:sample_size]
+    sample_rows: list[dict[str, str]] = [
+        {
+            "person_name": r.person_name,
+            "week_start": str(r.week_start),
+            "allocation": str(r.allocation),
+            "forecast_type": r.forecast_type,
+            "section": r.section,
+        }
+        for r in sample_capacity
+    ]
+
+    has_records = bool(parse_result.capacity_records or parse_result.pipeline_records)
+
+    return ForecastProfile(
+        path=csv_path,
+        total_rows=parse_result.total_rows,
+        sample_size=len(sample_rows),
+        raw_columns=[],
+        normalized_columns=normalized_columns,
+        column_mapping={},
+        fields_found=["person_name", "week_start", "allocation", "forecast_type"],
+        fields_missing=[],
+        sample_rows=sample_rows,
+        issues=issues,
+        can_ingest=parse_result.format_detected and has_records,
+        detected_format="wide",
+        wide_summary={
+            "sections": parse_result.sections,
+            "capacity_rows": len(parse_result.capacity_records),
+            "pipeline_rows": len(parse_result.pipeline_records),
+            "skipped_ambiguous": parse_result.skipped_ambiguous,
+            "warnings": parse_result.warnings,
+            "infos": parse_result.infos,
+        },
+    )
+
+
+def _profile_normalized_forecast(
+    csv_path: str,
+    *,
+    people: list[PersonConfig] | None = None,
+    clients: list[ClientConfig] | None = None,
+    source_priority: SourcePriorityConfig | None = None,
+    sample_size: int = 10,
+) -> ForecastProfile:
+    """Profile a normalized long-format forecast CSV (original behaviour)."""
     extra_aliases: dict[str, str] = {}
     if source_priority:
         extra_aliases = source_priority.forecast_column_aliases

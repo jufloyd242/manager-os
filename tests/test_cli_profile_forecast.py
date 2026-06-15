@@ -479,3 +479,223 @@ class TestProfileForecastJSONOutput:
         issue = parsed["issues"][0]
         assert "issue_type" in issue
         assert "field" in issue
+
+
+# ===========================================================================
+# Wide-format forecast CSV tests
+# ===========================================================================
+
+WIDE_FIXTURE = FIXTURES / "wide_forecast.csv"
+
+
+class TestWideFormatDetection:
+    def test_normalized_csv_not_detected_as_wide(self) -> None:
+        from manager_os.ingest.forecast_wide import is_wide_format
+        assert is_wide_format(str(FIXTURES / "forecast.csv")) is False
+
+    def test_wide_fixture_detected_as_wide(self) -> None:
+        from manager_os.ingest.forecast_wide import is_wide_format
+        assert is_wide_format(str(WIDE_FIXTURE)) is True
+
+    def test_profile_detects_wide_format_field(self) -> None:
+        result = profile_forecast_csv(str(WIDE_FIXTURE))
+        assert result.detected_format == "wide"
+
+    def test_profile_normalized_fixture_format_field(self) -> None:
+        result = profile_forecast_csv(str(FIXTURES / "forecast.csv"))
+        assert result.detected_format == "normalized"
+
+
+class TestWideFormatProfile:
+    def test_can_ingest_true(self) -> None:
+        result = profile_forecast_csv(str(WIDE_FIXTURE))
+        assert result.can_ingest is True
+
+    def test_sections_detected(self) -> None:
+        result = profile_forecast_csv(str(WIDE_FIXTURE))
+        assert "AI" in result.wide_summary["sections"]
+        assert "ML" in result.wide_summary["sections"]
+
+    def test_capacity_rows_count(self) -> None:
+        result = profile_forecast_csv(str(WIDE_FIXTURE))
+        # AI: Alex Rivera (5) + Jordan Lee (5) = 10; ML: Sam Chen (5) = 5 → 15
+        assert result.wide_summary["capacity_rows"] == 15
+
+    def test_capacity_rows_normalize_correctly(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(WIDE_FIXTURE))
+        alex_rows = [r for r in pr.capacity_records if r.person_name == "Alex Rivera"]
+        assert len(alex_rows) == 5
+        assert all(r.forecast_type == "capacity" for r in alex_rows)
+        assert all(r.section == "AI" for r in alex_rows)
+        assert all(r.target_hours == 40.0 for r in alex_rows)
+
+    def test_zero_allocation_week_no_issue(self) -> None:
+        result = profile_forecast_csv(str(WIDE_FIXTURE))
+        zero_alloc_issues = [i for i in result.issues if i.issue_type == "zero_allocation"]
+        assert zero_alloc_issues == []
+
+    def test_pipeline_rows_normalize_correctly(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(WIDE_FIXTURE))
+        alpha_rows = [r for r in pr.pipeline_records if r.prospect_label == "Prospect Alpha Inc"]
+        # Alex/Jordan split → 2 assignees × 5 weeks = 10 records
+        assert len(alpha_rows) == 10
+        assert all(r.forecast_type == "pipeline" for r in alpha_rows)
+        assert all(r.probability == 0.8 for r in alpha_rows)
+        assert all(r.requested_alloc == 20.0 for r in alpha_rows)
+
+    def test_split_assignees_handled(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(WIDE_FIXTURE))
+        alpha_assignees = {
+            r.person_name
+            for r in pr.pipeline_records
+            if r.prospect_label == "Prospect Alpha Inc"
+        }
+        assert "Alex" in alpha_assignees
+        assert "Jordan" in alpha_assignees
+
+    def test_ambiguous_assignee_produces_no_person_record(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(WIDE_FIXTURE))
+        assert pr.skipped_ambiguous > 0
+        beta_with_person = [
+            r for r in pr.pipeline_records
+            if r.prospect_label == "Prospect Beta Ltd" and r.person_name
+        ]
+        assert beta_with_person == []
+
+    def test_skipped_ambiguous_in_wide_summary(self) -> None:
+        result = profile_forecast_csv(str(WIDE_FIXTURE))
+        assert result.wide_summary["skipped_ambiguous"] == 5  # 5 weeks of ?
+
+    def test_year_typo_corrected_with_warning(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(WIDE_FIXTURE))
+        assert any("2206" in w for w in pr.warnings)
+        ml_records = [r for r in pr.capacity_records if r.section == "ML"]
+        assert all(r.week_start.year == 2026 for r in ml_records)
+
+    def test_pipeline_prospects_not_unknown_client_issues(self) -> None:
+        # Providing an empty client list should NOT produce unknown_client issues
+        # for pipeline prospect labels
+        result = profile_forecast_csv(str(WIDE_FIXTURE), clients=[])
+        unknown_client_issues = [i for i in result.issues if i.issue_type == "unknown_client"]
+        assert unknown_client_issues == []
+
+    def test_unknown_capacity_person_flagged(self) -> None:
+        result = profile_forecast_csv(str(WIDE_FIXTURE), people=[])
+        unknown = [i for i in result.issues if i.issue_type == "unknown_person"]
+        assert len(unknown) > 0
+        person_names = {i.value for i in unknown}
+        assert "Alex Rivera" in person_names or "Jordan Lee" in person_names
+
+    def test_known_person_not_flagged(self) -> None:
+        result = profile_forecast_csv(
+            str(WIDE_FIXTURE),
+            people=[
+                PersonConfig(name="Alex Rivera", aliases=["Alex"]),
+                PersonConfig(name="Jordan Lee", aliases=["Jordan"]),
+                PersonConfig(name="Sam Chen", aliases=["Sam"]),
+            ],
+        )
+        unknown = [i for i in result.issues if i.issue_type == "unknown_person"]
+        assert unknown == []
+
+    def test_wide_to_dict_json_serializable(self) -> None:
+        result = profile_forecast_csv(str(WIDE_FIXTURE))
+        d = result.to_dict()
+        json.dumps(d)  # must not raise
+
+    def test_wide_summary_keys_in_to_dict(self) -> None:
+        result = profile_forecast_csv(str(WIDE_FIXTURE))
+        d = result.to_dict()
+        assert "wide_summary" in d
+        assert "sections" in d["wide_summary"]
+        assert "capacity_rows" in d["wide_summary"]
+
+    def test_normalized_csv_still_profiles_correctly(self) -> None:
+        """Regression: normalized fixture must still work after wide support added."""
+        result = profile_forecast_csv(str(FIXTURES / "forecast.csv"))
+        assert result.can_ingest is True
+        assert result.total_rows == 9
+        assert "person_name" in result.fields_found
+        assert result.detected_format == "normalized"
+
+
+class TestWideFormatIngest:
+    """Smoke-tests that wide format can be ingested into an in-memory DuckDB."""
+
+    def test_wide_ingest_produces_records(self) -> None:
+        import duckdb
+        from manager_os.db import init_schema
+        from manager_os.ingest.forecast import ingest_forecast
+
+        conn = duckdb.connect(":memory:")
+        init_schema(conn)
+        result = ingest_forecast(str(WIDE_FIXTURE), conn)
+        assert result.ingested > 0
+        assert result.failed == 0
+
+    def test_wide_ingest_skips_ambiguous_assignees(self) -> None:
+        import duckdb
+        from manager_os.db import init_schema
+        from manager_os.ingest.forecast import ingest_forecast
+
+        conn = duckdb.connect(":memory:")
+        init_schema(conn)
+        result = ingest_forecast(str(WIDE_FIXTURE), conn)
+        assert result.skip_reasons.get("ambiguous_assignee", 0) > 0
+
+    def test_normalized_ingest_regression(self) -> None:
+        """Regression: normalized ingest must still work."""
+        import duckdb
+        from manager_os.db import init_schema
+        from manager_os.ingest.forecast import ingest_forecast
+
+        conn = duckdb.connect(":memory:")
+        init_schema(conn)
+        result = ingest_forecast(str(FIXTURES / "forecast.csv"), conn)
+        assert result.ingested > 0
+        assert result.failed == 0
+
+
+class TestWideFormatCLI:
+    def test_wide_csv_cli_exits_0(self) -> None:
+        result = CliRunner().invoke(
+            cli_app,
+            ["profile-forecast", "--path", str(WIDE_FIXTURE)],
+            env=_env(str(WIDE_FIXTURE)),
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_wide_csv_shows_sections_in_output(self) -> None:
+        result = CliRunner().invoke(
+            cli_app,
+            ["profile-forecast", "--path", str(WIDE_FIXTURE)],
+            env=_env(str(WIDE_FIXTURE)),
+        )
+        assert "AI" in result.output
+        assert "ML" in result.output
+
+    def test_wide_csv_shows_pipeline_disclaimer(self) -> None:
+        result = CliRunner().invoke(
+            cli_app,
+            ["profile-forecast", "--path", str(WIDE_FIXTURE)],
+            env=_env(str(WIDE_FIXTURE)),
+        )
+        out_lower = result.output.lower()
+        assert "pipeline" in out_lower or "prospect" in out_lower
+
+    def test_wide_csv_json_output_valid(self) -> None:
+        result = CliRunner().invoke(
+            cli_app,
+            ["profile-forecast", "--path", str(WIDE_FIXTURE), "--json"],
+            env=_env(str(WIDE_FIXTURE)),
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["detected_format"] == "wide"
+        assert parsed["can_ingest"] is True
+

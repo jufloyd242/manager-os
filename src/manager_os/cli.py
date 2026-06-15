@@ -1717,75 +1717,103 @@ def profile_forecast(
     ))
     console.print(f"  [dim]File:[/dim]    {result.path}")
     console.print(f"  [dim]Rows:[/dim]    {result.total_rows}")
+    console.print(f"  [dim]Format:[/dim]  {result.detected_format}")
     console.print(f"  [dim]Sample:[/dim]  {result.sample_size} of {result.total_rows}")
     console.print()
 
-    # Column mapping table
-    col_tbl = Table(
-        title="Column Mapping",
-        show_header=True,
-        header_style="bold",
-        box=rich_box.SIMPLE,
-        show_edge=False,
-        pad_edge=False,
-    )
-    col_tbl.add_column("Raw Column", style="dim", no_wrap=True)
-    col_tbl.add_column("Normalised", no_wrap=True)
-    col_tbl.add_column("Field", style="cyan", no_wrap=True)
+    # ── Wide-format summary block ────────────────────────────────────────────
+    if result.detected_format == "wide" and result.wide_summary:
+        ws = result.wide_summary
+        wide_tbl = Table(
+            title="Wide Forecast Summary",
+            show_header=False,
+            box=None,
+            pad_edge=False,
+            show_edge=False,
+        )
+        wide_tbl.add_column("Label", style="dim", no_wrap=True)
+        wide_tbl.add_column("Value")
 
-    for raw, norm in result.column_mapping.items():
-        display = _FIELD_DISPLAY.get(norm, "")
-        changed = raw != norm
-        norm_display = f"[green]{norm}[/green]" if changed else f"[dim]{norm}[/dim]"
-        col_tbl.add_row(raw, norm_display, display)
-    console.print(col_tbl)
-    console.print()
+        sections_str = ", ".join(ws.get("sections", []))
+        wide_tbl.add_row("Sections", sections_str or "[dim]none detected[/dim]")
+        wide_tbl.add_row("Capacity rows", str(ws.get("capacity_rows", 0)))
+        wide_tbl.add_row("Pipeline rows", str(ws.get("pipeline_rows", 0)))
+        wide_tbl.add_row("Skipped ambiguous", str(ws.get("skipped_ambiguous", 0)))
+        console.print(wide_tbl)
+        console.print()
+        console.print(
+            "[dim]ℹ  Pipeline prospect/deal labels are NOT validated against "
+            "config/clients.yaml — they are prospects, not signed clients.[/dim]"
+        )
+        console.print()
 
-    # Required fields status
-    req_tbl = Table(
-        title="Required Fields",
-        show_header=False,
-        box=None,
-        pad_edge=False,
-        show_edge=False,
-    )
-    req_tbl.add_column("Status", no_wrap=True)
-    req_tbl.add_column("Field")
+    else:
+        # Column mapping table
+        col_tbl = Table(
+            title="Column Mapping",
+            show_header=True,
+            header_style="bold",
+            box=rich_box.SIMPLE,
+            show_edge=False,
+            pad_edge=False,
+        )
+        col_tbl.add_column("Raw Column", style="dim", no_wrap=True)
+        col_tbl.add_column("Normalised", no_wrap=True)
+        col_tbl.add_column("Field", style="cyan", no_wrap=True)
 
-    _REQ = ["person_name", "week_start"]
-    for canonical in _REQ:
-        display = _FIELD_DISPLAY.get(canonical, canonical)
-        if canonical in result.fields_found:
-            req_tbl.add_row("[green]✓ FOUND[/green]", f"{display} ({canonical})")
-        else:
-            req_tbl.add_row("[red]✗ MISSING[/red]", f"[red]{display} ({canonical})[/red]")
-    console.print(req_tbl)
-    console.print()
+        for raw, norm in result.column_mapping.items():
+            display = _FIELD_DISPLAY.get(norm, "")
+            changed = raw != norm
+            norm_display = f"[green]{norm}[/green]" if changed else f"[dim]{norm}[/dim]"
+            col_tbl.add_row(raw, norm_display, display)
+        console.print(col_tbl)
+        console.print()
 
-    # Optional fields coverage
-    opt_tbl = Table(
-        title="Optional Fields",
-        show_header=False,
-        box=None,
-        pad_edge=False,
-        show_edge=False,
-    )
-    opt_tbl.add_column("Status", no_wrap=True)
-    opt_tbl.add_column("Field")
+        # Required fields status
+        req_tbl = Table(
+            title="Required Fields",
+            show_header=False,
+            box=None,
+            pad_edge=False,
+            show_edge=False,
+        )
+        req_tbl.add_column("Status", no_wrap=True)
+        req_tbl.add_column("Field")
 
-    _OPT_DISPLAY = [
-        ("client", "client"),
-        ("project", "engagement"),
-        ("allocation_pct", "allocation"),
-        ("forecast_type", "status"),
-    ]
-    for canonical, display in _OPT_DISPLAY:
-        if canonical in result.fields_found:
-            opt_tbl.add_row("[green]✓[/green]", f"{display} ({canonical})")
-        else:
-            opt_tbl.add_row("[dim]–[/dim]", f"[dim]{display} (not in CSV)[/dim]")
-    console.print(opt_tbl)
-    console.print()
+        _REQ = ["person_name", "week_start"]
+        for canonical in _REQ:
+            display = _FIELD_DISPLAY.get(canonical, canonical)
+            if canonical in result.fields_found:
+                req_tbl.add_row("[green]✓ FOUND[/green]", f"{display} ({canonical})")
+            else:
+                req_tbl.add_row("[red]✗ MISSING[/red]", f"[red]{display} ({canonical})[/red]")
+        console.print(req_tbl)
+        console.print()
+
+        # Optional fields coverage
+        opt_tbl = Table(
+            title="Optional Fields",
+            show_header=False,
+            box=None,
+            pad_edge=False,
+            show_edge=False,
+        )
+        opt_tbl.add_column("Status", no_wrap=True)
+        opt_tbl.add_column("Field")
+
+        _OPT_DISPLAY = [
+            ("client", "client"),
+            ("project", "engagement"),
+            ("allocation_pct", "allocation"),
+            ("forecast_type", "status"),
+        ]
+        for canonical, display in _OPT_DISPLAY:
+            if canonical in result.fields_found:
+                opt_tbl.add_row("[green]✓[/green]", f"{display} ({canonical})")
+            else:
+                opt_tbl.add_row("[dim]–[/dim]", f"[dim]{display} (not in CSV)[/dim]")
+        console.print(opt_tbl)
+        console.print()
 
     # Issues table
     if result.issues:

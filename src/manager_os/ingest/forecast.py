@@ -93,12 +93,153 @@ def ingest_forecast(
 ) -> IngestResult:
     """Ingest a staffing forecast CSV into the staffing_forecast table.
 
+    Auto-detects whether the CSV is in normalized long format or wide
+    planning-spreadsheet format (AI/ML sections).
+
     Args:
         csv_path: Path to the CSV file.
         conn: Open DuckDB connection.
         source_priority: Optional SourcePriorityConfig with column alias overrides.
         force: If True, re-ingest all rows even if they already exist.
     """
+    from manager_os.ingest.forecast_wide import is_wide_format
+
+    if is_wide_format(csv_path):
+        return _ingest_wide_forecast(csv_path, conn, force=force)
+
+    return _ingest_normalized_forecast(csv_path, conn, source_priority=source_priority, force=force)
+
+
+def _ingest_wide_forecast(
+    csv_path: str,
+    conn,
+    force: bool = False,
+) -> IngestResult:
+    """Ingest a wide-format planning spreadsheet CSV."""
+    from manager_os.ingest.forecast_wide import parse_wide_forecast
+
+    result = IngestResult()
+    parse_result = parse_wide_forecast(csv_path)
+
+    now = datetime.utcnow()
+
+    for record in parse_result.capacity_records:
+        try:
+            notes = f"section={record.section}"
+            if record.target_hours is not None:
+                notes += f" target_hours={record.target_hours}"
+
+            row = StaffingForecastRow(
+                person_name=record.person_name,
+                week_start=record.week_start,
+                client="",
+                project=record.section,
+                allocation_pct=record.allocation,
+                forecast_type="capacity",  # type: ignore[arg-type]
+                notes=notes,
+                ingested_at=now,
+            )
+            row_id = content_hash(
+                f"{row.person_name}::{row.week_start}::{row.project}::capacity"
+            )
+            row = row.model_copy(update={"id": row_id})
+
+            if not force and _row_exists(conn, row.id):
+                result.skipped += 1
+                result.skip_reasons["already_exists"] = (
+                    result.skip_reasons.get("already_exists", 0) + 1
+                )
+                continue
+
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO staffing_forecast
+                    (id, person_id, person_name, week_start, client, project,
+                     allocation_pct, forecast_type, notes, ingested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    row.id, row.person_id, row.person_name, row.week_start,
+                    row.client, row.project, row.allocation_pct,
+                    row.forecast_type, row.notes, row.ingested_at,
+                ],
+            )
+            result.ingested += 1
+        except Exception as exc:
+            logger.warning("Wide capacity row failed: %s", exc)
+            result.failed += 1
+            result.errors.append(str(exc))
+
+    for record in parse_result.pipeline_records:
+        # Skip records with no assignee (ambiguous)
+        if not record.person_name.strip():
+            result.skipped += 1
+            result.skip_reasons["ambiguous_assignee"] = (
+                result.skip_reasons.get("ambiguous_assignee", 0) + 1
+            )
+            continue
+
+        try:
+            notes_parts = [f"section={record.section}"]
+            if record.probability is not None:
+                notes_parts.append(f"probability={record.probability}")
+            if record.requested_alloc is not None:
+                notes_parts.append(f"requested_alloc={record.requested_alloc}")
+            if record.skillset:
+                notes_parts.append(f"skillset={record.skillset}")
+            notes_parts.append(f"prospect={record.prospect_label!r}")
+
+            row = StaffingForecastRow(
+                person_name=record.person_name,
+                week_start=record.week_start,
+                client=record.prospect_label,  # stored but NOT validated vs clients.yaml
+                project=record.skillset or record.section,
+                allocation_pct=record.allocation,
+                forecast_type="pipeline",
+                notes=" ".join(notes_parts),
+                ingested_at=now,
+            )
+            row_id = content_hash(
+                f"{row.person_name}::{row.week_start}::{record.prospect_label}::pipeline"
+            )
+            row = row.model_copy(update={"id": row_id})
+
+            if not force and _row_exists(conn, row.id):
+                result.skipped += 1
+                result.skip_reasons["already_exists"] = (
+                    result.skip_reasons.get("already_exists", 0) + 1
+                )
+                continue
+
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO staffing_forecast
+                    (id, person_id, person_name, week_start, client, project,
+                     allocation_pct, forecast_type, notes, ingested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    row.id, row.person_id, row.person_name, row.week_start,
+                    row.client, row.project, row.allocation_pct,
+                    row.forecast_type, row.notes, row.ingested_at,
+                ],
+            )
+            result.ingested += 1
+        except Exception as exc:
+            logger.warning("Wide pipeline row failed: %s", exc)
+            result.failed += 1
+            result.errors.append(str(exc))
+
+    return result
+
+
+def _ingest_normalized_forecast(
+    csv_path: str,
+    conn,
+    source_priority: SourcePriorityConfig | None = None,
+    force: bool = False,
+) -> IngestResult:
+    """Ingest a normalized long-format forecast CSV (original behaviour)."""
     result = IngestResult()
     extra_aliases = {}
     if source_priority:
