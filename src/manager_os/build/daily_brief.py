@@ -252,6 +252,12 @@ _JUNK_PATTERNS = [
     # Hobby / personal items that leak from personal notes
     "pickleball",
     "golf",
+    # Vague waiting-on fragments with no real entity or action
+    "waiting on next steps from him",
+    "waiting on this one",
+    "waiting on signature",
+    "waiting on sr ",
+    "waiting on sr to",
 ]
 
 # Regex for action item descriptions that are clearly fragments / not real items.

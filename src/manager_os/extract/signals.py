@@ -64,6 +64,11 @@ _NOISY_SOURCE_SUBSTRINGS = [
     "/prompt",
     "AGENTS.md",
     "README.md",
+    # Sales/marketing collateral — not live operational risk
+    "pitch",
+    "proposal",
+    "one-pager",
+    "one pager",
 ]
 
 # Note titles / filenames that are almost always noisy.
@@ -75,6 +80,14 @@ _NOISY_TITLE_LOWER = [
     "job description",
     "readme",
     "agents.md",
+    # Generic operational/process docs that flood the risk list
+    "pto handoff",
+    "pto plan",
+    "okrs",
+    "discovery okr",
+    "standup",
+    "leadership standup",
+    "flex pitch",
 ]
 
 # A snippet is only actionable if it contains one of these phrases,

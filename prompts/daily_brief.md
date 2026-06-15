@@ -122,4 +122,4 @@ Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Decisions: {
 {% endif %}
 
 ---
-*Generated {{ generated_at }} | showing {{ shown_signals }} of {{ total_signals }} signals | {{ open_action_items }} open follow-ups*
+*Generated {{ generated_at }} | showing {{ shown_total }} of {{ total_candidates }} items ({{ total_signals }} signals · {{ total_follow_ups }} follow-ups)*
