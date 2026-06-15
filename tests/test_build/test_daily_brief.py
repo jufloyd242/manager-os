@@ -263,7 +263,7 @@ class TestSectionLimits:
             _seed_signal_ext(conn, f"Corp{i}", severity="high", summary=f"Risk beta{i}")
         brief = generate_daily_brief(conn, target_date=date.today())
         # 5 total - 3 shown = 2 hidden
-        assert "2 additional risk signal(s) hidden" in brief.content
+        assert "2 additional risk signal(s) not shown." in brief.content
 
     def test_max_items_overrides_default_limit(self, conn) -> None:
         for i in range(6):
@@ -278,7 +278,7 @@ class TestSectionLimits:
         brief = generate_daily_brief(conn, target_date=date.today(), max_items=1)
         shown = sum(1 for i in range(4) if f"Risk delta{i}" in brief.content)
         assert shown == 1
-        assert "3 additional risk signal(s) hidden" in brief.content
+        assert "3 additional risk signal(s) not shown." in brief.content
 
 
 # ------------------------------------------------------------------

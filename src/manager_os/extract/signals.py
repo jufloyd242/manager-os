@@ -129,18 +129,24 @@ def _rule_risk_keywords(conn, run_date: date) -> list[Signal]:
     """Emit a risk signal for any note whose body contains risk keywords."""
     rows = conn.execute(
         """
-        SELECT id, raw_document_id, note_date, note_type, entity_type, entity_name, title, body
-        FROM notes
-        WHERE body IS NOT NULL
+        SELECT n.id, n.raw_document_id, n.note_date, n.note_type,
+               n.entity_type, n.entity_name, n.title, n.body,
+               rd.source_path as file_path
+        FROM notes n
+        LEFT JOIN raw_documents rd ON n.raw_document_id = rd.id
+        WHERE n.body IS NOT NULL
         """
     ).fetchall()
 
     signals = []
     for row in rows:
-        note_id, raw_document_id, note_date, note_type, entity_type, entity_name, title, body = row
-        source_path = raw_document_id or note_id
+        (note_id, raw_document_id, note_date, note_type,
+         entity_type, entity_name, title, body, file_path) = row
         if not _contains_risk_keyword(body or ""):
             continue
+
+        # Use the actual vault path when available; fall back to doc id
+        source_path = file_path or raw_document_id or note_id
 
         # Determine entity for the signal
         etype = entity_type or "team"
@@ -152,6 +158,29 @@ def _rule_risk_keywords(conn, run_date: date) -> list[Signal]:
 
         severity, confidence = _risk_keyword_severity(body or "")
 
+        # Downgrade to low when there is no named entity (generic notes)
+        has_named_entity = bool(entity_name and entity_name.strip())
+        if not has_named_entity and severity == "high":
+            severity = "medium"
+            confidence = min(confidence, 0.65)
+        elif not has_named_entity and severity == "medium":
+            severity = "low"
+            confidence = min(confidence, 0.50)
+
+        # Build a useful summary: include the triggering sentence or phrase
+        trigger_snippet = _extract_risk_snippet(body or "", max_chars=120)
+        display_title = title or "untitled"
+        if trigger_snippet:
+            summary = f"{display_title}: {trigger_snippet}"
+        else:
+            summary = f"Risk language in note: {display_title}"
+
+        why = (
+            f"Note '{display_title}' contains risk-related language"
+            + (f" about {ename}" if has_named_entity and ename != display_title else "")
+            + "."
+        )
+
         sig_id = _signal_dedup_id(run_date, source_path or note_id, "risk", ename)
         sig = Signal(
             id=sig_id,
@@ -162,13 +191,30 @@ def _rule_risk_keywords(conn, run_date: date) -> list[Signal]:
             entity_name=ename,
             signal_type="risk",
             severity=severity,
-            summary=f"Risk language detected in note: {title or 'untitled'}",
-            why_it_matters="Note contains risk-indicating language that may require manager attention.",
+            summary=summary,
+            why_it_matters=why,
             requires_manager_attention=(severity == "high"),
             confidence=confidence,
         )
         signals.append(sig)
     return signals
+
+
+def _extract_risk_snippet(body: str, max_chars: int = 120) -> str:
+    """Return the first sentence or phrase that contains a risk keyword."""
+    lower = body.lower()
+    all_keywords = _HIGH_RISK_KEYWORDS + _MEDIUM_RISK_KEYWORDS + _LOW_RISK_KEYWORDS
+    # Split into sentences
+    import re
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", body)
+    for sent in sentences:
+        sent_lower = sent.lower()
+        if any(kw in sent_lower for kw in all_keywords):
+            snippet = sent.strip()
+            if len(snippet) > max_chars:
+                snippet = snippet[:max_chars].rsplit(" ", 1)[0] + "…"
+            return snippet
+    return ""
 
 
 # ------------------------------------------------------------------
@@ -224,12 +270,13 @@ def _rule_stale_1on1(conn, run_date: date) -> list[Signal]:
 
 
 def _rule_sow_near_deadline(conn, run_date: date) -> list[Signal]:
-    """Emit sow_loe_review signal for deals closing within 7 days without a signed SOW."""
-    deadline = run_date + timedelta(days=7)
+    """Emit sow_loe_review signal for deals closing within 14 days without a signed SOW."""
+    deadline = run_date + timedelta(days=14)
 
     rows = conn.execute(
         """
-        SELECT id, account, deal_name, close_date, sow_status, loe_status
+        SELECT id, account, deal_name, close_date, sow_status, loe_status,
+               probability, services_amount
         FROM deals
         WHERE close_date IS NOT NULL
           AND close_date <= ?
@@ -241,10 +288,15 @@ def _rule_sow_near_deadline(conn, run_date: date) -> list[Signal]:
 
     signals = []
     for row in rows:
-        _, account, deal_name, close_date, sow_status, loe_status = row
+        _, account, deal_name, close_date, sow_status, loe_status, probability, services_amount = row
         if isinstance(close_date, str):
             close_date = date.fromisoformat(close_date)
         days_left = (close_date - run_date).days
+        severity = "high" if days_left <= 7 else "medium"
+
+        value_str = ""
+        if services_amount:
+            value_str = f" (${services_amount:,.0f})"
 
         sig_id = _signal_dedup_id(run_date, f"deal::{deal_name}", "sow_loe_review", deal_name)
         sig = Signal(
@@ -255,10 +307,13 @@ def _rule_sow_near_deadline(conn, run_date: date) -> list[Signal]:
             entity_type="deal",
             entity_name=deal_name,
             signal_type="sow_loe_review",
-            severity="high",
-            summary=f"SOW unsigned with {days_left} day(s) until close date ({close_date})",
-            why_it_matters=f"Deal '{deal_name}' for {account} closes in {days_left} days but SOW is '{sow_status}'.",
-            requires_manager_attention=True,
+            severity=severity,
+            summary=f"SOW unsigned — {deal_name}{value_str} closes in {days_left} day(s) ({close_date})",
+            why_it_matters=(
+                f"Deal '{deal_name}' for {account} closes in {days_left} days "
+                f"but SOW is '{sow_status or 'not-started'}'.{value_str}"
+            ),
+            requires_manager_attention=(severity == "high"),
             due_date=close_date,
             confidence=1.0,
         )

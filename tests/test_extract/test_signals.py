@@ -349,3 +349,133 @@ class TestRiskKeywordSeverity:
         assert "medium" in severities
         assert severities != {"high"}
 
+
+# ===========================================================================
+# Phase 4 — source path quality + severity downgrade
+# ===========================================================================
+
+
+class TestSourcePathQuality:
+    """Risk signals must store a readable vault path, not a raw_document_id hash."""
+
+    def _seed_note_with_raw_doc(self, conn, source_path: str, body: str,
+                                entity_name: str = "Acme Corp") -> None:
+        """Seed a raw_document + note pair to simulate full ingest."""
+        from manager_os.db import content_hash
+        import uuid
+        raw_id = content_hash(source_path)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO raw_documents
+                (id, source_type, source_path, content_hash, content, ingested_at)
+            VALUES (?, 'obsidian', ?, ?, 'body text', CURRENT_TIMESTAMP)
+            """,
+            [raw_id, source_path, raw_id],
+        )
+        note_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO notes (id, raw_document_id, note_date, note_type, entity_type,
+                               entity_name, title, body, tags, created_at)
+            VALUES (?, ?, ?, 'client', 'client', ?, 'Test Note', ?, '[]', CURRENT_TIMESTAMP)
+            """,
+            [note_id, raw_id, date.today().isoformat(), entity_name, body],
+        )
+
+    def test_source_path_is_vault_path_not_hash(self, conn) -> None:
+        vault_path = "/vault/work/clients/Acme/status-2026-06.md"
+        self._seed_note_with_raw_doc(conn, vault_path, "The project is blocked.")
+        run_rule_extraction(conn, run_date=date.today())
+        row = conn.execute(
+            "SELECT source_path FROM signals WHERE signal_type = 'risk'"
+        ).fetchone()
+        assert row is not None
+        sp = row[0]
+        # Must be the vault path, not a hex hash
+        assert sp == vault_path, f"Expected vault path, got: {sp!r}"
+        # Must NOT look like a hex hash
+        assert not (len(sp) >= 32 and all(c in "0123456789abcdefABCDEF" for c in sp)), (
+            f"source_path looks like a hash: {sp!r}"
+        )
+
+    def test_summary_contains_risk_keyword_context(self, conn) -> None:
+        vault_path = "/vault/work/clients/Acme/status.md"
+        body = "Project is on track.\nThe integration work is blocked by client approval.\nOtherwise fine."
+        self._seed_note_with_raw_doc(conn, vault_path, body, entity_name="Acme Corp")
+        run_rule_extraction(conn, run_date=date.today())
+        row = conn.execute(
+            "SELECT summary FROM signals WHERE signal_type = 'risk'"
+        ).fetchone()
+        assert row is not None
+        summary = row[0]
+        # Summary must not be the generic placeholder
+        assert "Risk language detected in note" not in summary or "blocked" in summary.lower()
+        # Summary should contain some content from the note
+        assert len(summary) > 20
+
+
+class TestEntityBasedSeverityDowngrade:
+    """Notes without a named entity should not produce high-severity risk signals."""
+
+    def test_note_without_entity_high_keyword_downgraded_to_medium(self, conn) -> None:
+        # Note with entity_name='' (generic/untitled)
+        _seed_note(conn, body="This is blocked and urgent.", entity_name="")
+        run_rule_extraction(conn, run_date=date.today())
+        rows = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        # Should be medium (downgraded from high due to missing entity)
+        assert any(r[0] == "medium" for r in rows)
+        assert not any(r[0] == "high" for r in rows)
+
+    def test_note_without_entity_medium_keyword_downgraded_to_low(self, conn) -> None:
+        _seed_note(conn, body="There is a concern about something.", entity_name="")
+        run_rule_extraction(conn, run_date=date.today())
+        rows = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        assert any(r[0] == "low" for r in rows)
+
+    def test_note_with_entity_high_keyword_stays_high(self, conn) -> None:
+        _seed_note(conn, body="Acme project is blocked.", entity_name="Acme Corp")
+        run_rule_extraction(conn, run_date=date.today())
+        rows = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        assert any(r[0] == "high" for r in rows)
+
+
+class TestSOWDeadlineWindow:
+    """SOW near-deadline rule should now fire within 14 days, not just 7."""
+
+    def test_sow_fires_within_14_days(self, conn) -> None:
+        close = date.today() + timedelta(days=10)
+        _seed_deal(conn, "Medium Deal", "Acme", close, sow_status="pending")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'sow_loe_review'"
+        ).fetchall()
+        assert len(sigs) == 1
+        # 10 days → medium (not urgent yet)
+        assert sigs[0][0] == "medium"
+
+    def test_sow_fires_within_7_days_as_high(self, conn) -> None:
+        close = date.today() + timedelta(days=5)
+        _seed_deal(conn, "Urgent Deal", "Acme", close, sow_status="pending")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'sow_loe_review'"
+        ).fetchall()
+        assert len(sigs) == 1
+        assert sigs[0][0] == "high"
+
+    def test_sow_no_signal_beyond_14_days(self, conn) -> None:
+        far = date.today() + timedelta(days=20)
+        _seed_deal(conn, "Far Deal", "Acme", far, sow_status="pending")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT id FROM signals WHERE signal_type = 'sow_loe_review'"
+        ).fetchall()
+        assert len(sigs) == 0
+
+

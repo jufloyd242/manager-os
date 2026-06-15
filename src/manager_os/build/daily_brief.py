@@ -97,6 +97,12 @@ def _score_signal(signal: Signal, today: date) -> float:
             score += 20
         elif days <= 14:
             score += 10
+    # Structured signals (from DB fields, not keyword matching) rank higher
+    if signal.signal_type in ("sow_loe_review", "utilization_risk", "deal_change"):
+        score += 25
+    # Weak keyword-only signals rank lower
+    if signal.signal_type == "risk" and signal.confidence < 0.75:
+        score -= 10
     # Low-confidence signals rank lower
     score *= max(signal.confidence, 0.1)
     return score
@@ -186,14 +192,57 @@ def _load_action_items(conn) -> list[ActionItem]:
     items = []
     for row in rows:
         try:
-            items.append(ActionItem(
+            ai = ActionItem(
                 id=row[0], signal_id=row[1], source_note_id=row[2],
                 assigned_to=row[3], description=row[4],
                 due_date=row[5], status=row[6], created_at=row[7],
-            ))
+            )
+            if not _is_junk_action_item(ai.description):
+                items.append(ai)
         except Exception as exc:
             logger.warning("Skipping malformed action item: %s", exc)
     return items
+
+
+# Minimum token count and min length for a useful action item
+_AI_MIN_WORDS = 3
+_AI_MIN_CHARS = 10
+
+# Phrases that indicate template/meta/boilerplate junk
+_JUNK_PATTERNS = [
+    "analyze the document",
+    "update all relevant",
+    "routinely be running",
+    "multiple agents",
+    "be around",
+    "use this template",
+    "fill in the",
+    "add your",
+    "insert here",
+    "todo:",
+    "action item:",
+    "your name",
+    "your action",
+    "see dashboard",
+]
+
+
+def _is_junk_action_item(description: str) -> bool:
+    """Return True when the action item description looks like junk/boilerplate."""
+    if not description:
+        return True
+    desc = description.strip()
+    # Too short
+    if len(desc) < _AI_MIN_CHARS:
+        return True
+    # Too few words (excludes single-word fragments)
+    if len(desc.split()) < _AI_MIN_WORDS:
+        return True
+    # Matches a known junk pattern
+    desc_lower = desc.lower()
+    if any(pat in desc_lower for pat in _JUNK_PATTERNS):
+        return True
+    return False
 
 
 def _load_decisions(conn) -> list[dict]:
@@ -271,6 +320,53 @@ def _bucket_signals(signals: list[Signal]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Section allocation (balanced budget helper)
+# ---------------------------------------------------------------------------
+
+def _section_alloc(bucketed: dict, total: int) -> dict[str, int]:
+    """Return per-section signal counts that sum to at most *total*.
+
+    Structured sections (deals, utilization, people) get guaranteed minimum
+    slots when they have data.  Risks fill whatever budget remains.  When
+    there are no structured signals, risks consume the full budget.
+    Follow-ups are tracked separately and do NOT consume signal budget.
+    """
+    has = {k: len(v) for k, v in bucketed.items()}
+
+    # Guaranteed minimums for structured signals when they have data
+    structured: dict[str, int] = {
+        "deals":       min(has["deal_signals"],       4),
+        "utilization": min(has["utilization_signals"], 3),
+        "people":      min(has["people_signals"],      2),
+        "other":       min(has["other_signals"],       1),
+    }
+    structured_used = sum(structured.values())
+
+    # Risks fill whatever the structured sections haven't claimed
+    risk_budget = max(0, total - structured_used)
+    risk_alloc = min(risk_budget, has["risk_signals"])
+
+    # Redistribute any leftover (when fewer risks than budget) to structured sections
+    leftover = risk_budget - risk_alloc
+    if leftover > 0:
+        for key in ("deals", "people", "utilization", "other"):
+            available_extra = has.get(key + "_signals", 0) - structured[key]
+            extra = min(available_extra, leftover)
+            if extra > 0:
+                structured[key] += extra
+                leftover -= extra
+
+    return {
+        "risks":       risk_alloc,
+        "deals":       structured["deals"],
+        "people":      structured["people"],
+        "utilization": structured["utilization"],
+        "other":       structured["other"],
+        "follow_ups":  4,  # action item cap — independent of signal budget
+    }
+
+
+# ---------------------------------------------------------------------------
 # DB write
 # ---------------------------------------------------------------------------
 
@@ -338,34 +434,36 @@ def generate_daily_brief(
     overflow: dict[str, int] = {}
 
     if max_items is not None:
-        # ---- Global budget mode ----
-        # Take the top max_items signals across all sections combined.
-        shown_signals_list = visible_signals[:max_items]
-
-        bucketed_shown = _bucket_signals(shown_signals_list)
+        # ---- Section-balanced global budget ----
+        # Allocate budget proportionally across section types so one noisy
+        # section can't consume the whole brief.
         bucketed_all = _bucket_signals(visible_signals)
 
-        # Per-section overflow = how many signals in that section were cut
+        # Section allocations: structured signals get guaranteed slots;
+        # risks get a capped share to prevent crowding.
+        total = max_items
+        alloc = _section_alloc(bucketed_all, total)
+
+        critical_shown = bucketed_all["critical_signals"]  # always include critical
+        risks_shown    = bucketed_all["risk_signals"][:alloc["risks"]]
+        people_shown   = bucketed_all["people_signals"][:alloc["people"]]
+        deals_shown    = bucketed_all["deal_signals"][:alloc["deals"]]
+        utilization_shown = bucketed_all["utilization_signals"][:alloc["utilization"]]
+        other_shown    = bucketed_all["other_signals"][:alloc["other"]]
+
         overflow = {
             "critical": 0,
-            "risks": max(0, len(bucketed_all["risk_signals"]) - len(bucketed_shown["risk_signals"])),
-            "people": max(0, len(bucketed_all["people_signals"]) - len(bucketed_shown["people_signals"])),
-            "deals": max(0, len(bucketed_all["deal_signals"]) - len(bucketed_shown["deal_signals"])),
-            "utilization": max(0, len(bucketed_all["utilization_signals"]) - len(bucketed_shown["utilization_signals"])),
-            "other": max(0, len(bucketed_all["other_signals"]) - len(bucketed_shown["other_signals"])),
+            "risks": max(0, len(bucketed_all["risk_signals"]) - len(risks_shown)),
+            "people": max(0, len(bucketed_all["people_signals"]) - len(people_shown)),
+            "deals": max(0, len(bucketed_all["deal_signals"]) - len(deals_shown)),
+            "utilization": max(0, len(bucketed_all["utilization_signals"]) - len(utilization_shown)),
+            "other": max(0, len(bucketed_all["other_signals"]) - len(other_shown)),
         }
 
-        critical_shown = bucketed_shown["critical_signals"]
-        risks_shown = bucketed_shown["risk_signals"]
-        people_shown = bucketed_shown["people_signals"]
-        deals_shown = bucketed_shown["deal_signals"]
-        utilization_shown = bucketed_shown["utilization_signals"]
-        other_shown = bucketed_shown["other_signals"]
-
-        # Decisions and follow-ups get a small fixed allocation outside the signal budget
+        # Decisions and follow-ups get a small fixed allocation
         decisions_shown = decisions[:3]
         overflow["decisions"] = max(0, len(decisions) - len(decisions_shown))
-        follow_ups_shown = manager_ais_ranked[:3]
+        follow_ups_shown = manager_ais_ranked[:min(alloc.get("follow_ups", 4), 4)]
         overflow["follow_ups"] = max(0, len(manager_ais_ranked) - len(follow_ups_shown))
 
     else:
@@ -417,8 +515,18 @@ def generate_daily_brief(
         trim_blocks=True,
         lstrip_blocks=True,
     )
-    # Custom filter for source path display
+    # Custom filter for readable source path — prefers note filename, falls back to raw value
+    def _readable_path(p: str) -> str:
+        if not p:
+            return "(no source)"
+        # Looks like a hex hash (>= 32 hex chars with no path separator)?
+        stripped = p.strip()
+        if len(stripped) >= 32 and all(c in "0123456789abcdefABCDEF" for c in stripped):
+            return "(no source)"
+        return Path(p).name if p else "(no source)"
+
     env.filters["basename"] = lambda p: Path(p).name if p else ""
+    env.filters["readable_path"] = _readable_path
 
     template = env.get_template("daily_brief.md")
     content = template.render(

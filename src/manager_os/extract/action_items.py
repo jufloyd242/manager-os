@@ -147,7 +147,7 @@ def extract_action_items(note: NoteRecord, conn, force: bool = False) -> Extract
     # --- Pattern 1: Manager commitments ---
     for m in _MANAGER_COMMITMENT_RE.finditer(body):
         description = m.group(1).strip().rstrip(".")
-        if len(description) < 5:
+        if len(description) < 8 or len(description.split()) < 2:
             continue
         due_str = m.group(2)
         due_date = _resolve_relative_date(due_str, anchor) if due_str else None
@@ -161,7 +161,7 @@ def extract_action_items(note: NoteRecord, conn, force: bool = False) -> Extract
     # --- Pattern 2: TODOs ---
     for m in _TODO_RE.finditer(body):
         description = m.group(1).strip().rstrip(".")
-        if len(description) < 5:
+        if len(description) < 8 or len(description.split()) < 2:
             continue
         due_str = m.group(2)
         due_date = _resolve_relative_date(due_str, anchor) if due_str else None
@@ -175,7 +175,12 @@ def extract_action_items(note: NoteRecord, conn, force: bool = False) -> Extract
     # --- Pattern 3: Waiting on ---
     for m in _WAITING_ON_RE.finditer(body):
         assignee_raw = m.group(1).strip().rstrip(".,")
+        # Cap fragment length — long fragments indicate the regex ran too far
+        if len(assignee_raw) > 50:
+            assignee_raw = assignee_raw[:50].rsplit(" ", 1)[0]
         action = (m.group(2) or m.group(3) or "").strip().rstrip(".")
+        if len(action) > 80:
+            action = action[:80].rsplit(" ", 1)[0] + "…"
         due_str = m.group(4)
         due_date = _resolve_relative_date(due_str, anchor) if due_str else None
         description = f"Waiting on {assignee_raw}" + (f" to {action}" if action else "")
@@ -244,11 +249,19 @@ def extract_action_items_from_all_notes(
 
     combined = ExtractionResult()
     for row in rows:
+        note_type_val = row[3] or ""
+        # Skip meta/template/instruction notes — they contain boilerplate patterns
+        if note_type_val.lower() in ("template", "meta", "instructions", "prompt", "index"):
+            combined.skipped += 1
+            combined.skip_reasons["junk_note_type"] = (
+                combined.skip_reasons.get("junk_note_type", 0) + 1
+            )
+            continue
         note = NoteRecord(
             id=row[0],
             raw_document_id=row[1],
             note_date=row[2],
-            note_type=row[3] or "",
+            note_type=note_type_val,
             entity_type=row[4] or "",
             entity_name=row[5] or "",
             title=row[6] or "",
