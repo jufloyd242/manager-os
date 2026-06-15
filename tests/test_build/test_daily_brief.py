@@ -321,3 +321,212 @@ class TestSourceEvidence:
         brief = generate_daily_brief(conn, target_date=date.today())
         assert "No source sig" in brief.content
 
+
+# ===========================================================================
+# Global max_items budget
+# ===========================================================================
+
+
+class TestGlobalMaxItems:
+    def test_max_items_total_respected_across_sections(self, conn) -> None:
+        """When max_items is set, total signals shown across all sections <= max_items."""
+        for i in range(10):
+            _seed_signal_ext(conn, f"Risk{i}", signal_type="risk",
+                             severity="high", summary=f"Risk signal {i}")
+            _seed_signal_ext(conn, f"Person{i}", signal_type="people_health",
+                             severity="medium", summary=f"People signal {i}")
+            _seed_signal_ext(conn, f"Deal{i}", signal_type="sow_loe_review",
+                             severity="high", summary=f"Deal signal {i}")
+
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=8)
+        shown = sum(
+            1
+            for prefix in ("Risk signal", "People signal", "Deal signal")
+            for i in range(10)
+            if f"{prefix} {i}" in brief.content
+        )
+        assert shown <= 8
+
+    def test_max_items_shown_signals_field(self, conn) -> None:
+        for i in range(20):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Signal {i}")
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=5)
+        assert brief.shown_signals == 5
+
+    def test_max_items_shown_less_than_total_when_few_signals(self, conn) -> None:
+        for i in range(3):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Signal {i}")
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=10)
+        assert brief.shown_signals == 3
+        assert len(brief.signal_ids) == 3
+
+    def test_max_items_all_shown_when_equal(self, conn) -> None:
+        for i in range(5):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Signal {i}")
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=5)
+        assert brief.shown_signals == 5
+
+    def test_shown_signals_in_content_header(self, conn) -> None:
+        """Template header shows shown/total numbers."""
+        for i in range(20):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Signal {i}")
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=7)
+        assert "7" in brief.content
+        assert "20" in brief.content
+
+    def test_include_low_priority_still_respects_max_items(self, conn) -> None:
+        for i in range(20):
+            _seed_signal_ext(conn, f"Corp{i}", severity="low", summary=f"Low {i}")
+        brief = generate_daily_brief(
+            conn, target_date=date.today(), max_items=5, include_low_priority=True
+        )
+        assert brief.shown_signals <= 5
+
+    def test_max_items_none_uses_per_section_defaults(self, conn) -> None:
+        """Without max_items, per-section defaults apply (risks default = 3)."""
+        for i in range(6):
+            _seed_signal_ext(conn, f"Corp{i}", signal_type="risk", summary=f"Risk {i}")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        shown = sum(1 for i in range(6) if f"Risk {i}" in brief.content)
+        assert shown == 3
+
+
+# ===========================================================================
+# Brief output shown_signals field
+# ===========================================================================
+
+
+class TestBriefOutputCounts:
+    def test_shown_signals_zero_for_empty_db(self, conn) -> None:
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert brief.shown_signals == 0
+
+    def test_shown_signals_equals_total_when_under_default_limit(self, conn) -> None:
+        for i in range(2):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Signal {i}")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert brief.shown_signals == 2
+
+    def test_signal_ids_contains_all_open_signals(self, conn) -> None:
+        for i in range(5):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Signal {i}")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert len(brief.signal_ids) == 5
+
+    def test_shown_less_than_total_when_limit_applied(self, conn) -> None:
+        for i in range(8):
+            _seed_signal_ext(conn, f"Corp{i}", signal_type="risk", summary=f"Risk {i}")
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=3)
+        assert brief.shown_signals == 3
+        assert len(brief.signal_ids) == 8
+
+
+# ===========================================================================
+# Deduplication
+# ===========================================================================
+
+
+class TestDeduplication:
+    def test_dedup_same_source_same_type_keeps_one(self, conn) -> None:
+        """Multiple signals from the same source note + signal_type -> only 1 shown."""
+        for i in range(3):
+            _seed_signal_ext(
+                conn, f"Corp{i}",
+                source_path="/vault/notes/noisy_note.md",
+                signal_type="risk",
+                summary=f"Dup signal {i}",
+                severity="high",
+            )
+        brief = generate_daily_brief(conn, target_date=date.today())
+        shown = sum(1 for i in range(3) if f"Dup signal {i}" in brief.content)
+        assert shown == 1
+
+    def test_dedup_different_sources_all_shown(self, conn) -> None:
+        for i in range(3):
+            _seed_signal_ext(
+                conn, f"Corp{i}",
+                source_path=f"/vault/notes/note_{i}.md",
+                signal_type="risk",
+                summary=f"Unique signal {i}",
+                severity="high",
+            )
+        brief = generate_daily_brief(conn, target_date=date.today())
+        shown = sum(1 for i in range(3) if f"Unique signal {i}" in brief.content)
+        assert shown == 3
+
+    def test_dedup_empty_source_path_not_deduplicated(self, conn) -> None:
+        """Computed signals (source_path='') are never deduplicated."""
+        for i in range(3):
+            _seed_signal_ext(
+                conn, f"Corp{i}",
+                source_path="",
+                signal_type="risk",
+                summary=f"Computed {i}",
+            )
+        brief = generate_daily_brief(conn, target_date=date.today())
+        shown = sum(1 for i in range(3) if f"Computed {i}" in brief.content)
+        assert shown == 3
+
+    def test_dedup_different_types_same_source_both_shown(self, conn) -> None:
+        """Same source but different signal_type -> both kept (different dedup key)."""
+        _seed_signal_ext(
+            conn, "Corp A",
+            source_path="/vault/notes/shared.md",
+            signal_type="risk",
+            summary="Risk from shared",
+        )
+        _seed_signal_ext(
+            conn, "Corp B",
+            source_path="/vault/notes/shared.md",
+            signal_type="people_health",
+            summary="People from shared",
+        )
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert "Risk from shared" in brief.content
+        assert "People from shared" in brief.content
+
+
+# ===========================================================================
+# Priority ranking
+# ===========================================================================
+
+
+class TestPriorityRankingCrossType:
+    def test_due_soon_deal_ranks_above_generic_risk(self, conn) -> None:
+        today = date.today()
+        _seed_signal_ext(
+            conn, "Generic Note", signal_type="risk", severity="medium",
+            summary="Generic concern noted", confidence=0.7,
+        )
+        _seed_signal_ext(
+            conn, "Urgent Deal", signal_type="sow_loe_review", severity="high",
+            summary="SOW unsigned 2 days until close",
+            due_date=today + timedelta(days=2),
+            requires_manager_attention=True,
+        )
+        brief = generate_daily_brief(conn, target_date=today, max_items=2)
+        assert "SOW unsigned 2 days until close" in brief.content
+
+    def test_capacity_gap_included_in_budget(self, conn) -> None:
+        _seed_signal_ext(
+            conn, "Engineer A", signal_type="utilization_risk", severity="high",
+            summary="120% allocation overalloc",
+        )
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=5)
+        assert "120% allocation overalloc" in brief.content
+
+    def test_close_date_soon_beats_low_priority(self, conn) -> None:
+        today = date.today()
+        _seed_signal_ext(
+            conn, "Big Deal", signal_type="sow_loe_review", severity="high",
+            summary="Close in 3 days",
+            due_date=today + timedelta(days=3),
+        )
+        _seed_signal_ext(
+            conn, "Generic Corp", signal_type="risk", severity="low",
+            summary="Low priority note",
+        )
+        brief = generate_daily_brief(conn, target_date=today, max_items=1)
+        assert "Close in 3 days" in brief.content
+        assert "Low priority note" not in brief.content
+

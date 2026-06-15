@@ -20,28 +20,48 @@ logger = logging.getLogger(__name__)
 # Rule 1 — Risk keyword in note body
 # ------------------------------------------------------------------
 
-_RISK_KEYWORDS = [
+# Keywords are tiered by urgency. The highest tier that matches determines severity.
+_HIGH_RISK_KEYWORDS = [
     "at risk",
     "escalat",
-    "bloated",
-    "delay",
-    "delayed",
-    "miss",
-    "missed",
     "blocked",
     "blocking",
-    "concern",
-    "concerned",
     "overdue",
     "urgent",
     "critical",
     "red flag",
 ]
 
+_MEDIUM_RISK_KEYWORDS = [
+    "delay",
+    "delayed",
+    "miss",
+    "missed",
+    "concern",
+    "concerned",
+]
+
+_LOW_RISK_KEYWORDS = [
+    "bloated",
+]
+
 
 def _contains_risk_keyword(text: str) -> bool:
     lower = text.lower()
-    return any(kw in lower for kw in _RISK_KEYWORDS)
+    return any(
+        kw in lower
+        for kw in _HIGH_RISK_KEYWORDS + _MEDIUM_RISK_KEYWORDS + _LOW_RISK_KEYWORDS
+    )
+
+
+def _risk_keyword_severity(text: str) -> tuple[str, float]:
+    """Return (severity, confidence) for the highest-tier keyword found in text."""
+    lower = text.lower()
+    if any(kw in lower for kw in _HIGH_RISK_KEYWORDS):
+        return "high", 0.85
+    if any(kw in lower for kw in _MEDIUM_RISK_KEYWORDS):
+        return "medium", 0.70
+    return "low", 0.50
 
 
 # ------------------------------------------------------------------
@@ -130,6 +150,8 @@ def _rule_risk_keywords(conn, run_date: date) -> list[Signal]:
         if etype not in ("person", "client", "deal", "team", "practice"):
             etype = "team"
 
+        severity, confidence = _risk_keyword_severity(body or "")
+
         sig_id = _signal_dedup_id(run_date, source_path or note_id, "risk", ename)
         sig = Signal(
             id=sig_id,
@@ -139,11 +161,11 @@ def _rule_risk_keywords(conn, run_date: date) -> list[Signal]:
             entity_type=etype,  # type: ignore[arg-type]
             entity_name=ename,
             signal_type="risk",
-            severity="high",
+            severity=severity,
             summary=f"Risk language detected in note: {title or 'untitled'}",
             why_it_matters="Note contains risk-indicating language that may require manager attention.",
-            requires_manager_attention=True,
-            confidence=0.85,
+            requires_manager_attention=(severity == "high"),
+            confidence=confidence,
         )
         signals.append(sig)
     return signals

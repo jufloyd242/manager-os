@@ -701,7 +701,12 @@ def brief(
     )
     out_path = write_brief_to_file(b, output_path=output)
     console.print(f"[green]Brief written to:[/green] {out_path}")
-    console.print(f"  {len(b.signal_ids)} signal(s) included")
+    total = len(b.signal_ids)
+    shown = b.shown_signals
+    if shown >= total:
+        console.print(f"  Showing all {total} open signal(s).")
+    else:
+        console.print(f"  Showing {shown} of {total} open signals.")
 
 
 # ---------------------------------------------------------------------------

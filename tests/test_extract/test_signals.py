@@ -243,3 +243,109 @@ def test_rule_extraction_on_fixture_data(conn, vault_dir: Path) -> None:
     types = {r[0] for r in signal_types}
     # At least one of the rules should fire on fixture data
     assert len(types) >= 1
+
+
+# ===========================================================================
+# Severity assignment
+# ===========================================================================
+
+
+class TestRiskKeywordSeverity:
+    def test_blocked_keyword_is_high(self, conn) -> None:
+        _seed_note(conn, body="Task is blocked by the client approval.")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        assert all(s[0] == "high" for s in sigs)
+
+    def test_overdue_keyword_is_high(self, conn) -> None:
+        _seed_note(conn, body="The deliverable is overdue.", entity_name="Overdue Client")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        assert any(s[0] == "high" for s in sigs)
+
+    def test_escalate_keyword_is_high(self, conn) -> None:
+        _seed_note(conn, body="We may need to escalate this issue.", entity_name="Escalate Co")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        assert any(s[0] == "high" for s in sigs)
+
+    def test_delay_keyword_is_medium(self, conn) -> None:
+        _seed_note(conn, body="The project is experiencing a delay.", entity_name="Delay Corp")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        assert any(s[0] == "medium" for s in sigs)
+        assert not any(s[0] == "high" for s in sigs)
+
+    def test_concern_keyword_is_medium(self, conn) -> None:
+        _seed_note(conn, body="There is some concern about the timeline.", entity_name="Concern Inc")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        assert any(s[0] == "medium" for s in sigs)
+
+    def test_mixed_notes_not_all_high(self, conn) -> None:
+        """Vault with both high and medium keyword notes must not produce all-high signals."""
+        _seed_note(conn, body="The project is blocked.", entity_name="Client Alpha")
+        _seed_note(conn, body="Some delay expected next week.", entity_name="Client Beta")
+        _seed_note(conn, body="Concern about resourcing.", entity_name="Client Gamma")
+        run_rule_extraction(conn, run_date=date.today())
+        rows = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        severities = {r[0] for r in rows}
+        assert "high" in severities
+        assert "medium" in severities
+        # Not every signal should be high
+        assert severities != {"high"}
+
+    def test_bloated_keyword_is_low(self, conn) -> None:
+        _seed_note(conn, body="The backlog is getting bloated.", entity_name="Backlog Co")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        assert any(s[0] == "low" for s in sigs)
+        assert not any(s[0] in ("high", "medium") for s in sigs)
+
+    def test_at_risk_is_high(self, conn) -> None:
+        _seed_note(conn, body="The deal is at risk of falling through.", entity_name="Risk Deal")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        assert any(s[0] == "high" for s in sigs)
+
+    def test_requires_manager_attention_only_for_high(self, conn) -> None:
+        """requires_manager_attention should be True only for high-severity signals."""
+        _seed_note(conn, body="We have a concern about scope.", entity_name="Scope Co")
+        run_rule_extraction(conn, run_date=date.today())
+        rows = conn.execute(
+            "SELECT severity, requires_manager_attention FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        for sev, rma in rows:
+            if sev == "medium":
+                assert not rma, "Medium signals should not require manager attention"
+
+    def test_status_distribution_not_all_high_for_mixed_data(self, conn) -> None:
+        """With both high and medium keyword notes, not every risk signal should be high."""
+        _seed_note(conn, body="The project is blocked.", entity_name="Client Alpha")
+        _seed_note(conn, body="There is some concern about scope.", entity_name="Client Beta")
+        _seed_note(conn, body="Some delay expected next sprint.", entity_name="Client Gamma")
+        run_rule_extraction(conn, run_date=date.today())
+        rows = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        severities = {r[0] for r in rows}
+        assert "high" in severities
+        assert "medium" in severities
+        assert severities != {"high"}
+

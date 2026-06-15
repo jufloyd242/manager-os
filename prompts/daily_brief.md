@@ -1,8 +1,11 @@
 # Daily Brief -- {{ brief_date }}
 
-**{{ total_signals }} signal(s)** | **{{ open_action_items }} follow-up(s)** | **{{ meeting_count }} meeting(s) today**
+**Showing {{ shown_signals }} of {{ total_signals }} signal(s)** | **{{ open_action_items }} follow-up(s)** | **{{ meeting_count }} meeting(s) today**
 {%- if total_hidden > 0 %}
 *{{ total_hidden }} lower-priority item(s) hidden -- see dashboard*
+{%- endif %}
+{%- if suppressed_count > 0 %}
+*{{ suppressed_count }} duplicate signal(s) suppressed*
 {%- endif %}
 
 ---
@@ -91,4 +94,4 @@
 {% endif %}
 
 ---
-*Generated {{ generated_at }} | {{ total_signals }} total signals, {{ open_action_items }} open follow-ups*
+*Generated {{ generated_at }} | showing {{ shown_signals }} of {{ total_signals }} total signals, {{ open_action_items }} open follow-ups*

@@ -51,6 +51,36 @@ _DEFAULT_LIMITS = {
 
 
 # ---------------------------------------------------------------------------
+# Deduplication
+# ---------------------------------------------------------------------------
+
+def _deduplicate_signals(signals: list[Signal]) -> tuple[list[Signal], int]:
+    """Suppress lower-scored duplicate signals from the same source note + type.
+
+    Signals that share the same non-empty source_path and signal_type are
+    considered duplicates; only the highest-scored one (first in the already-
+    ranked list) is kept. Signals with an empty source_path are never
+    deduplicated — they are computed from DB fields, not from a single note.
+
+    Returns (unique_signals, suppressed_count).
+    """
+    seen: set[tuple[str, str]] = set()
+    unique: list[Signal] = []
+    suppressed = 0
+    for s in signals:
+        if not s.source_path:
+            unique.append(s)
+            continue
+        key = (s.source_path, s.signal_type)
+        if key in seen:
+            suppressed += 1
+        else:
+            seen.add(key)
+            unique.append(s)
+    return unique, suppressed
+
+
+# ---------------------------------------------------------------------------
 # Ranking
 # ---------------------------------------------------------------------------
 
@@ -281,63 +311,104 @@ def generate_daily_brief(
     if target_date is None:
         target_date = date.today()
 
-    # Effective per-section limits
-    limits = {k: (max_items if max_items is not None else v) for k, v in _DEFAULT_LIMITS.items()}
-
     # Load raw data
     all_signals = _load_signals(conn, target_date)
     all_action_items = _load_action_items(conn)
     decisions = _load_decisions(conn)
     meetings = _load_meetings(conn, target_date)
 
-    # Rank signals globally then bucket
+    # Rank globally, deduplicate, then apply low-priority filter
     ranked_signals = _rank_signals(all_signals, target_date)
-    bucketed = _bucket_signals(ranked_signals)
+    deduped_signals, suppressed_count = _deduplicate_signals(ranked_signals)
+    visible_signals = (
+        [s for s in deduped_signals if s.severity != "low"]
+        if not include_low_priority
+        else deduped_signals
+    )
 
     signal_ids = [s.id for s in all_signals]
 
-    # Apply per-section limits and compute overflow
-    overflow: dict[str, int] = {}
-
-    critical_shown = bucketed["critical_signals"]  # never truncate critical
-    overflow["critical"] = 0
-
-    risks_shown, overflow["risks"] = _apply_limit(
-        bucketed["risk_signals"], limits["risks"], include_low_priority
-    )
-    people_shown, overflow["people"] = _apply_limit(
-        bucketed["people_signals"], limits["people"], include_low_priority
-    )
-    deals_shown, overflow["deals"] = _apply_limit(
-        bucketed["deal_signals"], limits["deals"], include_low_priority
-    )
-    utilization_shown, overflow["utilization"] = _apply_limit(
-        bucketed["utilization_signals"], limits["utilization"], include_low_priority
-    )
-    other_shown, overflow["other"] = _apply_limit(
-        bucketed["other_signals"], limits["other"], include_low_priority
-    )
-
-    # Decisions: cap at limit
-    decisions_shown = decisions[: limits["decisions"]]
-    overflow["decisions"] = max(0, len(decisions) - len(decisions_shown))
-
-    # Follow-ups Justin owes: manager action items, ranked by due date
+    # Follow-ups Justin owes (manager action items), ranked by due date
     manager_ais = [ai for ai in all_action_items if ai.assigned_to in ("manager", "Manager")]
     manager_ais_ranked = sorted(manager_ais, key=lambda ai: _score_action_item(ai, target_date), reverse=True)
-    follow_ups_shown = manager_ais_ranked[: limits["follow_ups"]]
-    overflow["follow_ups"] = max(0, len(manager_ais_ranked) - len(follow_ups_shown))
 
     # All other open action items (not manager)
     other_ais = [ai for ai in all_action_items if ai.assigned_to not in ("manager", "Manager")]
 
-    # Meetings
-    meetings_shown = meetings[: limits["meetings"]]
+    overflow: dict[str, int] = {}
+
+    if max_items is not None:
+        # ---- Global budget mode ----
+        # Take the top max_items signals across all sections combined.
+        shown_signals_list = visible_signals[:max_items]
+
+        bucketed_shown = _bucket_signals(shown_signals_list)
+        bucketed_all = _bucket_signals(visible_signals)
+
+        # Per-section overflow = how many signals in that section were cut
+        overflow = {
+            "critical": 0,
+            "risks": max(0, len(bucketed_all["risk_signals"]) - len(bucketed_shown["risk_signals"])),
+            "people": max(0, len(bucketed_all["people_signals"]) - len(bucketed_shown["people_signals"])),
+            "deals": max(0, len(bucketed_all["deal_signals"]) - len(bucketed_shown["deal_signals"])),
+            "utilization": max(0, len(bucketed_all["utilization_signals"]) - len(bucketed_shown["utilization_signals"])),
+            "other": max(0, len(bucketed_all["other_signals"]) - len(bucketed_shown["other_signals"])),
+        }
+
+        critical_shown = bucketed_shown["critical_signals"]
+        risks_shown = bucketed_shown["risk_signals"]
+        people_shown = bucketed_shown["people_signals"]
+        deals_shown = bucketed_shown["deal_signals"]
+        utilization_shown = bucketed_shown["utilization_signals"]
+        other_shown = bucketed_shown["other_signals"]
+
+        # Decisions and follow-ups get a small fixed allocation outside the signal budget
+        decisions_shown = decisions[:3]
+        overflow["decisions"] = max(0, len(decisions) - len(decisions_shown))
+        follow_ups_shown = manager_ais_ranked[:3]
+        overflow["follow_ups"] = max(0, len(manager_ais_ranked) - len(follow_ups_shown))
+
+    else:
+        # ---- Per-section mode (default) ----
+        limits = dict(_DEFAULT_LIMITS)
+        bucketed = _bucket_signals(visible_signals)
+
+        critical_shown = bucketed["critical_signals"]
+        overflow["critical"] = 0
+
+        risks_shown, overflow["risks"] = _apply_limit(
+            bucketed["risk_signals"], limits["risks"], include_low_priority
+        )
+        people_shown, overflow["people"] = _apply_limit(
+            bucketed["people_signals"], limits["people"], include_low_priority
+        )
+        deals_shown, overflow["deals"] = _apply_limit(
+            bucketed["deal_signals"], limits["deals"], include_low_priority
+        )
+        utilization_shown, overflow["utilization"] = _apply_limit(
+            bucketed["utilization_signals"], limits["utilization"], include_low_priority
+        )
+        other_shown, overflow["other"] = _apply_limit(
+            bucketed["other_signals"], limits["other"], include_low_priority
+        )
+
+        decisions_shown = decisions[: limits["decisions"]]
+        overflow["decisions"] = max(0, len(decisions) - len(decisions_shown))
+        follow_ups_shown = manager_ais_ranked[: limits["follow_ups"]]
+        overflow["follow_ups"] = max(0, len(manager_ais_ranked) - len(follow_ups_shown))
+
+    # Meetings (same in both modes)
+    meet_limit = _DEFAULT_LIMITS["meetings"]
+    meetings_shown = meetings[:meet_limit]
     overflow["meetings"] = max(0, len(meetings) - len(meetings_shown))
 
     # Totals for header
     total_hidden = sum(overflow.values())
     total_open_action_items = len(all_action_items)
+    shown_signal_count = (
+        len(critical_shown) + len(risks_shown) + len(people_shown)
+        + len(deals_shown) + len(utilization_shown) + len(other_shown)
+    )
 
     # Render template
     env = Environment(
@@ -354,6 +425,8 @@ def generate_daily_brief(
         brief_date=target_date.isoformat(),
         generated_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
         total_signals=len(all_signals),
+        shown_signals=shown_signal_count,
+        suppressed_count=suppressed_count,
         open_action_items=total_open_action_items,
         meeting_count=len(meetings),
         total_hidden=total_hidden,
@@ -379,6 +452,7 @@ def generate_daily_brief(
         brief_date=target_date,
         content=content,
         signal_ids=signal_ids,
+        shown_signals=shown_signal_count,
     )
 
     _write_brief_to_db(conn, brief)
