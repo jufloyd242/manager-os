@@ -2716,6 +2716,176 @@ def feedback_summary() -> None:
     console.print()
 
 
+# ---------------------------------------------------------------------------
+# action  (sub-command group: list / complete / stale / dismiss / snooze / reopen)
+# ---------------------------------------------------------------------------
+
+action_app = typer.Typer(help="Manage open action items.")
+app.add_typer(action_app, name="action")
+
+_ACTION_SELECT = """
+    SELECT id, assigned_to, description, due_date, status,
+           feedback_rating, feedback_reason, snooze_until, created_at
+    FROM action_items
+"""
+
+
+def _print_action_table(rows) -> None:
+    """Render action items as a Rich table."""
+    if not rows:
+        console.print("[dim]No matching action items.[/dim]")
+        return
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Brief ID", style="cyan", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Assigned to", style="dim")
+    table.add_column("Description", overflow="fold")
+    table.add_column("Due", style="dim")
+    table.add_column("Feedback", style="dim")
+    _STATUS_STYLE = {
+        "open": "green", "completed": "dim", "stale": "dim",
+        "dismissed": "dim", "snoozed": "yellow", "not_mine": "dim",
+    }
+    for r in rows:
+        ai_id, assigned_to, desc, due, status, fb_rating, fb_reason, snooze, _ = r
+        brief_id = f"action:{ai_id[:16]}"
+        sty = _STATUS_STYLE.get(status, "")
+        fb_str = fb_rating or ""
+        if fb_reason:
+            fb_str += f" ({fb_reason[:30]})"
+        table.add_row(
+            brief_id,
+            f"[{sty}]{status}[/{sty}]" if sty else status,
+            assigned_to or "",
+            desc[:80] + ("…" if len(desc) > 80 else ""),
+            str(due) if due else "",
+            fb_str,
+        )
+    console.print(table)
+
+
+@action_app.command("list")
+def action_list(
+    status_filter: str = typer.Option(
+        "open",
+        "--status", "-s",
+        help="Filter by status: open, completed, stale, all",
+    ),
+    limit: int = typer.Option(30, "--limit", "-n"),
+) -> None:
+    """List action items from the database."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+
+    if status_filter == "all":
+        where = ""
+        params: list = []
+    else:
+        statuses = [s.strip() for s in status_filter.split(",")]
+        placeholders = ", ".join("?" * len(statuses))
+        where = f"WHERE status IN ({placeholders})"
+        params = statuses
+
+    rows = conn.execute(
+        _ACTION_SELECT + where + " ORDER BY due_date NULLS LAST LIMIT ?",
+        params + [limit],
+    ).fetchall()
+
+    console.print()
+    console.print(f"[bold cyan]Action Items[/bold cyan]  [dim](filter: {status_filter})[/dim]")
+    console.print("─" * 60)
+    _print_action_table(rows)
+    console.print()
+
+
+def _action_update(item_id: str, status: str, reason: Optional[str] = None) -> None:
+    """Shared helper: update one action item by brief-id or raw id."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.dashboard_data import update_action_item
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+
+    # Accept both "action:abc123" and raw 16-char prefix
+    raw_id = item_id.removeprefix("action:")
+    # Find by prefix (since brief IDs are truncated to 16 chars)
+    row = conn.execute(
+        "SELECT id FROM action_items WHERE id LIKE ?", [raw_id + "%"]
+    ).fetchone()
+    if row is None:
+        console.print(f"[red]Action item not found: {item_id!r}[/red]")
+        raise typer.Exit(1)
+    full_id = row[0]
+    update_action_item(conn, full_id, status=status, feedback_reason=reason)
+    console.print(f"[green]✓[/green]  [cyan]action:{full_id[:16]}[/cyan] → [bold]{status}[/bold]"
+                  + (f"  [dim]({reason})[/dim]" if reason else ""))
+
+
+@action_app.command("complete")
+def action_complete(
+    item_id: str = typer.Argument(..., help="Brief ID (action:abc123) or raw action item ID."),
+) -> None:
+    """Mark an action item as completed."""
+    _action_update(item_id, "completed")
+
+
+@action_app.command("stale")
+def action_stale(
+    item_id: str = typer.Argument(...),
+    reason: Optional[str] = typer.Option(None, "--reason", "-r"),
+) -> None:
+    """Mark an action item as stale (old/no longer relevant)."""
+    _action_update(item_id, "stale", reason)
+
+
+@action_app.command("dismiss")
+def action_dismiss(
+    item_id: str = typer.Argument(...),
+    reason: Optional[str] = typer.Option(None, "--reason", "-r"),
+) -> None:
+    """Dismiss an action item (not relevant / not mine)."""
+    _action_update(item_id, "dismissed", reason)
+
+
+@action_app.command("snooze")
+def action_snooze(
+    item_id: str = typer.Argument(...),
+    until: str = typer.Option(..., "--until", metavar="YYYY-MM-DD", help="Snooze until this date."),
+) -> None:
+    """Snooze an action item until a future date."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.dashboard_data import update_action_item
+
+    try:
+        snooze_date = date.fromisoformat(until)
+    except ValueError:
+        console.print(f"[red]Invalid date {until!r}. Use YYYY-MM-DD.[/red]")
+        raise typer.Exit(1)
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+    raw_id = item_id.removeprefix("action:")
+    row = conn.execute("SELECT id FROM action_items WHERE id LIKE ?", [raw_id + "%"]).fetchone()
+    if row is None:
+        console.print(f"[red]Action item not found: {item_id!r}[/red]")
+        raise typer.Exit(1)
+    update_action_item(conn, row[0], status="snoozed", snooze_until=snooze_date)
+    console.print(f"[yellow]💤[/yellow]  [cyan]action:{row[0][:16]}[/cyan] snoozed until [bold]{snooze_date}[/bold]")
+
+
+@action_app.command("reopen")
+def action_reopen(
+    item_id: str = typer.Argument(...),
+) -> None:
+    """Reopen a completed, stale, or dismissed action item."""
+    _action_update(item_id, "open")
+
+
 if __name__ == "__main__":
     app()
 

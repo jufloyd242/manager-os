@@ -80,9 +80,11 @@ tabs = st.tabs(["Today", "People", "Clients", "Deals", "Forecast", "Meeting Prep
 
 with tabs[0]:
     from manager_os.build.dashboard_data import (
+        get_action_items_filtered,
         get_open_action_items,
         get_signal_counts,
         get_today_signals,
+        update_action_item,
         update_signal_status,
     )
 
@@ -91,15 +93,24 @@ with tabs[0]:
         return get_today_signals(conn, target_date=d, min_severity=sev)
 
     @st.cache_data(ttl=300)
-    def _action_items():
-        return get_open_action_items(conn)
+    def _action_items(show_stale: bool = False, show_completed: bool = False):
+        statuses = ["open"]
+        if show_stale:
+            statuses += ["stale", "not_mine"]
+        if show_completed:
+            statuses.append("completed")
+        return get_action_items_filtered(conn, statuses=statuses)
 
     @st.cache_data(ttl=300)
     def _signal_counts():
         return get_signal_counts(conn)
 
+    # Action item display filters (sidebar-like inline toggles)
+    _show_stale = st.session_state.get("ai_show_stale", False)
+    _show_completed = st.session_state.get("ai_show_completed", False)
+
     signals = _today_signals(selected_date, min_severity)
-    action_items = _action_items()
+    action_items = _action_items(show_stale=_show_stale, show_completed=_show_completed)
     counts = _signal_counts()
 
     # Metrics row
@@ -196,12 +207,61 @@ with tabs[0]:
                             st.rerun()
 
     # Action items section
-    if action_items:
-        st.divider()
-        st.subheader("✅ Open Action Items")
+    st.divider()
+    ai_hdr_cols = st.columns([4, 1, 1])
+    ai_hdr_cols[0].subheader("✅ Action Items")
+    if ai_hdr_cols[1].checkbox("Show stale", key="ai_show_stale"):
+        st.session_state["ai_show_stale"] = True
+    if ai_hdr_cols[2].checkbox("Show done", key="ai_show_completed"):
+        st.session_state["ai_show_completed"] = True
+
+    if not action_items:
+        st.info("No open action items matching the current filter.")
+    else:
+        _AI_FB_RATINGS = [
+            ("✅ Complete",        "completed",       None),
+            ("🔇 Noisy",          "noisy",           "noisy"),
+            ("🕰️ Stale",          "stale",           "stale"),
+            ("❌ Wrong",          "wrong",           "wrong"),
+            ("🔍 Missing context","missing-context", "missing-context"),
+            ("🚫 Not mine",       "not_mine",        None),
+        ]
         for ai in action_items:
-            due_str = f" *(by {ai.due_date})*" if ai.due_date else ""
-            st.markdown(f"- [ ] **{ai.assigned_to}**: {ai.description}{due_str}")
+            brief_id = f"action:{ai.id[:16]}"
+            status_icon = {"open": "☐", "completed": "✅", "stale": "🕰️",
+                           "dismissed": "✕", "snoozed": "💤", "not_mine": "🚫",
+                           "done": "✅"}.get(ai.status, "☐")
+            due_str = f"  *(by {ai.due_date})*" if ai.due_date else ""
+            fb_badge = f"  [{ai.feedback_rating}]" if ai.feedback_rating else ""
+            label = f"{status_icon} **{ai.assigned_to}**: {ai.description[:80]}{'…' if len(ai.description) > 80 else ''}{due_str}{fb_badge}"
+            with st.expander(label, expanded=False):
+                st.caption(f"ID: `{brief_id}`  •  Status: `{ai.status}`")
+                if ai.due_date:
+                    st.caption(f"Due: {ai.due_date}")
+                if ai.feedback_reason:
+                    st.caption(f"Reason: {ai.feedback_reason}")
+                # Full description if truncated
+                if len(ai.description) > 80:
+                    st.markdown(f"_{ai.description}_")
+
+                btn_cols = st.columns(len(_AI_FB_RATINGS) + 1)
+                for col_i, (lbl, new_status, fb_rating) in enumerate(_AI_FB_RATINGS):
+                    if btn_cols[col_i].button(lbl, key=f"ai_{ai.id}_{col_i}"):
+                        update_action_item(
+                            conn,
+                            ai.id,
+                            status=new_status,
+                            feedback_rating=fb_rating,
+                        )
+                        st.cache_data.clear()
+                        st.rerun()
+                # Snooze button (last column)
+                if btn_cols[len(_AI_FB_RATINGS)].button("💤 Snooze 7d", key=f"ai_snooze_{ai.id}"):
+                    from datetime import timedelta
+                    snooze_to = date.today() + timedelta(days=7)
+                    update_action_item(conn, ai.id, status="snoozed", snooze_until=snooze_to)
+                    st.cache_data.clear()
+                    st.rerun()
 
 # ------------------------------------------------------------------
 # Tab 2 — People

@@ -81,25 +81,111 @@ def get_today_signals(
     return signals
 
 
+def _row_to_action_item(row) -> ActionItem:
+    """Convert a DB row (10-column SELECT) to an ActionItem."""
+    return ActionItem(
+        id=row[0], signal_id=row[1], source_note_id=row[2],
+        assigned_to=row[3], description=row[4],
+        due_date=row[5], status=row[6], created_at=row[7],
+        feedback_rating=row[8], feedback_reason=row[9],
+        snooze_until=row[10],
+    )
+
+
+_AI_SELECT = """
+    SELECT id, signal_id, source_note_id, assigned_to, description,
+           due_date, status, created_at,
+           feedback_rating, feedback_reason, snooze_until
+    FROM action_items
+"""
+
+
 def get_open_action_items(conn) -> list[ActionItem]:
+    """Return action items that are currently open (excludes snoozed until future date)."""
+    today = date.today()
     rows = conn.execute(
-        """
-        SELECT id, signal_id, source_note_id, assigned_to, description, due_date, status, created_at
-        FROM action_items WHERE status = 'open'
+        _AI_SELECT + """
+        WHERE status = 'open'
+          AND (snooze_until IS NULL OR snooze_until <= ?)
         ORDER BY due_date NULLS LAST
-        """
+        """,
+        [today],
     ).fetchall()
     items = []
     for row in rows:
         try:
-            items.append(ActionItem(
-                id=row[0], signal_id=row[1], source_note_id=row[2],
-                assigned_to=row[3], description=row[4],
-                due_date=row[5], status=row[6], created_at=row[7],
-            ))
+            items.append(_row_to_action_item(row))
         except Exception:
             pass
     return items
+
+
+def get_action_items_filtered(
+    conn,
+    statuses: list[str] | None = None,
+    assigned_to: str | None = None,
+    include_snoozed: bool = False,
+) -> list[ActionItem]:
+    """Return action items filtered by status list and optional assignee."""
+    today = date.today()
+    if statuses is None:
+        statuses = ["open"]
+    placeholders = ", ".join("?" * len(statuses))
+    params: list = list(statuses)
+    snooze_clause = "" if include_snoozed else " AND (snooze_until IS NULL OR snooze_until <= ?)"
+    if not include_snoozed:
+        params.append(today)
+    assignee_clause = ""
+    if assigned_to:
+        assignee_clause = " AND assigned_to = ?"
+        params.append(assigned_to)
+    rows = conn.execute(
+        _AI_SELECT + f"""
+        WHERE status IN ({placeholders}){snooze_clause}{assignee_clause}
+        ORDER BY due_date NULLS LAST
+        """,
+        params,
+    ).fetchall()
+    items = []
+    for row in rows:
+        try:
+            items.append(_row_to_action_item(row))
+        except Exception:
+            pass
+    return items
+
+
+def update_action_item(
+    conn,
+    item_id: str,
+    *,
+    status: str | None = None,
+    feedback_rating: str | None = None,
+    feedback_reason: str | None = None,
+    snooze_until=None,
+) -> None:
+    """Update status and/or feedback on an action item."""
+    from datetime import datetime as _dt
+    now = _dt.utcnow()
+    sets = ["updated_at = ?"]
+    params: list = [now]
+    if status is not None:
+        sets.append("status = ?")
+        params.append(status)
+    if feedback_rating is not None:
+        sets.append("feedback_rating = ?")
+        params.append(feedback_rating)
+    if feedback_reason is not None:
+        sets.append("feedback_reason = ?")
+        params.append(feedback_reason)
+    if snooze_until is not None:
+        sets.append("snooze_until = ?")
+        params.append(snooze_until)
+    params.append(item_id)
+    conn.execute(
+        f"UPDATE action_items SET {', '.join(sets)} WHERE id = ?",
+        params,
+    )
 
 
 def get_meetings_for_date(conn, target_date: date) -> list[dict]:

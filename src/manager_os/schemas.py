@@ -30,7 +30,9 @@ def _today() -> date:
 
 SeverityType = Literal["critical", "high", "medium", "low"]
 SignalStatusType = Literal["open", "acknowledged", "resolved", "dismissed"]
-ActionItemStatusType = Literal["open", "done", "stale"]
+ActionItemStatusType = Literal[
+    "open", "completed", "stale", "dismissed", "snoozed", "not_mine", "done"
+]
 DecisionStatusType = Literal["open", "made", "blocked"]
 EntityType = Literal["person", "client", "deal", "team", "practice"]
 SignalType = Literal[
@@ -183,7 +185,11 @@ class ActionItem(BaseModel):
     description: str
     due_date: date | None = None
     status: ActionItemStatusType = "open"
+    feedback_rating: str | None = None
+    feedback_reason: str | None = None
+    snooze_until: date | None = None
     created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
 
 
 class Decision(BaseModel):

@@ -240,6 +240,10 @@ ALTER TABLE deals ADD COLUMN IF NOT EXISTS probability FLOAT;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS services_amount FLOAT;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS last_status_changed_date DATE;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS source_format VARCHAR;
+ALTER TABLE action_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;
+ALTER TABLE action_items ADD COLUMN IF NOT EXISTS feedback_rating VARCHAR;
+ALTER TABLE action_items ADD COLUMN IF NOT EXISTS feedback_reason VARCHAR;
+ALTER TABLE action_items ADD COLUMN IF NOT EXISTS snooze_until DATE;
 ALTER TABLE staffing_forecast ADD COLUMN IF NOT EXISTS planned_hours FLOAT;
 ALTER TABLE staffing_forecast ADD COLUMN IF NOT EXISTS target_hours FLOAT;
 CREATE TABLE IF NOT EXISTS feedback (

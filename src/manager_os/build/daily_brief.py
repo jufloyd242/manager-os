@@ -213,13 +213,20 @@ def _load_signals(conn, target_date: date) -> list[Signal]:
 
 
 def _load_action_items(conn) -> list[ActionItem]:
+    today = date.today()
     rows = conn.execute(
         """
-        SELECT id, signal_id, source_note_id, assigned_to, description, due_date, status, created_at
+        SELECT id, signal_id, source_note_id, assigned_to, description,
+               due_date, status, created_at,
+               feedback_rating, feedback_reason, snooze_until
         FROM action_items
         WHERE status = 'open'
+          AND (snooze_until IS NULL OR snooze_until <= ?)
+          AND (feedback_rating IS NULL
+               OR feedback_rating NOT IN ('noisy', 'stale', 'wrong', 'dismissed'))
         ORDER BY due_date NULLS LAST
-        """
+        """,
+        [today],
     ).fetchall()
     items = []
     for row in rows:
@@ -228,6 +235,8 @@ def _load_action_items(conn) -> list[ActionItem]:
                 id=row[0], signal_id=row[1], source_note_id=row[2],
                 assigned_to=row[3], description=row[4],
                 due_date=row[5], status=row[6], created_at=row[7],
+                feedback_rating=row[8], feedback_reason=row[9],
+                snooze_until=row[10],
             )
             if not _is_junk_action_item(ai.description):
                 items.append(ai)

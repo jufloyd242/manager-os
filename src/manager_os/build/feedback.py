@@ -95,7 +95,7 @@ def mark(
             f"Invalid rating {rating!r}. Valid values: {sorted(VALID_RATINGS)}"
         )
 
-    # Resolve metadata from the DB when the item is a known signal
+    # Resolve metadata from the DB when the item is a known signal or action item
     if source_path is None and item_id.startswith("signal:"):
         sig_id = item_id[len("signal:"):]
         row = conn.execute(
@@ -104,6 +104,30 @@ def mark(
         ).fetchone()
         if row:
             source_path, entity_name, signal_type = row[0], row[1], row[2]
+    elif item_id.startswith("action:"):
+        ai_id = item_id[len("action:"):]
+        row = conn.execute(
+            "SELECT source_note_id, assigned_to FROM action_items WHERE id LIKE ?",
+            [ai_id + "%"],
+        ).fetchone()
+        if row:
+            source_path = source_path or row[0] or ""
+            entity_name = entity_name or row[1] or ""
+            signal_type = signal_type or "action_item"
+            # Also persist feedback_rating on the action_item row itself
+            from manager_os.build.dashboard_data import update_action_item
+            try:
+                full_id_row = conn.execute(
+                    "SELECT id FROM action_items WHERE id LIKE ?", [ai_id + "%"]
+                ).fetchone()
+                if full_id_row:
+                    update_action_item(
+                        conn, full_id_row[0],
+                        feedback_rating=rating,
+                        feedback_reason=reason,
+                    )
+            except Exception:
+                pass
 
     fid = _feedback_id(item_id, rating)
     now = datetime.utcnow()
