@@ -22,7 +22,7 @@ from manager_os.schemas import NoteRecord, RawDocument
 logger = logging.getLogger(__name__)
 
 # Directories to skip inside the vault
-_SKIP_DIRS = {".obsidian", ".git", ".trash"}
+_SKIP_DIRS = {".obsidian", ".git", ".trash", "templates"}
 
 # Frontmatter type field → canonical note_type
 _TYPE_MAP = {
@@ -54,9 +54,11 @@ _DIR_TYPE_MAP = {
 @dataclass
 class IngestResult:
     ingested: int = 0
+    ingested_with_warnings: int = 0
     skipped: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     skip_reasons: dict[str, int] = field(default_factory=dict)
 
 
@@ -174,6 +176,23 @@ def ingest_vault(vault_path: str, conn, force: bool = False) -> IngestResult:
     return result
 
 
+def _strip_frontmatter_block(raw_text: str) -> str:
+    """Remove the leading '---' frontmatter block from raw markdown text.
+
+    Used as fallback when YAML parse fails — returns the body as best-effort text
+    so the document content is still searchable/extractable.
+    """
+    lines = raw_text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return raw_text.strip()
+    # Find the closing '---' (or '...')
+    for i, line in enumerate(lines[1:], start=1):
+        if line.strip() in ("---", "..."):
+            return "\n".join(lines[i + 1:]).strip()
+    # No closing delimiter found — return everything after first line
+    return "\n".join(lines[1:]).strip()
+
+
 def _ingest_file(
     md_file: Path,
     conn,
@@ -191,10 +210,20 @@ def _ingest_file(
         )
         return
 
-    # Parse frontmatter — raises if YAML is malformed
-    post = frontmatter.loads(raw_text)
-    fm: dict = dict(post.metadata)
-    body: str = post.content.strip()
+    # Parse frontmatter — tolerate malformed YAML by falling back to body-only
+    fm: dict = {}
+    body: str = ""
+    frontmatter_warning: str | None = None
+    try:
+        post = frontmatter.loads(raw_text)
+        fm = dict(post.metadata)
+        body = post.content.strip()
+    except Exception as exc:
+        frontmatter_warning = f"frontmatter parse error in {md_file}: {exc}"
+        logger.warning("%s", frontmatter_warning)
+        # Preserve the raw text as body; strip any leading "---" delimiter block
+        # so extraction doesn't choke on raw YAML syntax
+        body = _strip_frontmatter_block(raw_text)
 
     # Build title from frontmatter or filename
     title = str(fm.get("title", md_file.stem.replace("_", " ").replace("-", " ")))
@@ -240,7 +269,11 @@ def _ingest_file(
 
     _write_raw_document(conn, doc)
     _write_note(conn, note)
-    result.ingested += 1
+    if frontmatter_warning:
+        result.ingested_with_warnings += 1
+        result.warnings.append(frontmatter_warning)
+    else:
+        result.ingested += 1
 
 
 def _infer_entity_type(note_type: str) -> str:

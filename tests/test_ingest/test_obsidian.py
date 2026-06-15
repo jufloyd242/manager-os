@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from manager_os.db import get_connection
-from manager_os.ingest.obsidian import IngestResult, ingest_vault
+from manager_os.ingest.obsidian import IngestResult, ingest_vault, _strip_frontmatter_block
 
 FIXTURES_VAULT = Path(__file__).parent.parent / "fixtures" / "vault"
 
@@ -96,13 +96,162 @@ def test_ingest_handles_malformed_frontmatter(tmp_path: Path, conn) -> None:
     vault.mkdir()
     # Valid note
     (vault / "good.md").write_text("---\ntype: team\nentity: Team\n---\n\n# Good note")
-    # This note has a body but invalid YAML frontmatter (unclosed bracket)
-    # python-frontmatter is lenient, so let's use a note with no frontmatter at all
+    # Note with no frontmatter at all — valid and should be ingested cleanly
     (vault / "no_frontmatter.md").write_text("# Just a plain note\n\nSome content here.")
     result = ingest_vault(str(vault), conn)
-    # Both should ingest successfully — no frontmatter is valid
     assert result.ingested == 2
     assert result.failed == 0
+
+
+# ===========================================================================
+# Bad frontmatter tolerance
+# ===========================================================================
+
+# YAML strings that python-frontmatter / pyyaml cannot parse:
+_MAPPING_VALUES_NOT_ALLOWED = "---\nkey: value: extra\n---\n\nBody text here."
+_UNHASHABLE_KEY = "---\n{nested: key}: value\n---\n\nBody text here."
+
+
+class TestMalformedFrontmatter:
+    def test_malformed_note_is_ingested_not_failed(self, tmp_path: Path, conn) -> None:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        result = ingest_vault(str(vault), conn)
+        assert result.failed == 0
+        assert result.ingested + result.ingested_with_warnings == 1
+
+    def test_malformed_note_counted_as_ingested_with_warnings(
+        self, tmp_path: Path, conn
+    ) -> None:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        result = ingest_vault(str(vault), conn)
+        assert result.ingested_with_warnings >= 1
+
+    def test_malformed_note_body_is_preserved(self, tmp_path: Path, conn) -> None:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        ingest_vault(str(vault), conn)
+        rows = conn.execute("SELECT body FROM notes").fetchall()
+        assert len(rows) == 1
+        # Body text must be present
+        assert "Body text here" in (rows[0][0] or "")
+
+    def test_malformed_note_raw_doc_stored(self, tmp_path: Path, conn) -> None:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        ingest_vault(str(vault), conn)
+        count = conn.execute("SELECT COUNT(*) FROM raw_documents").fetchone()[0]
+        assert count == 1
+
+    def test_parse_error_recorded_as_warning(self, tmp_path: Path, conn) -> None:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        result = ingest_vault(str(vault), conn)
+        assert len(result.warnings) >= 1
+        assert "bad.md" in result.warnings[0] or "frontmatter" in result.warnings[0].lower()
+
+    def test_unhashable_key_also_tolerated(self, tmp_path: Path, conn) -> None:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "unhashable.md").write_text(_UNHASHABLE_KEY)
+        result = ingest_vault(str(vault), conn)
+        assert result.failed == 0
+        assert result.ingested + result.ingested_with_warnings == 1
+
+    def test_good_and_bad_both_ingested(self, tmp_path: Path, conn) -> None:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "good.md").write_text("---\ntype: team\n---\n\n# Good")
+        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        result = ingest_vault(str(vault), conn)
+        assert result.failed == 0
+        total = result.ingested + result.ingested_with_warnings
+        assert total == 2
+        count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+        assert count == 2
+
+    def test_malformed_note_not_counted_in_ingested(self, tmp_path: Path, conn) -> None:
+        """ingested should only count clean files; ingested_with_warnings covers bad ones."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        result = ingest_vault(str(vault), conn)
+        # ingested should be 0 (bad file went to warnings bucket)
+        assert result.ingested == 0
+
+
+# ===========================================================================
+# Template directory skipping
+# ===========================================================================
+
+
+class TestTemplateSkipping:
+    def test_templates_dir_is_skipped(self, tmp_path: Path, conn) -> None:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        templates = vault / "templates"
+        templates.mkdir()
+        (templates / "Meeting-note.md").write_text("---\ntype: meeting\n---\nBody")
+        (templates / "Manager-up.md").write_text("---\ntype: team\n---\nBody")
+        (vault / "real_note.md").write_text("---\ntype: team\n---\n\n# Real note")
+        result = ingest_vault(str(vault), conn)
+        # Only real_note.md should be ingested
+        assert result.ingested == 1
+        assert conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0] == 1
+
+    def test_templates_not_in_raw_documents(self, tmp_path: Path, conn) -> None:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        templates = vault / "templates"
+        templates.mkdir()
+        (templates / "template.md").write_text("# Template\nSome template body.")
+        ingest_vault(str(vault), conn)
+        count = conn.execute("SELECT COUNT(*) FROM raw_documents").fetchone()[0]
+        assert count == 0
+
+    def test_nested_templates_also_skipped(self, tmp_path: Path, conn) -> None:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        nested = vault / "work" / "templates"
+        nested.mkdir(parents=True)
+        (nested / "deep_template.md").write_text("# Deep template")
+        (vault / "work" / "note.md").write_text("---\ntype: team\n---\n# Note")
+        result = ingest_vault(str(vault), conn)
+        assert result.ingested == 1
+        assert conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0] == 1
+
+
+# ===========================================================================
+# _strip_frontmatter_block helper
+# ===========================================================================
+
+
+class TestStripFrontmatterBlock:
+    def test_strips_opening_and_closing_delimiters(self) -> None:
+        raw = "---\nkey: value\n---\n\nBody line."
+        assert "Body line." in _strip_frontmatter_block(raw)
+        assert "---" not in _strip_frontmatter_block(raw)
+
+    def test_no_frontmatter_returns_raw_text(self) -> None:
+        raw = "# Plain markdown\n\nNo frontmatter."
+        assert _strip_frontmatter_block(raw) == raw.strip()
+
+    def test_handles_unclosed_frontmatter(self) -> None:
+        raw = "---\nkey: value\nno closing delimiter\nbody here"
+        # Should still return something useful
+        result = _strip_frontmatter_block(raw)
+        assert isinstance(result, str)
+
+    def test_empty_body_after_frontmatter(self) -> None:
+        raw = "---\nkey: value\n---\n"
+        result = _strip_frontmatter_block(raw)
+        assert result == ""
 
 
 def test_ingest_nonexistent_vault_raises() -> None:

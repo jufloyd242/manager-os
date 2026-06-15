@@ -510,7 +510,8 @@ def ingest(
     table = Table(title=f"Ingest results — {target_date}", show_header=True)
     table.add_column("Source", style="cyan")
     table.add_column("Ingested", justify="right", style="green")
-    table.add_column("Skipped", justify="right", style="yellow")
+    table.add_column("Warn", justify="right", style="yellow")
+    table.add_column("Skipped", justify="right", style="dim")
     table.add_column("Failed", justify="right", style="red")
 
     run_obsidian = source in ("all", "obsidian")
@@ -529,8 +530,17 @@ def ingest(
         else:
             try:
                 r = ingest_vault(settings.vault_path, conn, force=force)
-                table.add_row("obsidian", str(r.ingested), str(r.skipped), str(r.failed))
+                table.add_row(
+                    "obsidian",
+                    str(r.ingested),
+                    str(r.ingested_with_warnings),
+                    str(r.skipped),
+                    str(r.failed),
+                )
                 _source_results.append(("obsidian", r))
+                if r.ingested_with_warnings:
+                    for w in r.warnings[:10]:  # cap output at 10 warnings
+                        console.print(f"  [yellow]⚠ frontmatter:[/yellow] {w}")
                 if r.failed:
                     had_error = True
             except FileNotFoundError as exc:
@@ -540,7 +550,7 @@ def ingest(
     if run_forecast:
         try:
             r = ingest_forecast(settings.forecast_csv, conn, source_priority=sp, force=force)
-            table.add_row("forecast", str(r.ingested), str(r.skipped), str(r.failed))
+            table.add_row("forecast", str(r.ingested), "0", str(r.skipped), str(r.failed))
             _source_results.append(("forecast", r))
             if r.failed:
                 had_error = True
@@ -551,7 +561,7 @@ def ingest(
     if run_deals:
         try:
             r = ingest_deals(settings.deals_csv, conn, source_priority=sp, force=force)
-            table.add_row("deals", str(r.ingested), str(r.skipped), str(r.failed))
+            table.add_row("deals", str(r.ingested), "0", str(r.skipped), str(r.failed))
             _source_results.append(("deals", r))
             if r.failed:
                 had_error = True
@@ -561,14 +571,14 @@ def ingest(
 
     if run_summary:
         r = ingest_summary(settings.workspace_summary_dir, target_date, conn, force=force)
-        table.add_row("summary", str(r.ingested), str(r.skipped), str(r.failed))
+        table.add_row("summary", str(r.ingested), "0", str(r.skipped), str(r.failed))
         _source_results.append(("summary", r))
 
     if run_gws:
         from manager_os.ingest.gws_client import ingest_gws_snapshots
         r = ingest_gws_snapshots(settings.gws_snapshot_dir, conn,
                                  target_date=target_date, force=force)
-        table.add_row("gws", str(r.ingested), str(r.skipped), str(r.failed))
+        table.add_row("gws", str(r.ingested), "0", str(r.skipped), str(r.failed))
         _source_results.append(("gws", r))
         if r.failed:
             had_error = True
@@ -1019,30 +1029,31 @@ def demo_reset(
     ing_table = Table(show_header=True)
     ing_table.add_column("Source", style="cyan")
     ing_table.add_column("Ingested", justify="right", style="green")
-    ing_table.add_column("Skipped", justify="right", style="yellow")
+    ing_table.add_column("Warn", justify="right", style="yellow")
+    ing_table.add_column("Skipped", justify="right", style="dim")
     ing_table.add_column("Failed", justify="right", style="red")
 
     if settings.vault_path:
         try:
             r = ingest_vault(settings.vault_path, conn, force=True)
-            ing_table.add_row("obsidian", str(r.ingested), str(r.skipped), str(r.failed))
+            ing_table.add_row("obsidian", str(r.ingested), str(r.ingested_with_warnings), str(r.skipped), str(r.failed))
         except FileNotFoundError as exc:
             console.print(f"[yellow]Vault not found, skipping: {exc}[/yellow]")
 
     try:
         r = ingest_forecast(settings.forecast_csv, conn, source_priority=sp, force=True)
-        ing_table.add_row("forecast", str(r.ingested), str(r.skipped), str(r.failed))
+        ing_table.add_row("forecast", str(r.ingested), "0", str(r.skipped), str(r.failed))
     except (FileNotFoundError, RuntimeError) as exc:
         console.print(f"[yellow]Forecast CSV not found, skipping: {exc}[/yellow]")
 
     try:
         r = ingest_deals(settings.deals_csv, conn, source_priority=sp, force=True)
-        ing_table.add_row("deals", str(r.ingested), str(r.skipped), str(r.failed))
+        ing_table.add_row("deals", str(r.ingested), "0", str(r.skipped), str(r.failed))
     except (FileNotFoundError, RuntimeError) as exc:
         console.print(f"[yellow]Deals CSV not found, skipping: {exc}[/yellow]")
 
     r = ingest_summary(settings.workspace_summary_dir, target_date, conn, force=True)
-    ing_table.add_row("summary", str(r.ingested), str(r.skipped), str(r.failed))
+    ing_table.add_row("summary", str(r.ingested), "0", str(r.skipped), str(r.failed))
 
     console.print(ing_table)
 
@@ -1130,14 +1141,55 @@ def _detect_mode(db_path: str, vault_path: str) -> str:
     return "production"
 
 
-def _is_sample_config(settings) -> bool:
-    """Return True when the configured paths look like sample/fixture data."""
+def _db_source_path_counts(conn) -> tuple[int, int]:
+    """Return (fixture_count, real_count) of source_paths in raw_documents.
+
+    A path is considered a fixture/demo path when it contains a fixture/demo
+    keyword OR is inside the project repo root. A path is considered real when
+    it is NOT a fixture path and NOT a special in-memory marker like ':memory:'.
+    """
+    rows = conn.execute("SELECT source_path FROM raw_documents").fetchall()
+    if not rows:
+        return 0, 0
+
+    fixture_count = 0
+    real_count = 0
+    for (sp,) in rows:
+        if not sp:
+            continue
+        p = Path(sp)
+        if _within_repo(p) or _path_has_safe_keyword(p):
+            fixture_count += 1
+        else:
+            real_count += 1
+    return fixture_count, real_count
+
+
+def _is_sample_config(settings, conn=None) -> bool:
+    """Return True when the active DB contains only fixture/demo data.
+
+    Checks actual source_paths stored in raw_documents when a connection is
+    available — this avoids false positives when the DB file lives inside the
+    repo but contains real Obsidian vault records.
+
+    Falls back to config-path heuristics when the DB is empty or no connection
+    is given.
+    """
+    # If we have a DB connection, inspect actual ingested paths
+    if conn is not None:
+        fixture_count, real_count = _db_source_path_counts(conn)
+        if real_count > 0:
+            return False   # at least one real path → not sample-only
+        if fixture_count > 0:
+            return True    # only fixture paths → sample data
+
+    # No rows or no connection — fall back to config-path heuristics
     if settings.vault_path:
         vp = Path(settings.vault_path)
         if _within_repo(vp) or _path_has_safe_keyword(vp):
             return True
     db_p = Path(settings.db_path)
-    if _within_repo(db_p) or _path_has_safe_keyword(db_p):
+    if _path_has_safe_keyword(db_p):
         return True
     return False
 
@@ -1162,7 +1214,7 @@ def status() -> None:
     conn = get_connection(db_path_str)
 
     mode = _detect_mode(db_path_str, settings.vault_path)
-    sample_warning = _is_sample_config(settings)
+    sample_warning = _is_sample_config(settings, conn=conn)
 
     # ── header ──────────────────────────────────────────────────────────────
     console.print()
@@ -1293,15 +1345,23 @@ def status() -> None:
 
     # ── sample/demo warning ──────────────────────────────────────────────────
     if sample_warning:
+        fixture_count, real_count = _db_source_path_counts(conn)
         console.print()
-        console.print(
-            "[yellow]⚠  Sample data detected:[/yellow] source paths point to "
-            "fixture/demo data, not a real Obsidian vault."
-        )
-        console.print(
-            "   Run [bold]manager-os demo-reset[/bold] to rebuild the demo database, "
-            "or update your [bold].env[/bold] to point at real data."
-        )
+        if real_count > 0:
+            # Mixed DB — show counts and be precise
+            console.print(
+                f"[yellow]⚠  Mixed data detected:[/yellow] "
+                f"{fixture_count} fixture/demo path(s) and {real_count} real path(s) in the DB."
+            )
+        else:
+            console.print(
+                "[yellow]⚠  Sample data detected:[/yellow] source paths point to "
+                "fixture/demo data, not a real Obsidian vault."
+            )
+            console.print(
+                "   Run [bold]manager-os demo-reset[/bold] to rebuild the demo database, "
+                "or update your [bold].env[/bold] to point at real data."
+            )
     console.print()
 
 

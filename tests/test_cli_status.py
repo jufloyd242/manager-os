@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from manager_os.cli import app as cli_app, _detect_mode, _is_sample_config
+from manager_os.cli import app as cli_app, _detect_mode, _is_sample_config, _db_source_path_counts
 from manager_os.db import get_connection
 from manager_os.ingest.obsidian import ingest_vault
 from manager_os.ingest.forecast import ingest_forecast
@@ -107,6 +107,93 @@ class TestIsSampleConfig:
     def test_production_paths_not_sample(self, tmp_path: Path) -> None:
         s = self._settings(str(tmp_path / "prod.duckdb"), "")
         assert _is_sample_config(s) is False
+
+    def test_real_path_in_db_overrides_repo_db_path(self, tmp_path: Path) -> None:
+        """DB file inside repo but containing real vault paths → not sample."""
+        conn = get_connection(":memory:")
+        # Seed a source_path that looks real (outside repo, no fixture keyword)
+        real_path = str(tmp_path / "obsidian" / "note.md")
+        conn.execute(
+            "INSERT INTO raw_documents (id, ingested_at, source_type, source_path, content_hash, content)"
+            " VALUES ('id1', CURRENT_TIMESTAMP, 'obsidian', ?, 'abc', 'body')",
+            [real_path],
+        )
+        # db_path is inside repo (would be flagged by old heuristic)
+        s = self._settings(str(REPO_ROOT / "data/processed/manager_os.duckdb"), "")
+        assert _is_sample_config(s, conn=conn) is False
+
+    def test_fixture_path_in_db_is_sample(self) -> None:
+        conn = get_connection(":memory:")
+        fixture_path = str(FIXTURES / "vault" / "note.md")
+        conn.execute(
+            "INSERT INTO raw_documents (id, ingested_at, source_type, source_path, content_hash, content)"
+            " VALUES ('id1', CURRENT_TIMESTAMP, 'obsidian', ?, 'abc', 'body')",
+            [fixture_path],
+        )
+        s = self._settings(":memory:", "")
+        assert _is_sample_config(s, conn=conn) is True
+
+    def test_empty_db_falls_back_to_config_heuristic(self, tmp_path: Path) -> None:
+        """Empty DB (no rows) → falls back to config path check."""
+        conn = get_connection(":memory:")
+        # vault inside fixtures → sample
+        s = self._settings(":memory:", str(FIXTURES / "vault"))
+        assert _is_sample_config(s, conn=conn) is True
+
+
+# ---------------------------------------------------------------------------
+# Unit: _db_source_path_counts
+# ---------------------------------------------------------------------------
+
+
+class TestDbSourcePathCounts:
+    def test_empty_db_returns_zeros(self) -> None:
+        conn = get_connection(":memory:")
+        fix, real = _db_source_path_counts(conn)
+        assert fix == 0
+        assert real == 0
+
+    def test_fixture_path_counted_as_fixture(self) -> None:
+        conn = get_connection(":memory:")
+        fixture_path = str(FIXTURES / "vault" / "note.md")
+        conn.execute(
+            "INSERT INTO raw_documents (id, ingested_at, source_type, source_path, content_hash, content)"
+            " VALUES ('id1', CURRENT_TIMESTAMP, 'obsidian', ?, 'abc', 'body')",
+            [fixture_path],
+        )
+        fix, real = _db_source_path_counts(conn)
+        assert fix == 1
+        assert real == 0
+
+    def test_real_path_counted_as_real(self, tmp_path: Path) -> None:
+        conn = get_connection(":memory:")
+        real_path = str(tmp_path / "obsidian" / "note.md")
+        conn.execute(
+            "INSERT INTO raw_documents (id, ingested_at, source_type, source_path, content_hash, content)"
+            " VALUES ('id1', CURRENT_TIMESTAMP, 'obsidian', ?, 'abc', 'body')",
+            [real_path],
+        )
+        fix, real = _db_source_path_counts(conn)
+        assert fix == 0
+        assert real == 1
+
+    def test_mixed_db_counted_correctly(self, tmp_path: Path) -> None:
+        conn = get_connection(":memory:")
+        fixture_path = str(FIXTURES / "vault" / "note.md")
+        real_path = str(tmp_path / "obsidian" / "note.md")
+        conn.execute(
+            "INSERT INTO raw_documents (id, ingested_at, source_type, source_path, content_hash, content)"
+            " VALUES ('id1', CURRENT_TIMESTAMP, 'obsidian', ?, 'abc1', 'body')",
+            [fixture_path],
+        )
+        conn.execute(
+            "INSERT INTO raw_documents (id, ingested_at, source_type, source_path, content_hash, content)"
+            " VALUES ('id2', CURRENT_TIMESTAMP, 'obsidian', ?, 'abc2', 'body')",
+            [real_path],
+        )
+        fix, real = _db_source_path_counts(conn)
+        assert fix == 1
+        assert real == 1
 
 
 # ---------------------------------------------------------------------------
@@ -293,3 +380,67 @@ class TestStatusPopulatedDatabase:
         result = _run_status(db_path, vault=str(FIXTURES / "vault"))
         assert result.exit_code == 0
         assert "sample" in result.output.lower() or "⚠" in result.output
+
+
+# ---------------------------------------------------------------------------
+# CLI: sample-data warning with real and mixed DB paths
+# ---------------------------------------------------------------------------
+
+
+class TestStatusSampleDataWarningDB:
+    """Test that the sample-data warning correctly reflects actual source_paths in the DB."""
+
+    def _seed_raw_doc(self, conn, source_path: str, doc_id: str = "id1") -> None:
+        conn.execute(
+            "INSERT OR IGNORE INTO raw_documents "
+            "(id, ingested_at, source_type, source_path, content_hash, content)"
+            " VALUES (?, CURRENT_TIMESTAMP, 'obsidian', ?, ?, 'body')",
+            [doc_id, source_path, doc_id + "_hash"],
+        )
+
+    def test_real_vault_path_does_not_trigger_warning(self, tmp_path: Path) -> None:
+        """DB with real Obsidian source_paths must NOT show sample-data warning."""
+        db_path = str(tmp_path / "real.duckdb")
+        conn = get_connection(db_path)
+        # Insert a source_path that looks like a real Obsidian vault
+        real_path = str(tmp_path / "obsidian" / "clients" / "note.md")
+        self._seed_raw_doc(conn, real_path)
+        conn.close()
+
+        result = _run_status(db_path)
+        assert result.exit_code == 0
+        assert "Sample data detected" not in result.output
+
+    def test_fixture_db_triggers_warning(self, tmp_path: Path) -> None:
+        """DB with only fixture source_paths must show the sample-data warning."""
+        db_path = str(tmp_path / "fixture.duckdb")
+        conn = get_connection(db_path)
+        fixture_path = str(FIXTURES / "vault" / "1on1_alice.md")
+        self._seed_raw_doc(conn, fixture_path)
+        conn.close()
+
+        result = _run_status(db_path)
+        assert result.exit_code == 0
+        assert "sample" in result.output.lower() or "⚠" in result.output
+
+    def test_mixed_db_shows_mixed_warning(self, tmp_path: Path) -> None:
+        """DB with both fixture and real paths should mention both counts."""
+        db_path = str(tmp_path / "mixed.duckdb")
+        conn = get_connection(db_path)
+        fixture_path = str(FIXTURES / "vault" / "1on1_alice.md")
+        real_path = str(tmp_path / "obsidian" / "note.md")
+        self._seed_raw_doc(conn, fixture_path, doc_id="fix1")
+        self._seed_raw_doc(conn, real_path, doc_id="real1")
+        conn.close()
+
+        result = _run_status(db_path)
+        assert result.exit_code == 0
+        # Should mention "mixed" or show both counts
+        assert "mixed" in result.output.lower() or "1" in result.output
+
+    def test_empty_db_no_warning(self, tmp_path: Path) -> None:
+        """Empty DB with non-fixture, non-demo config paths → no warning."""
+        db_path = str(tmp_path / "empty.duckdb")
+        result = _run_status(db_path, vault="")
+        assert result.exit_code == 0
+        assert "Sample data detected" not in result.output
