@@ -204,6 +204,34 @@ CREATE TABLE IF NOT EXISTS signal_status_log (
 _MIGRATIONS_DDL = """
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS rating VARCHAR;
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS snooze_until DATE;
+CREATE TABLE IF NOT EXISTS forecast_pipeline_demand (
+    id VARCHAR PRIMARY KEY,
+    source_section VARCHAR,
+    week_start DATE,
+    prospect_or_deal VARCHAR,
+    probability FLOAT,
+    requested_allocation FLOAT,
+    skillset VARCHAR,
+    demand_hours FLOAT,
+    candidate_people JSON,
+    staffing_status VARCHAR,
+    record_type VARCHAR,
+    forecast_type VARCHAR,
+    source_row INTEGER,
+    notes VARCHAR,
+    ingested_at TIMESTAMP NOT NULL
+);
+CREATE TABLE IF NOT EXISTS forecast_summary_metric (
+    id VARCHAR PRIMARY KEY,
+    source_section VARCHAR,
+    week_start DATE,
+    metric_name VARCHAR,
+    metric_value FLOAT,
+    raw_value VARCHAR,
+    record_type VARCHAR,
+    source_row INTEGER,
+    ingested_at TIMESTAMP NOT NULL
+)
 """
 
 _ALL_TABLES = [
@@ -213,6 +241,8 @@ _ALL_TABLES = [
     "deals",
     "engagements",
     "staffing_forecast",
+    "forecast_pipeline_demand",
+    "forecast_summary_metric",
     "meetings",
     "notes",
     "signals",

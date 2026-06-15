@@ -35,6 +35,7 @@ _DEFAULT_COL_MAP = {
     "week_start": "week_start",
     "client": "client",
     "project": "project",
+    "engagement": "project",
     "allocation": "allocation_pct",
     "allocation %": "allocation_pct",
     "pct allocated": "allocation_pct",
@@ -115,42 +116,43 @@ def _ingest_wide_forecast(
     conn,
     force: bool = False,
 ) -> IngestResult:
-    """Ingest a wide-format planning spreadsheet CSV."""
+    """Ingest a wide-format planning spreadsheet CSV.
+
+    PersonForecastRecord  → staffing_forecast (forecast_type='capacity')
+    PipelineDemandRecord  → forecast_pipeline_demand
+    PipelineOpportunityRecord → forecast_pipeline_demand (week_start=NULL)
+    SummaryMetricRecord   → forecast_summary_metric
+    """
     from manager_os.ingest.forecast_wide import parse_wide_forecast
 
     result = IngestResult()
     parse_result = parse_wide_forecast(csv_path)
-
     now = datetime.utcnow()
 
-    for record in parse_result.capacity_records:
+    # PersonForecastRecord → staffing_forecast
+    for record in parse_result.person_forecast:
         try:
-            notes = f"section={record.section}"
-            if record.target_hours is not None:
-                notes += f" target_hours={record.target_hours}"
-
             row = StaffingForecastRow(
                 person_name=record.person_name,
                 week_start=record.week_start,
                 client="",
-                project=record.section,
-                allocation_pct=record.allocation,
+                project=record.source_section,
+                allocation_pct=record.planned_hours,
                 forecast_type="capacity",  # type: ignore[arg-type]
-                notes=notes,
+                notes=(
+                    f"section={record.source_section}"
+                    + (f" target_hours={record.target_hours}" if record.target_hours is not None else "")
+                ),
                 ingested_at=now,
             )
             row_id = content_hash(
                 f"{row.person_name}::{row.week_start}::{row.project}::capacity"
             )
             row = row.model_copy(update={"id": row_id})
-
             if not force and _row_exists(conn, row.id):
                 result.skipped += 1
-                result.skip_reasons["already_exists"] = (
-                    result.skip_reasons.get("already_exists", 0) + 1
-                )
+                result.skip_reasons["already_exists"] = result.skip_reasons.get("already_exists", 0) + 1
                 continue
-
             conn.execute(
                 """
                 INSERT OR REPLACE INTO staffing_forecast
@@ -158,75 +160,114 @@ def _ingest_wide_forecast(
                      allocation_pct, forecast_type, notes, ingested_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [
-                    row.id, row.person_id, row.person_name, row.week_start,
-                    row.client, row.project, row.allocation_pct,
-                    row.forecast_type, row.notes, row.ingested_at,
-                ],
+                [row.id, row.person_id, row.person_name, row.week_start,
+                 row.client, row.project, row.allocation_pct,
+                 row.forecast_type, row.notes, row.ingested_at],
             )
             result.ingested += 1
         except Exception as exc:
-            logger.warning("Wide capacity row failed: %s", exc)
+            logger.warning("Wide person_forecast row failed: %s", exc)
             result.failed += 1
             result.errors.append(str(exc))
 
-    for record in parse_result.pipeline_records:
-        # Skip records with no assignee (ambiguous)
-        if not record.person_name.strip():
-            result.skipped += 1
-            result.skip_reasons["ambiguous_assignee"] = (
-                result.skip_reasons.get("ambiguous_assignee", 0) + 1
-            )
-            continue
-
+    # PipelineDemandRecord → forecast_pipeline_demand
+    for record in parse_result.pipeline_demand:
         try:
-            notes_parts = [f"section={record.section}"]
-            if record.probability is not None:
-                notes_parts.append(f"probability={record.probability}")
-            if record.requested_alloc is not None:
-                notes_parts.append(f"requested_alloc={record.requested_alloc}")
-            if record.skillset:
-                notes_parts.append(f"skillset={record.skillset}")
-            notes_parts.append(f"prospect={record.prospect_label!r}")
-
-            row = StaffingForecastRow(
-                person_name=record.person_name,
-                week_start=record.week_start,
-                client=record.prospect_label,  # stored but NOT validated vs clients.yaml
-                project=record.skillset or record.section,
-                allocation_pct=record.allocation,
-                forecast_type="pipeline",
-                notes=" ".join(notes_parts),
-                ingested_at=now,
-            )
             row_id = content_hash(
-                f"{row.person_name}::{row.week_start}::{record.prospect_label}::pipeline"
+                f"pd::{record.source_section}::{record.week_start}::"
+                f"{record.prospect_or_deal}::{record.source_row}"
             )
-            row = row.model_copy(update={"id": row_id})
-
-            if not force and _row_exists(conn, row.id):
-                result.skipped += 1
-                result.skip_reasons["already_exists"] = (
-                    result.skip_reasons.get("already_exists", 0) + 1
-                )
-                continue
-
+            if not force:
+                existing = conn.execute(
+                    "SELECT id FROM forecast_pipeline_demand WHERE id = ?", [row_id]
+                ).fetchone()
+                if existing:
+                    result.skipped += 1
+                    result.skip_reasons["already_exists"] = result.skip_reasons.get("already_exists", 0) + 1
+                    continue
             conn.execute(
                 """
-                INSERT OR REPLACE INTO staffing_forecast
-                    (id, person_id, person_name, week_start, client, project,
-                     allocation_pct, forecast_type, notes, ingested_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO forecast_pipeline_demand
+                    (id, source_section, week_start, prospect_or_deal, probability,
+                     requested_allocation, skillset, demand_hours, candidate_people,
+                     staffing_status, record_type, forecast_type, source_row, notes, ingested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [
-                    row.id, row.person_id, row.person_name, row.week_start,
-                    row.client, row.project, row.allocation_pct,
-                    row.forecast_type, row.notes, row.ingested_at,
-                ],
+                [row_id, record.source_section, record.week_start, record.prospect_or_deal,
+                 record.probability, record.requested_allocation, record.skillset,
+                 record.demand_hours, json.dumps(record.candidate_people),
+                 record.staffing_status, record.record_type, record.forecast_type,
+                 record.source_row, None, now],
             )
             result.ingested += 1
         except Exception as exc:
-            logger.warning("Wide pipeline row failed: %s", exc)
+            logger.warning("Wide pipeline_demand row failed: %s", exc)
+            result.failed += 1
+            result.errors.append(str(exc))
+
+    # PipelineOpportunityRecord → forecast_pipeline_demand (week_start=NULL)
+    for record in parse_result.pipeline_opportunities:
+        try:
+            row_id = content_hash(
+                f"po::{record.source_section}::{record.prospect_or_deal}::{record.source_row}"
+            )
+            if not force:
+                existing = conn.execute(
+                    "SELECT id FROM forecast_pipeline_demand WHERE id = ?", [row_id]
+                ).fetchone()
+                if existing:
+                    result.skipped += 1
+                    result.skip_reasons["already_exists"] = result.skip_reasons.get("already_exists", 0) + 1
+                    continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO forecast_pipeline_demand
+                    (id, source_section, week_start, prospect_or_deal, probability,
+                     requested_allocation, skillset, demand_hours, candidate_people,
+                     staffing_status, record_type, forecast_type, source_row, notes, ingested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [row_id, record.source_section, None, record.prospect_or_deal,
+                 record.probability, record.requested_allocation, record.skillset,
+                 0.0, json.dumps(record.candidate_people),
+                 record.status, record.record_type, record.forecast_type,
+                 record.source_row, None, now],
+            )
+            result.ingested += 1
+        except Exception as exc:
+            logger.warning("Wide pipeline_opportunity row failed: %s", exc)
+            result.failed += 1
+            result.errors.append(str(exc))
+
+    # SummaryMetricRecord → forecast_summary_metric
+    for record in parse_result.summary_metrics:
+        try:
+            row_id = content_hash(
+                f"sm::{record.source_section}::{record.week_start}::"
+                f"{record.metric_name}::{record.source_row}"
+            )
+            if not force:
+                existing = conn.execute(
+                    "SELECT id FROM forecast_summary_metric WHERE id = ?", [row_id]
+                ).fetchone()
+                if existing:
+                    result.skipped += 1
+                    result.skip_reasons["already_exists"] = result.skip_reasons.get("already_exists", 0) + 1
+                    continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO forecast_summary_metric
+                    (id, source_section, week_start, metric_name, metric_value,
+                     raw_value, record_type, source_row, ingested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [row_id, record.source_section, record.week_start, record.metric_name,
+                 record.metric_value, record.raw_value, record.record_type,
+                 record.source_row, now],
+            )
+            result.ingested += 1
+        except Exception as exc:
+            logger.warning("Wide summary_metric row failed: %s", exc)
             result.failed += 1
             result.errors.append(str(exc))
 

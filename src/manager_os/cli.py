@@ -1736,14 +1736,32 @@ def profile_forecast(
 
         sections_str = ", ".join(ws.get("sections", []))
         wide_tbl.add_row("Sections", sections_str or "[dim]none detected[/dim]")
-        wide_tbl.add_row("Capacity rows", str(ws.get("capacity_rows", 0)))
-        wide_tbl.add_row("Pipeline rows", str(ws.get("pipeline_rows", 0)))
-        wide_tbl.add_row("Skipped ambiguous", str(ws.get("skipped_ambiguous", 0)))
+        wide_tbl.add_row("Person forecast rows", str(ws.get("person_forecast_rows", 0)))
+        wide_tbl.add_row("Pipeline demand rows", str(ws.get("pipeline_demand_rows", 0)))
+        wide_tbl.add_row("Pipeline opportunities", str(ws.get("pipeline_opportunity_rows", 0)))
+        wide_tbl.add_row("Summary metric rows", str(ws.get("summary_metric_rows", 0)))
+        wide_tbl.add_row("Candidate people", str(ws.get("candidate_people_total", 0)))
+        wide_tbl.add_row("Unassigned demand rows", str(ws.get("unassigned_pipeline_demand", 0)))
+        mismatch_count = ws.get("metric_mismatches", 0)
+        mismatch_display = (
+            f"[red]{mismatch_count}[/red]" if mismatch_count else "[green]0[/green]"
+        )
+        wide_tbl.add_row("Metric mismatches", mismatch_display)
+        hire_weeks = ws.get("hire_status_weeks", [])
+        if hire_weeks:
+            hire_display = ", ".join(
+                w for w in hire_weeks if str(w).upper().startswith("HIRE")
+            ) or ", ".join(hire_weeks[:3])
+            wide_tbl.add_row("HIRE weeks", hire_display or "[dim]none[/dim]")
         console.print(wide_tbl)
         console.print()
         console.print(
             "[dim]ℹ  Pipeline prospect/deal labels are NOT validated against "
             "config/clients.yaml — they are prospects, not signed clients.[/dim]"
+        )
+        console.print(
+            "[dim]ℹ  Candidate Engineer(s) are possible staffing candidates only — "
+            "NOT allocated, soft-held, or committed.[/dim]"
         )
         console.print()
 

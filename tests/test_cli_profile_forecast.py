@@ -239,12 +239,13 @@ class TestProfileAllocationChecks:
         assert over == []
 
     def test_zero_allocation_creates_issue(self, tmp_path: Path) -> None:
+        # Zero allocation is VALID — should NOT create any issue
         p = _csv(
             tmp_path,
             f"{_VALID_HEADER}\nAlice Chen,2026-06-16,Acme Corp,Proj,0,confirmed",
         )
         result = profile_forecast_csv(str(p))
-        assert any(i.issue_type == "zero_allocation" for i in result.issues)
+        assert not any(i.issue_type == "zero_allocation" for i in result.issues)
 
     def test_missing_allocation_creates_issue(self, tmp_path: Path) -> None:
         p = _csv(
@@ -516,75 +517,76 @@ class TestWideFormatProfile:
         assert "AI" in result.wide_summary["sections"]
         assert "ML" in result.wide_summary["sections"]
 
-    def test_capacity_rows_count(self) -> None:
-        result = profile_forecast_csv(str(WIDE_FIXTURE))
+    def test_person_forecast_rows_count(self) -> None:
         # AI: Alex Rivera (5) + Jordan Lee (5) = 10; ML: Sam Chen (5) = 5 → 15
-        assert result.wide_summary["capacity_rows"] == 15
+        result = profile_forecast_csv(str(WIDE_FIXTURE))
+        assert result.wide_summary["person_forecast_rows"] == 15
 
-    def test_capacity_rows_normalize_correctly(self) -> None:
+    def test_person_forecast_records_have_correct_fields(self) -> None:
         from manager_os.ingest.forecast_wide import parse_wide_forecast
         pr = parse_wide_forecast(str(WIDE_FIXTURE))
-        alex_rows = [r for r in pr.capacity_records if r.person_name == "Alex Rivera"]
+        alex_rows = [r for r in pr.person_forecast if r.person_name == "Alex Rivera"]
         assert len(alex_rows) == 5
-        assert all(r.forecast_type == "capacity" for r in alex_rows)
-        assert all(r.section == "AI" for r in alex_rows)
+        assert all(r.source_section == "AI" for r in alex_rows)
         assert all(r.target_hours == 40.0 for r in alex_rows)
+        assert all(r.record_type == "person_forecast" for r in alex_rows)
 
     def test_zero_allocation_week_no_issue(self) -> None:
         result = profile_forecast_csv(str(WIDE_FIXTURE))
         zero_alloc_issues = [i for i in result.issues if i.issue_type == "zero_allocation"]
         assert zero_alloc_issues == []
 
-    def test_pipeline_rows_normalize_correctly(self) -> None:
+    def test_pipeline_rows_are_demand_records(self) -> None:
         from manager_os.ingest.forecast_wide import parse_wide_forecast
         pr = parse_wide_forecast(str(WIDE_FIXTURE))
-        alpha_rows = [r for r in pr.pipeline_records if r.prospect_label == "Prospect Alpha Inc"]
-        # Alex/Jordan split → 2 assignees × 5 weeks = 10 records
-        assert len(alpha_rows) == 10
-        assert all(r.forecast_type == "pipeline" for r in alpha_rows)
+        alpha_rows = [r for r in pr.pipeline_demand if r.prospect_or_deal == "Prospect Alpha Inc"]
+        # Alpha has weekly demand across 5 weeks
+        assert len(alpha_rows) == 5
         assert all(r.probability == 0.8 for r in alpha_rows)
-        assert all(r.requested_alloc == 20.0 for r in alpha_rows)
+        assert all(r.requested_allocation == 20.0 for r in alpha_rows)
+        # candidate_people are POSSIBLE CANDIDATES, NOT allocated persons
+        assert all(not hasattr(r, "person_name") for r in alpha_rows)
 
-    def test_split_assignees_handled(self) -> None:
+    def test_split_candidates_both_in_list(self) -> None:
+        # "Alex/Jordan" → candidate_people=['Alex','Jordan'] on the SAME record
+        # NOT two separate person_name records
         from manager_os.ingest.forecast_wide import parse_wide_forecast
         pr = parse_wide_forecast(str(WIDE_FIXTURE))
-        alpha_assignees = {
-            r.person_name
-            for r in pr.pipeline_records
-            if r.prospect_label == "Prospect Alpha Inc"
-        }
-        assert "Alex" in alpha_assignees
-        assert "Jordan" in alpha_assignees
+        alpha_rows = [r for r in pr.pipeline_demand if r.prospect_or_deal == "Prospect Alpha Inc"]
+        assert alpha_rows, "Prospect Alpha Inc should have demand records"
+        first = alpha_rows[0]
+        assert "Alex" in first.candidate_people
+        assert "Jordan" in first.candidate_people
 
-    def test_ambiguous_assignee_produces_no_person_record(self) -> None:
+    def test_ambiguous_assignee_stored_as_unassigned(self) -> None:
         from manager_os.ingest.forecast_wide import parse_wide_forecast
         pr = parse_wide_forecast(str(WIDE_FIXTURE))
         assert pr.skipped_ambiguous > 0
-        beta_with_person = [
-            r for r in pr.pipeline_records
-            if r.prospect_label == "Prospect Beta Ltd" and r.person_name
-        ]
-        assert beta_with_person == []
+        # Ambiguous rows have empty candidate_people and staffing_status=unassigned
+        beta_rows = [r for r in pr.pipeline_demand if r.prospect_or_deal == "Prospect Beta Ltd"]
+        assert all(r.candidate_people == [] for r in beta_rows)
+        assert all(r.staffing_status == "unassigned" for r in beta_rows)
 
     def test_skipped_ambiguous_in_wide_summary(self) -> None:
         result = profile_forecast_csv(str(WIDE_FIXTURE))
-        assert result.wide_summary["skipped_ambiguous"] == 5  # 5 weeks of ?
+        # 5 weeks of "?" → 5 unassigned pipeline_demand records
+        assert result.wide_summary["unassigned_pipeline_demand"] == 5
 
     def test_year_typo_corrected_with_warning(self) -> None:
         from manager_os.ingest.forecast_wide import parse_wide_forecast
         pr = parse_wide_forecast(str(WIDE_FIXTURE))
         assert any("2206" in w for w in pr.warnings)
-        ml_records = [r for r in pr.capacity_records if r.section == "ML"]
+        ml_records = [r for r in pr.person_forecast if r.source_section == "ML"]
         assert all(r.week_start.year == 2026 for r in ml_records)
 
     def test_pipeline_prospects_not_unknown_client_issues(self) -> None:
         # Providing an empty client list should NOT produce unknown_client issues
-        # for pipeline prospect labels
+        # for pipeline prospect labels (they are NOT clients)
         result = profile_forecast_csv(str(WIDE_FIXTURE), clients=[])
         unknown_client_issues = [i for i in result.issues if i.issue_type == "unknown_client"]
         assert unknown_client_issues == []
 
-    def test_unknown_capacity_person_flagged(self) -> None:
+    def test_unknown_engineer_flagged(self) -> None:
         result = profile_forecast_csv(str(WIDE_FIXTURE), people=[])
         unknown = [i for i in result.issues if i.issue_type == "unknown_person"]
         assert len(unknown) > 0
@@ -603,6 +605,17 @@ class TestWideFormatProfile:
         unknown = [i for i in result.issues if i.issue_type == "unknown_person"]
         assert unknown == []
 
+    def test_candidate_engineers_not_flagged_as_unknown_person(self) -> None:
+        # Pipeline candidate names ("Alex", "Jordan") are POSSIBLE CANDIDATES only.
+        # Even if they don't appear in people.yaml, they should NOT create unknown_person issues.
+        result = profile_forecast_csv(str(WIDE_FIXTURE), people=[])
+        # All unknown_person issues should be from person_forecast rows, not pipeline candidates
+        for issue in result.issues:
+            if issue.issue_type == "unknown_person":
+                # The issue should come from person_forecast row, not pipeline candidate
+                # (source is engineer rows only)
+                assert issue.detail.startswith("Engineer row:")
+
     def test_wide_to_dict_json_serializable(self) -> None:
         result = profile_forecast_csv(str(WIDE_FIXTURE))
         d = result.to_dict()
@@ -613,7 +626,8 @@ class TestWideFormatProfile:
         d = result.to_dict()
         assert "wide_summary" in d
         assert "sections" in d["wide_summary"]
-        assert "capacity_rows" in d["wide_summary"]
+        assert "person_forecast_rows" in d["wide_summary"]
+        assert "pipeline_demand_rows" in d["wide_summary"]
 
     def test_normalized_csv_still_profiles_correctly(self) -> None:
         """Regression: normalized fixture must still work after wide support added."""
@@ -622,6 +636,102 @@ class TestWideFormatProfile:
         assert result.total_rows == 9
         assert "person_name" in result.fields_found
         assert result.detected_format == "normalized"
+
+
+class TestWideFormatV2:
+    """Tests using wide_forecast_v2.csv — proper AI/ML sections with new semantics."""
+
+    V2 = FIXTURES / "wide_forecast_v2.csv"
+
+    def test_v2_detected_as_wide(self) -> None:
+        from manager_os.ingest.forecast_wide import is_wide_format
+        assert is_wide_format(str(self.V2)) is True
+
+    def test_v2_sections(self) -> None:
+        result = profile_forecast_csv(str(self.V2))
+        assert result.wide_summary["sections"] == ["AI", "ML"]
+
+    def test_v2_person_forecast_rows(self) -> None:
+        # AI: Avery×12 + Blake×12 = 24; ML: Cameron×12 + Devlin×12 = 24 → 48
+        result = profile_forecast_csv(str(self.V2))
+        assert result.wide_summary["person_forecast_rows"] == 48
+
+    def test_v2_pipeline_demand_rows(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.V2))
+        assert len(pr.pipeline_demand) > 0
+
+    def test_v2_pipeline_opportunities(self) -> None:
+        # Phantom Deal (no weekly demand) + Ridge Opportunity (no weekly demand)
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.V2))
+        assert len(pr.pipeline_opportunities) == 2
+        opp_names = {r.prospect_or_deal for r in pr.pipeline_opportunities}
+        assert "Phantom Deal" in opp_names
+        assert "Ridge Opportunity" in opp_names
+
+    def test_v2_no_metric_mismatches(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.V2))
+        assert len(pr.metric_mismatches) == 0, pr.metric_mismatches
+
+    def test_v2_pipeline_candidate_not_person_name(self) -> None:
+        # PipelineDemandRecord has NO person_name field
+        from manager_os.ingest.forecast_wide import parse_wide_forecast, PipelineDemandRecord
+        pr = parse_wide_forecast(str(self.V2))
+        for rec in pr.pipeline_demand:
+            assert isinstance(rec, PipelineDemandRecord)
+            assert not hasattr(rec, "person_name")
+
+    def test_v2_split_candidates_both_preserved(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.V2))
+        nova_rows = [r for r in pr.pipeline_demand if r.prospect_or_deal == "Nova Pipeline"]
+        assert nova_rows, "Nova Pipeline should have demand records"
+        # "Avery/Blake" → both names in candidate_people of the SAME record
+        assert "Avery" in nova_rows[0].candidate_people
+        assert "Blake" in nova_rows[0].candidate_people
+
+    def test_v2_blank_candidate_is_unassigned(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.V2))
+        titan_rows = [r for r in pr.pipeline_demand if r.prospect_or_deal == "Titan Prospect"]
+        assert titan_rows, "Titan Prospect should have demand records"
+        for r in titan_rows:
+            assert r.candidate_people == []
+            assert r.staffing_status == "unassigned"
+
+    def test_v2_question_mark_candidate_is_unassigned(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.V2))
+        zenith_rows = [r for r in pr.pipeline_demand if r.prospect_or_deal == "Zenith Future"]
+        assert zenith_rows, "Zenith Future should have demand records"
+        for r in zenith_rows:
+            assert r.candidate_people == []
+            assert r.staffing_status == "unassigned"
+
+    def test_v2_summary_metrics_present(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.V2))
+        # 5 metrics × 12 weeks × 2 sections = 120
+        assert len(pr.summary_metrics) == 120
+
+    def test_v2_hire_status_detected(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.V2))
+        hire_weeks = [sm for sm in pr.summary_metrics if sm.metric_name == "hire_status"]
+        assert hire_weeks, "Should have hire_status summary metrics"
+        hire_raw_values = {sm.raw_value for sm in hire_weeks}
+        assert "HIRE" in hire_raw_values
+
+    def test_v2_zero_hours_not_warning(self) -> None:
+        # Engineer with 0 planned hours in a week is valid, not a warning
+        result = profile_forecast_csv(str(self.V2))
+        assert not any(i.issue_type == "zero_allocation" for i in result.issues)
+
+    def test_v2_prospect_labels_not_unknown_clients(self) -> None:
+        result = profile_forecast_csv(str(self.V2), clients=[])
+        assert not any(i.issue_type == "unknown_client" for i in result.issues)
 
 
 class TestWideFormatIngest:
@@ -638,7 +748,9 @@ class TestWideFormatIngest:
         assert result.ingested > 0
         assert result.failed == 0
 
-    def test_wide_ingest_skips_ambiguous_assignees(self) -> None:
+    def test_wide_ingest_no_ambiguous_assignee_skip(self) -> None:
+        # In new model, ambiguous pipeline candidates are stored as unassigned,
+        # NOT skipped. There should be no "ambiguous_assignee" skip reason.
         import duckdb
         from manager_os.db import init_schema
         from manager_os.ingest.forecast import ingest_forecast
@@ -646,7 +758,29 @@ class TestWideFormatIngest:
         conn = duckdb.connect(":memory:")
         init_schema(conn)
         result = ingest_forecast(str(WIDE_FIXTURE), conn)
-        assert result.skip_reasons.get("ambiguous_assignee", 0) > 0
+        assert result.skip_reasons.get("ambiguous_assignee", 0) == 0
+
+    def test_wide_ingest_pipeline_demand_table_populated(self) -> None:
+        import duckdb
+        from manager_os.db import init_schema
+        from manager_os.ingest.forecast import ingest_forecast
+
+        conn = duckdb.connect(":memory:")
+        init_schema(conn)
+        ingest_forecast(str(WIDE_FIXTURE), conn)
+        count = conn.execute("SELECT COUNT(*) FROM forecast_pipeline_demand").fetchone()[0]
+        assert count > 0
+
+    def test_wide_ingest_summary_metric_table_populated(self) -> None:
+        import duckdb
+        from manager_os.db import init_schema
+        from manager_os.ingest.forecast import ingest_forecast
+
+        conn = duckdb.connect(":memory:")
+        init_schema(conn)
+        ingest_forecast(str(FIXTURES / "wide_forecast_v2.csv"), conn)
+        count = conn.execute("SELECT COUNT(*) FROM forecast_summary_metric").fetchone()[0]
+        assert count > 0
 
     def test_normalized_ingest_regression(self) -> None:
         """Regression: normalized ingest must still work."""

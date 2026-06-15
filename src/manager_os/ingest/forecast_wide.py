@@ -1,24 +1,16 @@
 """Wide-format forecast CSV parser.
 
-Handles planning spreadsheet exports shaped like:
-
-    Section row:  AI   (or ML, Engineering, etc.)
-    Date sub-row: ,,,,2026-06-16,2026-06-23,...
-    Engineer hdr: Engineer,Target,,,2026-06-16,...,Average
-    Capacity row: Alex Rivera,40,,,40,40,0,40,40,36
-    ...
-    Pipeline hdr: Pipeline,Probability,Requested Alloc,Skillset,<dates>,Assignee
-    Pipeline row: Prospect Alpha Inc,0.8,20,ML Engineering,20,20,...,Alex/Jordan
-    ...
-    Summary rows: Total Demand / Total Capacity / Weekly Gap / Team Utilization / Hire Status
-
-Multiple sections (AI, ML) may appear in one file.
-
-Key guarantees:
-- Pipeline prospect/deal labels are preserved as-is; NOT validated against clients.yaml.
-- Assignees like "Satya/Zheng" are split; "?" or blank → skipped with info log.
-- Year typos like "2206" → "2026" are auto-corrected with a warning.
-- Zero-allocation weeks are stored as-is; NOT flagged as issues.
+Product semantics
+-----------------
+- Pipeline rows are POSSIBLE FUTURE DEMAND, not person allocations.
+- Candidate Engineer(s) are POSSIBLE STAFFING CANDIDATES only.
+  They are NOT allocated, soft-held, or committed.
+  They are stored in candidate_people only, NEVER in person_name.
+- Target on engineer rows means weekly capacity in hours.
+- Engineer weekly cells mean planned allocation hours.
+- Summary rows are team/week metrics, not people or clients.
+- Pipeline prospect/deal labels are NOT validated against clients.yaml.
+- Zero allocation hours are VALID — not a warning condition.
 """
 
 from __future__ import annotations
@@ -33,151 +25,153 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-# First-cell values that identify a new team/group section
-_SECTION_LABELS: frozenset[str] = frozenset({
+_SECTION_LABELS: frozenset = frozenset({
     "ai", "ml", "data engineering", "data science", "engineering",
     "platform", "infrastructure", "infra", "mlops", "mlplatform",
+    "machine learning", "artificial intelligence",
 })
-
-# First-cell values that identify the start of an engineer capacity block
-_ENGINEER_LABELS: frozenset[str] = frozenset({
-    "engineer", "engineers", "team", "capacity",
-})
-
-# First-cell values that identify the start of a pipeline block
-_PIPELINE_LABELS: frozenset[str] = frozenset({
-    "pipeline", "prospects", "deals", "pipeline demand",
-})
-
-# First-cell prefixes for summary rows to skip
-_SUMMARY_PREFIXES: tuple[str, ...] = (
-    "total demand",
-    "total capacity",
-    "weekly gap",
-    "team utilization",
-    "hire status",
-    "pipeline demand",
-    "capacity summary",
-    "net capacity",
-    "bench",
-)
-
-# Planning year range — dates outside this range trigger typo-correction logic
+_ENGINEER_LABELS: frozenset = frozenset({"engineer", "engineers", "team", "capacity"})
+_PIPELINE_LABELS: frozenset = frozenset({"pipeline", "prospects", "deals", "pipeline demand"})
+_METRIC_MAP: dict = {
+    "total demand": "total_demand",
+    "total capacity": "total_capacity",
+    "weekly gap": "weekly_gap",
+    "team utilization": "team_utilization",
+    "hire status": "hire_status",
+}
 _YEAR_MIN = 2020
 _YEAR_MAX = 2040
-
-
-# ---------------------------------------------------------------------------
-# Result data structures
-# ---------------------------------------------------------------------------
+_COMPARISON_TOLERANCE = 0.5
 
 
 @dataclass
-class WideParsedRecord:
-    """One normalized record produced from a wide-format forecast CSV."""
-
-    person_name: str        # engineer name (capacity) or assignee (pipeline)
-    week_start: date
-    section: str            # AI | ML | etc.
-    forecast_type: str      # "capacity" | "pipeline"
-    allocation: float       # hours that week
-
-    # Capacity-only fields
+class PersonForecastRecord:
+    record_type: str = "person_forecast"
+    forecast_type: str = "engineer_allocation"
+    source_section: str = ""
+    person_name: str = ""
+    week_start: Optional[date] = None
     target_hours: Optional[float] = None
+    planned_hours: float = 0.0
+    status: str = "planned"
+    source_row: int = 0
 
-    # Pipeline-only fields
-    prospect_label: str = ""        # raw account / deal / prospect name
+
+@dataclass
+class PipelineDemandRecord:
+    record_type: str = "pipeline_demand"
+    forecast_type: str = "pipeline_demand"
+    source_section: str = ""
+    week_start: Optional[date] = None
+    prospect_or_deal: str = ""
     probability: Optional[float] = None
-    requested_alloc: Optional[float] = None
+    requested_allocation: Optional[float] = None
     skillset: str = ""
+    demand_hours: float = 0.0
+    candidate_people: list = field(default_factory=list)
+    staffing_status: str = "unassigned"
+    source_row: int = 0
+
+
+@dataclass
+class PipelineOpportunityRecord:
+    record_type: str = "pipeline_opportunity"
+    forecast_type: str = "pipeline_opportunity"
+    source_section: str = ""
+    prospect_or_deal: str = ""
+    probability: Optional[float] = None
+    requested_allocation: Optional[float] = None
+    skillset: str = ""
+    candidate_people: list = field(default_factory=list)
+    status: str = "unscheduled"
+    source_row: int = 0
+
+
+@dataclass
+class SummaryMetricRecord:
+    record_type: str = "summary_metric"
+    source_section: str = ""
+    week_start: Optional[date] = None
+    metric_name: str = ""
+    metric_value: Optional[float] = None
+    raw_value: str = ""
+    source_row: int = 0
+
+
+@dataclass
+class MetricMismatch:
+    source_section: str
+    week_start: date
+    metric_name: str
+    spreadsheet_value: Optional[float]
+    calculated_value: Optional[float]
+    difference: Optional[float]
 
 
 @dataclass
 class WideParseResult:
-    """Aggregate result from :func:`parse_wide_forecast`."""
-
     format_detected: bool = False
     total_rows: int = 0
-    sections: list[str] = field(default_factory=list)
-    capacity_records: list[WideParsedRecord] = field(default_factory=list)
-    pipeline_records: list[WideParsedRecord] = field(default_factory=list)
-    skipped_ambiguous: int = 0           # pipeline rows skipped due to no/? assignee
-    warnings: list[str] = field(default_factory=list)
-    infos: list[str] = field(default_factory=list)
+    sections: list = field(default_factory=list)
+    person_forecast: list = field(default_factory=list)
+    pipeline_demand: list = field(default_factory=list)
+    pipeline_opportunities: list = field(default_factory=list)
+    summary_metrics: list = field(default_factory=list)
+    metric_mismatches: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+    infos: list = field(default_factory=list)
+
+    @property
+    def skipped_ambiguous(self) -> int:
+        return sum(1 for r in self.pipeline_demand if r.staffing_status == "unassigned")
+
+    @property
+    def candidate_people_total(self) -> int:
+        return sum(len(r.candidate_people) for r in self.pipeline_demand)
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
-def _first_nonempty(row: pd.Series) -> str:
-    """Return the first non-empty, non-NaN cell value in a Series as str."""
+def _first_nonempty(row: "pd.Series") -> str:
     for val in row:
         if pd.notna(val) and str(val).strip():
             return str(val).strip()
     return ""
 
 
-def _maybe_fix_year_typo(date_str: str) -> tuple[str, bool]:
-    """Attempt to fix a year typo by swapping adjacent digits.
-
-    Example: '2206-06-16' -> ('2026-06-16', True)
-
-    Returns (possibly_fixed_string, was_fixed).
-    """
+def _maybe_fix_year_typo(date_str: str) -> tuple:
     s = date_str.strip()
     m = re.match(r"^(\d{4})([-/].+)$", s)
     if not m:
         return s, False
-
     year_digits = m.group(1)
     rest = m.group(2)
     year = int(year_digits)
-
-    # Already plausible
     if _YEAR_MIN <= year <= _YEAR_MAX:
         return s, False
-
-    # Try all adjacent-digit swaps to find a plausible year
     for i in range(len(year_digits) - 1):
         chars = list(year_digits)
         chars[i], chars[i + 1] = chars[i + 1], chars[i]
         candidate_str = "".join(chars)
         if _YEAR_MIN <= int(candidate_str) <= _YEAR_MAX:
             return f"{candidate_str}{rest}", True
-
     return s, False
 
 
-def _try_parse_date(val: str) -> tuple[Optional[date], bool]:
-    """Parse a date string with optional year-typo correction.
-
-    Returns (date_or_None, was_year_corrected).
-    """
+def _try_parse_date(val: str) -> tuple:
     s = str(val).strip() if val else ""
     if not s or s.lower() in ("nan", "none", ""):
         return None, False
-
     try:
         d = pd.to_datetime(s).date()
-        # Year out of planning range — try auto-correction
         if not (_YEAR_MIN <= d.year <= _YEAR_MAX):
             fixed, was_fixed = _maybe_fix_year_typo(s)
             if was_fixed:
                 try:
-                    corrected = pd.to_datetime(fixed).date()
-                    return corrected, True
+                    return pd.to_datetime(fixed).date(), True
                 except Exception:
                     pass
             return None, False
         return d, False
     except Exception:
-        # Direct parse failed; try typo correction
         fixed, was_fixed = _maybe_fix_year_typo(s)
         if was_fixed:
             try:
@@ -187,52 +181,22 @@ def _try_parse_date(val: str) -> tuple[Optional[date], bool]:
         return None, False
 
 
-def _extract_date_columns(row: pd.Series) -> dict[int, date]:
-    """Return {col_index: date} for all date-parseable cells in the row."""
-    result: dict[int, date] = {}
+def _extract_date_columns(row: "pd.Series") -> dict:
+    result: dict = {}
     for i, val in enumerate(row):
         if pd.isna(val):
             continue
-        d, _ = _try_parse_date(str(val))
+        s = str(val).strip()
+        if not s or s.lower() in ("average", "avg", "total", "notes", ""):
+            continue
+        d, _ = _try_parse_date(s)
         if d is not None:
             result[i] = d
     return result
 
 
-def _find_assignee_col(header_row: pd.Series) -> int:
-    """Find the column index of an 'Assignee' cell in a pipeline header row.
-
-    Falls back to the last non-empty, non-date column.
-    """
-    for i, val in enumerate(header_row):
-        if pd.notna(val) and "assignee" in str(val).strip().lower():
-            return i
-
-    # Fallback: last non-empty column
-    for i in range(len(header_row) - 1, -1, -1):
-        v = str(header_row.iloc[i]).strip()
-        if v and v.lower() not in ("nan", ""):
-            return i
-
-    return -1
-
-
-def _split_assignees(raw: str) -> list[str]:
-    """Split 'Satya/Zheng' → ['Satya', 'Zheng']; return [] for '?' / blank."""
-    if not raw:
-        return []
-    stripped = raw.strip()
-    if stripped.lower() in ("", "nan", "none", "?", "tbd", "n/a"):
-        return []
-    if "?" in stripped:
-        return []  # Any '?' makes the assignee ambiguous
-    parts = re.split(r"[/,]", stripped)
-    return [p.strip() for p in parts if p.strip()]
-
-
-def _parse_float(s: str) -> Optional[float]:
-    """Parse a numeric cell; return None if empty or unparseable."""
-    cleaned = str(s).strip() if s else ""
+def _parse_float(s) -> Optional[float]:
+    cleaned = str(s).strip() if s is not None else ""
     if not cleaned or cleaned.lower() in ("nan", "none", ""):
         return None
     cleaned = cleaned.replace("%", "").strip()
@@ -242,188 +206,95 @@ def _parse_float(s: str) -> Optional[float]:
         return None
 
 
-def _is_summary_row(first_cell: str) -> bool:
-    fc = first_cell.strip().lower()
-    return any(fc.startswith(prefix) for prefix in _SUMMARY_PREFIXES)
+def _parse_utilization(s) -> tuple:
+    raw = str(s).strip() if s is not None else ""
+    if not raw or raw.lower() in ("nan", "none", ""):
+        return None, raw
+    cleaned = raw.replace("%", "").strip()
+    try:
+        pct = float(cleaned)
+        return pct / 100.0, raw
+    except ValueError:
+        return None, raw
 
 
-# ---------------------------------------------------------------------------
-# Row parsers
-# ---------------------------------------------------------------------------
+def _split_candidates(raw: str) -> tuple:
+    if not raw:
+        return [], True
+    stripped = raw.strip()
+    if stripped.lower() in ("", "nan", "none"):
+        return [], True
+    if stripped == "?" or "?" in stripped:
+        return [], True
+    parts = re.split(r"[/,&]", stripped)
+    names = [p.strip() for p in parts if p.strip()]
+    return names, False
 
 
-def _parse_capacity_row(
-    row: pd.Series,
-    row_idx: int,
-    name: str,
-    date_cols: dict[int, date],
-    target_col: int,
-    section: str,
-    result: WideParseResult,
-) -> None:
-    target_str = str(row.iloc[target_col]).strip() if len(row) > target_col else ""
-    target_hours = _parse_float(target_str)
-
-    for col_idx, week_date in date_cols.items():
-        if col_idx >= len(row):
-            continue
-        val_str = str(row.iloc[col_idx]).strip()
-        alloc = _parse_float(val_str)
-        if alloc is None:
-            result.warnings.append(
-                f"Row {row_idx}: Cannot parse capacity hours for '{name}' on {week_date!s}; skipping"
-            )
-            continue
-
-        result.capacity_records.append(WideParsedRecord(
-            person_name=name,
-            week_start=week_date,
-            section=section,
-            forecast_type="capacity",
-            allocation=alloc,
-            target_hours=target_hours,
-        ))
+def _is_metric_row(first_cell: str) -> bool:
+    return first_cell.strip().lower() in _METRIC_MAP
 
 
-def _parse_pipeline_row(
-    row: pd.Series,
-    row_idx: int,
-    label: str,
-    date_cols: dict[int, date],
-    prob_col: int,
-    alloc_col: int,
-    skillset_col: int,
-    assignee_col: int,
-    section: str,
-    result: WideParseResult,
-) -> None:
-    probability = _parse_float(str(row.iloc[prob_col]).strip() if len(row) > prob_col else "")
-    requested_alloc = _parse_float(str(row.iloc[alloc_col]).strip() if len(row) > alloc_col else "")
-    skillset = str(row.iloc[skillset_col]).strip() if len(row) > skillset_col else ""
-    if skillset.lower() in ("nan", "none", ""):
-        skillset = ""
-
-    if assignee_col >= 0 and len(row) > assignee_col:
-        assignee_raw = str(row.iloc[assignee_col]).strip()
-    else:
-        assignee_raw = ""
-
-    assignees = _split_assignees(assignee_raw)
-
-    for col_idx, week_date in date_cols.items():
-        if col_idx >= len(row):
-            continue
-        val_str = str(row.iloc[col_idx]).strip()
-        demand = _parse_float(val_str)
-        if demand is None:
-            result.warnings.append(
-                f"Row {row_idx}: Cannot parse demand hours for '{label}' on {week_date!s}; skipping"
-            )
-            continue
-
-        if not assignees:
-            result.infos.append(
-                f"Row {row_idx}: Pipeline '{label}' on {week_date!s} "
-                f"has no/ambiguous assignee ('{assignee_raw}'); skipping person record"
-            )
-            result.skipped_ambiguous += 1
-            # Store a record with empty person_name so pipeline data is preserved
-            result.pipeline_records.append(WideParsedRecord(
-                person_name="",
-                week_start=week_date,
-                section=section,
-                forecast_type="pipeline",
-                allocation=demand,
-                prospect_label=label,
-                probability=probability,
-                requested_alloc=requested_alloc,
-                skillset=skillset,
-            ))
-        else:
-            for assignee in assignees:
-                result.pipeline_records.append(WideParsedRecord(
-                    person_name=assignee,
-                    week_start=week_date,
-                    section=section,
-                    forecast_type="pipeline",
-                    allocation=demand,
-                    prospect_label=label,
-                    probability=probability,
-                    requested_alloc=requested_alloc,
-                    skillset=skillset,
-                ))
-
-
-# ---------------------------------------------------------------------------
-# Public interface
-# ---------------------------------------------------------------------------
+def _metric_canonical(first_cell: str) -> Optional[str]:
+    return _METRIC_MAP.get(first_cell.strip().lower())
 
 
 def is_wide_format(csv_path: str) -> bool:
-    """Return True if the CSV looks like a wide planning spreadsheet.
-
-    Heuristic:
-    - If the first non-empty header row contains 'person' or 'week_start',
-      it is normalized long format → return False.
-    - If any of the first 30 rows have a known section label (AI, ML, …) or
-      engineer/pipeline block header in the first cell, it is wide → return True.
-    """
     try:
-        df = pd.read_csv(csv_path, header=None, dtype=str, nrows=30)
+        import csv as _csv
+        with open(csv_path, newline="", encoding="utf-8-sig") as _f:
+            rows = list(_csv.reader(_f))[:30]
+        if not rows:
+            return False
+        first_row_lower = {c.strip().lower() for c in rows[0] if c.strip()}
+        if any(h in first_row_lower for h in ("person", "person_name", "week_start", "week start")):
+            return False
+        for r in rows:
+            fc = next((c.strip().lower() for c in r if c.strip()), "")
+            if fc in _SECTION_LABELS or fc in _ENGINEER_LABELS:
+                return True
     except Exception:
-        return False
-
-    # Normalized format guard: first row has canonical headers
-    first_row_lower = {
-        str(v).strip().lower()
-        for v in df.iloc[0]
-        if pd.notna(v) and str(v).strip()
-    }
-    if any(h in first_row_lower for h in ("person", "person_name", "week_start", "week start")):
-        return False
-
-    for _, row in df.iterrows():
-        fc = _first_nonempty(row).lower()
-        if fc in _SECTION_LABELS or fc in _ENGINEER_LABELS:
-            return True
-
+        pass
     return False
 
 
 def parse_wide_forecast(csv_path: str) -> WideParseResult:
-    """Parse a wide-format forecast CSV into normalized :class:`WideParsedRecord` objects.
-
-    Does not write to any database.  Returns a :class:`WideParseResult`.
-    """
     result = WideParseResult(format_detected=True)
-
     try:
-        df = pd.read_csv(csv_path, header=None, dtype=str)
+        # Pre-compute max column count to handle variable-width rows
+        with open(csv_path, newline="", encoding="utf-8-sig") as _f:
+            import csv as _csv
+            max_cols = max((len(r) for r in _csv.reader(_f)), default=1)
+        df = pd.read_csv(
+            csv_path, header=None, dtype=str,
+            names=range(max_cols), engine="python",
+        )
     except Exception as exc:
         result.format_detected = False
         result.warnings.append(f"Could not read CSV: {exc}")
         return result
 
     result.total_rows = len(df)
-
-    # ── State machine ──────────────────────────────────────────────────────
-    # States: SCAN | AWAIT_ENGINEER | IN_ENGINEER | IN_PIPELINE
     state = "SCAN"
     current_section = ""
-    date_cols: dict[int, date] = {}        # col_idx → date for current block
-    pending_dates: dict[int, date] = {}    # dates from a pre-header date row
-    engineer_target_col = 1               # default: col 1 = target hours
+    date_cols: dict = {}
+    pending_dates: dict = {}
     pipeline_prob_col = 1
     pipeline_alloc_col = 2
     pipeline_skillset_col = 3
-    pipeline_assignee_col = -1
+    pipeline_candidate_col = -1
+    _acc: dict = {}
+
+    def _get_acc(section: str, week: date) -> dict:
+        return _acc.setdefault(section, {}).setdefault(
+            week, {"eng_planned": 0.0, "eng_target": 0.0, "pip_demand": 0.0}
+        )
 
     for row_idx, row in df.iterrows():
         int_idx = int(row_idx)  # type: ignore[arg-type]
         first_cell = _first_nonempty(row)
         first_cell_lower = first_cell.lower()
 
-        # ── Section transition ─────────────────────────────────────────────
         if first_cell_lower in _SECTION_LABELS:
             current_section = first_cell
             if current_section not in result.sections:
@@ -432,111 +303,255 @@ def parse_wide_forecast(csv_path: str) -> WideParseResult:
             pending_dates = {}
             continue
 
-        # ── Skip blank rows ────────────────────────────────────────────────
         if not first_cell:
-            # Could be a "date sub-row" (dates starting ~col 4)
             dc = _extract_date_columns(row)
             if dc:
-                pending_dates = dc
-                # Warn about any corrected year typos
                 for val in row:
                     if pd.notna(val) and str(val).strip():
                         _, corrected = _try_parse_date(str(val))
                         if corrected:
                             result.warnings.append(
-                                f"Row {int_idx}: Year typo detected in '{str(val).strip()}'; "
-                                f"auto-corrected to 20xx"
+                                f"Row {int_idx}: Year typo auto-corrected in '{str(val).strip()}'"
                             )
+                pending_dates = dc
             continue
 
-        # ── Skip summary rows ──────────────────────────────────────────────
-        if _is_summary_row(first_cell):
+        if _is_metric_row(first_cell):
+            metric_name = _metric_canonical(first_cell)
+            if metric_name and date_cols:
+                for col_idx, week_date in date_cols.items():
+                    if col_idx >= len(row):
+                        continue
+                    cell = row.iloc[col_idx]
+                    raw_val = str(cell).strip() if pd.notna(cell) else ""
+                    if not raw_val or raw_val.lower() in ("nan", ""):
+                        continue
+                    if metric_name == "team_utilization":
+                        m_val, raw_str = _parse_utilization(raw_val)
+                    elif metric_name == "hire_status":
+                        m_val = None
+                        raw_str = raw_val
+                    else:
+                        m_val = _parse_float(raw_val)
+                        raw_str = raw_val
+                    result.summary_metrics.append(SummaryMetricRecord(
+                        source_section=current_section,
+                        week_start=week_date,
+                        metric_name=metric_name,
+                        metric_value=m_val,
+                        raw_value=raw_str,
+                        source_row=int_idx,
+                    ))
             continue
 
-        # ── Engineer block header ──────────────────────────────────────────
         if first_cell_lower in _ENGINEER_LABELS:
-            # Extract dates from this header row (or fall back to pending_dates)
             dc = _extract_date_columns(row)
             if dc:
                 date_cols = dc
-                # Check for year typos
-                for val in row:
-                    s = str(val).strip() if pd.notna(val) else ""
-                    _, corrected = _try_parse_date(s)
-                    if corrected:
-                        result.warnings.append(
-                            f"Row {int_idx}: Year typo in '{s}'; auto-corrected"
-                        )
             elif pending_dates:
                 date_cols = pending_dates
             pending_dates = {}
             state = "IN_ENGINEER"
             continue
 
-        # ── Pipeline block header ──────────────────────────────────────────
         if first_cell_lower in _PIPELINE_LABELS:
-            # Update dates if pipeline header row has them
             dc = _extract_date_columns(row)
             if dc:
                 date_cols = dc
-                for val in row:
-                    s = str(val).strip() if pd.notna(val) else ""
-                    _, corrected = _try_parse_date(s)
-                    if corrected:
-                        result.warnings.append(
-                            f"Row {int_idx}: Year typo in '{s}'; auto-corrected"
-                        )
             elif pending_dates:
                 date_cols = pending_dates
-
-            pipeline_assignee_col = _find_assignee_col(row)
-            # Determine prob/alloc/skillset column indices from header
-            # Defaults are 1/2/3; override if we find explicit labels
+            pipeline_candidate_col = -1
             for i, val in enumerate(row):
                 if pd.isna(val):
                     continue
                 vl = str(val).strip().lower()
-                if vl in ("probability", "prob", "probability %"):
+                if "candidate" in vl:
+                    pipeline_candidate_col = i
+                elif vl == "assignee":
+                    pipeline_candidate_col = i
+                elif vl in ("probability", "prob"):
                     pipeline_prob_col = i
-                elif vl in ("requested alloc", "alloc", "allocation", "requested allocation", "hours"):
+                elif vl in ("allocation", "alloc", "requested alloc", "requested allocation"):
                     pipeline_alloc_col = i
                 elif vl in ("skillset", "skill", "skills", "role"):
                     pipeline_skillset_col = i
-
+            if pipeline_candidate_col == -1:
+                for i in range(len(row) - 1, -1, -1):
+                    v_cell = row.iloc[i]
+                    v = str(v_cell).strip() if pd.notna(v_cell) else ""
+                    if v and v.lower() not in ("nan", ""):
+                        d, _ = _try_parse_date(v)
+                        if d is None:
+                            pipeline_candidate_col = i
+                            break
             pending_dates = {}
             state = "IN_PIPELINE"
             continue
 
-        # ── Engineer capacity data row ─────────────────────────────────────
         if state == "IN_ENGINEER":
             if not date_cols:
                 result.warnings.append(
-                    f"Row {int_idx}: Capacity row '{first_cell}' has no date columns; skipping"
+                    f"Row {int_idx}: Engineer row '{first_cell}' has no date columns; skipping"
                 )
                 continue
-            _parse_capacity_row(
-                row, int_idx, first_cell, date_cols,
-                engineer_target_col, current_section, result
-            )
+            target_cell = row.iloc[1] if len(row) > 1 else None
+            target_str = str(target_cell).strip() if pd.notna(target_cell) else ""
+            target_hours = _parse_float(target_str)
+            for col_idx, week_date in date_cols.items():
+                if col_idx >= len(row):
+                    continue
+                cell = row.iloc[col_idx]
+                planned = _parse_float(str(cell).strip() if pd.notna(cell) else "")
+                if planned is None:
+                    continue
+                result.person_forecast.append(PersonForecastRecord(
+                    source_section=current_section,
+                    person_name=first_cell,
+                    week_start=week_date,
+                    target_hours=target_hours,
+                    planned_hours=planned,
+                    source_row=int_idx,
+                ))
+                acc = _get_acc(current_section, week_date)
+                acc["eng_planned"] += planned
+                if target_hours is not None:
+                    acc["eng_target"] += target_hours
 
-        # ── Pipeline data row ──────────────────────────────────────────────
         elif state == "IN_PIPELINE":
             if not date_cols:
                 result.warnings.append(
                     f"Row {int_idx}: Pipeline row '{first_cell}' has no date columns; skipping"
                 )
                 continue
-            _parse_pipeline_row(
-                row, int_idx, first_cell, date_cols,
-                pipeline_prob_col, pipeline_alloc_col,
-                pipeline_skillset_col, pipeline_assignee_col,
-                current_section, result
-            )
 
-        # ── SCAN / AWAIT_ENGINEER state: treat date-like rows as pending ───
+            def _cell_str(col: int) -> str:
+                if col < 0 or col >= len(row):
+                    return ""
+                c = row.iloc[col]
+                return str(c).strip() if pd.notna(c) else ""
+
+            prob = _parse_float(_cell_str(pipeline_prob_col))
+            req_alloc = _parse_float(_cell_str(pipeline_alloc_col))
+            skillset = _cell_str(pipeline_skillset_col)
+            if skillset.lower() in ("nan", "none", ""):
+                skillset = ""
+            candidate_raw = _cell_str(pipeline_candidate_col)
+            if candidate_raw.lower() in ("nan", "none"):
+                candidate_raw = ""
+            candidates, is_ambiguous = _split_candidates(candidate_raw)
+            if is_ambiguous and candidate_raw:
+                result.infos.append(
+                    f"Row {int_idx}: Pipeline '{first_cell}' Candidate Engineer(s) "
+                    f"'{candidate_raw}' is ambiguous; treating as unassigned"
+                )
+            elif not candidate_raw:
+                result.infos.append(
+                    f"Row {int_idx}: Pipeline '{first_cell}' has no Candidate Engineer(s)"
+                )
+            has_demand = any(
+                _parse_float(str(row.iloc[ci]).strip() if pd.notna(row.iloc[ci]) else "") is not None
+                for ci in date_cols
+                if ci < len(row)
+            )
+            if not has_demand:
+                result.pipeline_opportunities.append(PipelineOpportunityRecord(
+                    source_section=current_section,
+                    prospect_or_deal=first_cell,
+                    probability=prob,
+                    requested_allocation=req_alloc,
+                    skillset=skillset,
+                    candidate_people=candidates,
+                    status="unscheduled",
+                    source_row=int_idx,
+                ))
+                result.infos.append(
+                    f"Row {int_idx}: Pipeline '{first_cell}' has no weekly demand; "
+                    "stored as pipeline_opportunity"
+                )
+            else:
+                for col_idx, week_date in date_cols.items():
+                    if col_idx >= len(row):
+                        continue
+                    cell = row.iloc[col_idx]
+                    demand = _parse_float(str(cell).strip() if pd.notna(cell) else "")
+                    if demand is None:
+                        continue
+                    staffing_status = "candidate" if candidates else "unassigned"
+                    result.pipeline_demand.append(PipelineDemandRecord(
+                        source_section=current_section,
+                        week_start=week_date,
+                        prospect_or_deal=first_cell,
+                        probability=prob,
+                        requested_allocation=req_alloc,
+                        skillset=skillset,
+                        demand_hours=demand,
+                        candidate_people=candidates,
+                        staffing_status=staffing_status,
+                        source_row=int_idx,
+                    ))
+                    acc = _get_acc(current_section, week_date)
+                    acc["pip_demand"] += demand
+
         elif state in ("SCAN", "AWAIT_ENGINEER"):
             dc = _extract_date_columns(row)
             if dc:
                 pending_dates = dc
+                # Warn about year typo corrections in header rows
+                for val in row:
+                    if pd.notna(val) and str(val).strip():
+                        _, corrected = _try_parse_date(str(val))
+                        if corrected:
+                            result.warnings.append(
+                                f"Row {int_idx}: Year typo auto-corrected "
+                                f"in '{str(val).strip()}'"
+                            )
 
+    _compare_metrics(result, _acc)
     return result
+
+
+def _compare_metrics(result: WideParseResult, acc: dict) -> None:
+    sheet: dict = {}
+    for sm in result.summary_metrics:
+        if sm.week_start is None:
+            continue
+        sheet[(sm.source_section, sm.week_start, sm.metric_name)] = sm.metric_value
+
+    for section, weeks in acc.items():
+        for week_date, data in weeks.items():
+            eng_planned = data["eng_planned"]
+            pip_demand = data["pip_demand"]
+            # total_capacity = engineer planned hours (not target)
+            # total_demand   = pipeline demand hours only
+            calc_capacity = eng_planned
+            calc_demand = pip_demand
+            calc_gap = calc_capacity - calc_demand
+            calc_util = (calc_demand / calc_capacity) if calc_capacity > 0 else 0.0
+            calcs = {
+                "total_demand": calc_demand,
+                "total_capacity": calc_capacity,
+                "weekly_gap": calc_gap,
+                "team_utilization": calc_util,
+            }
+            for metric_name, calc_val in calcs.items():
+                key = (section, week_date, metric_name)
+                if key not in sheet:
+                    continue
+                sheet_val = sheet[key]
+                if sheet_val is None:
+                    continue
+                diff = abs(calc_val - sheet_val)
+                if diff > _COMPARISON_TOLERANCE:
+                    result.metric_mismatches.append(MetricMismatch(
+                        source_section=section,
+                        week_start=week_date,
+                        metric_name=metric_name,
+                        spreadsheet_value=sheet_val,
+                        calculated_value=calc_val,
+                        difference=diff,
+                    ))
+                    result.warnings.append(
+                        f"Metric mismatch [{section}] {week_date} {metric_name}: "
+                        f"spreadsheet={sheet_val:.3f} calculated={calc_val:.3f} "
+                        f"diff={diff:.3f}"
+                    )

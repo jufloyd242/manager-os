@@ -209,7 +209,6 @@ def _profile_wide_forecast(
 
     parse_result = parse_wide_forecast(csv_path)
 
-    # Resolve person name sets for validation
     person_names_lower: set[str] = set()
     person_aliases_lower: set[str] = set()
     if people:
@@ -221,59 +220,52 @@ def _profile_wide_forecast(
     issues: list[RowIssue] = []
     seen_unknown_people: set[str] = set()
 
-    # Validate capacity row engineer names
+    # Validate engineer names from PersonForecastRecord rows (warning-level)
     if people is not None:
-        for record in parse_result.capacity_records:
+        for record in parse_result.person_forecast:
             pn = record.person_name.strip()
             if pn and pn.lower() not in seen_unknown_people:
                 if not _person_known(pn, person_names_lower, person_aliases_lower):
                     seen_unknown_people.add(pn.lower())
                     issues.append(RowIssue(
-                        row_index=0,
+                        row_index=record.source_row,
                         issue_type="unknown_person",
                         field="person_name",
                         value=_truncate(pn),
-                        detail=f"Capacity row: not in config/people.yaml (section={record.section})",
+                        detail=f"Engineer row: not in config/people.yaml (section={record.source_section})",
                     ))
 
-    # Validate pipeline assignees (only non-empty ones)
-    if people is not None:
-        for record in parse_result.pipeline_records:
-            pn = record.person_name.strip()
-            if pn and pn.lower() not in seen_unknown_people:
-                if not _person_known(pn, person_names_lower, person_aliases_lower):
-                    seen_unknown_people.add(pn.lower())
-                    issues.append(RowIssue(
-                        row_index=0,
-                        issue_type="unknown_person",
-                        field="person_name",
-                        value=_truncate(pn),
-                        detail=f"Pipeline assignee: not in config/people.yaml (prospect={record.prospect_label!r})",
-                    ))
+    # Candidate engineers from pipeline rows are info-level only — NOT unknown_person warnings.
+    # They are POSSIBLE STAFFING CANDIDATES, not allocated resources.
 
-    # Year typo warnings → informational only (not error-level issues since they
-    # were auto-corrected successfully).  They surface in wide_summary["warnings"].
-
-    # Build normalized fields list for wide format
     normalized_columns = [
-        "person_name", "week_start", "allocation", "forecast_type",
-        "section", "prospect_label", "probability", "skillset",
+        "person_name", "week_start", "planned_hours", "target_hours",
+        "source_section", "record_type",
     ]
 
-    # Sample rows from capacity records
-    sample_capacity = parse_result.capacity_records[:sample_size]
     sample_rows: list[dict[str, str]] = [
         {
             "person_name": r.person_name,
             "week_start": str(r.week_start),
-            "allocation": str(r.allocation),
-            "forecast_type": r.forecast_type,
-            "section": r.section,
+            "planned_hours": str(r.planned_hours),
+            "target_hours": str(r.target_hours),
+            "source_section": r.source_section,
+            "record_type": r.record_type,
         }
-        for r in sample_capacity
+        for r in parse_result.person_forecast[:sample_size]
     ]
 
-    has_records = bool(parse_result.capacity_records or parse_result.pipeline_records)
+    hire_status_weeks = [
+        f"{sm.raw_value} ({sm.week_start})"
+        for sm in parse_result.summary_metrics
+        if sm.metric_name == "hire_status"
+    ]
+
+    has_records = bool(
+        parse_result.person_forecast
+        or parse_result.pipeline_demand
+        or parse_result.pipeline_opportunities
+    )
 
     return ForecastProfile(
         path=csv_path,
@@ -282,7 +274,7 @@ def _profile_wide_forecast(
         raw_columns=[],
         normalized_columns=normalized_columns,
         column_mapping={},
-        fields_found=["person_name", "week_start", "allocation", "forecast_type"],
+        fields_found=["person_name", "week_start", "planned_hours", "target_hours"],
         fields_missing=[],
         sample_rows=sample_rows,
         issues=issues,
@@ -290,9 +282,14 @@ def _profile_wide_forecast(
         detected_format="wide",
         wide_summary={
             "sections": parse_result.sections,
-            "capacity_rows": len(parse_result.capacity_records),
-            "pipeline_rows": len(parse_result.pipeline_records),
-            "skipped_ambiguous": parse_result.skipped_ambiguous,
+            "person_forecast_rows": len(parse_result.person_forecast),
+            "pipeline_demand_rows": len(parse_result.pipeline_demand),
+            "pipeline_opportunity_rows": len(parse_result.pipeline_opportunities),
+            "summary_metric_rows": len(parse_result.summary_metrics),
+            "candidate_people_total": parse_result.candidate_people_total,
+            "unassigned_pipeline_demand": parse_result.skipped_ambiguous,
+            "metric_mismatches": len(parse_result.metric_mismatches),
+            "hire_status_weeks": hire_status_weeks,
             "warnings": parse_result.warnings,
             "infos": parse_result.infos,
         },
@@ -383,21 +380,23 @@ def _profile_normalized_forecast(
                     detail="Not found in config/people.yaml",
                 ))
 
-        # Unknown client
+        # Unknown client — skip for pipeline/capacity rows (client field = prospect label)
         if "client" in df_norm.columns and clients is not None:
-            client_val = str(row.get("client", "")).strip()
-            if (
-                client_val
-                and client_val.lower() not in ("nan", "none", "")
-                and not _client_known(client_val, client_names_lower, client_aliases_lower)
-            ):
-                issues.append(RowIssue(
-                    row_index=int_idx,
-                    issue_type="unknown_client",
-                    field="client",
-                    value=_truncate(client_val),
-                    detail="Not found in config/clients.yaml",
-                ))
+            forecast_type_val = str(row.get("forecast_type", "")).strip().lower()
+            if forecast_type_val not in ("pipeline", "capacity"):
+                client_val = str(row.get("client", "")).strip()
+                if (
+                    client_val
+                    and client_val.lower() not in ("nan", "none", "")
+                    and not _client_known(client_val, client_names_lower, client_aliases_lower)
+                ):
+                    issues.append(RowIssue(
+                        row_index=int_idx,
+                        issue_type="unknown_client",
+                        field="client",
+                        value=_truncate(client_val),
+                        detail="Not found in config/clients.yaml",
+                    ))
 
         # Allocation checks
         if "allocation_pct" in df_norm.columns:
@@ -420,14 +419,6 @@ def _profile_normalized_forecast(
                             field="allocation_pct",
                             value=_truncate(alloc_raw),
                             detail=f"{alloc:.0f}% > 100%",
-                        ))
-                    elif alloc == 0:
-                        issues.append(RowIssue(
-                            row_index=int_idx,
-                            issue_type="zero_allocation",
-                            field="allocation_pct",
-                            value=_truncate(alloc_raw),
-                            detail="0% allocation",
                         ))
                 except ValueError:
                     issues.append(RowIssue(
