@@ -238,6 +238,25 @@ def _profile_wide_forecast(
     # Candidate engineers from pipeline rows are info-level only — NOT unknown_person warnings.
     # They are POSSIBLE STAFFING CANDIDATES, not allocated resources.
 
+    # Convert metric mismatches to warning-level RowIssues.
+    # This ensures "No issues found" / "Safe to run ingest" are suppressed when
+    # the spreadsheet summary rows don't match the calculated values.
+    for mismatch in parse_result.metric_mismatches:
+        sheet_fmt = f"{mismatch.spreadsheet_value:.4f}" if mismatch.spreadsheet_value is not None else "N/A"
+        calc_fmt = f"{mismatch.calculated_value:.4f}" if mismatch.calculated_value is not None else "N/A"
+        issues.append(RowIssue(
+            row_index=0,
+            issue_type="metric_mismatch",
+            field=mismatch.metric_name,
+            value=sheet_fmt,
+            detail=(
+                f"[{mismatch.source_section}] {mismatch.week_start} "
+                f"{mismatch.metric_name}: "
+                f"spreadsheet={sheet_fmt} calculated={calc_fmt} "
+                f"diff={mismatch.difference:.4f}"
+            ),
+        ))
+
     normalized_columns = [
         "person_name", "week_start", "planned_hours", "target_hours",
         "source_section", "record_type",

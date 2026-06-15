@@ -833,3 +833,234 @@ class TestWideFormatCLI:
         assert parsed["detected_format"] == "wide"
         assert parsed["can_ingest"] is True
 
+
+# ===========================================================================
+# Wide-format metric comparison tests
+# ===========================================================================
+
+class TestMetricComparison:
+    """Verify that the summary metric comparison uses the correct formula."""
+
+    V2 = FIXTURES / "wide_forecast_v2.csv"
+
+    def test_correct_formula_zero_mismatches(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.V2))
+        assert len(pr.metric_mismatches) == 0, [
+            f"{m.source_section} {m.week_start} {m.metric_name} "
+            f"sheet={m.spreadsheet_value:.4f} calc={m.calculated_value:.4f}"
+            for m in pr.metric_mismatches
+        ]
+
+    def test_engineer_planned_included_in_total_demand(self) -> None:
+        # Engineer planned hours must be part of Total Demand.
+        # AI week 6/8: Avery=40 + Blake=40 + pipeline=50 = 130
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        from datetime import date
+        pr = parse_wide_forecast(str(self.V2))
+        w = date(2026, 6, 8)
+        ai_eng = sum(
+            r.planned_hours for r in pr.person_forecast
+            if r.source_section == "AI" and r.week_start == w
+        )
+        assert ai_eng == 80.0
+
+    def test_pipeline_demand_included_in_total_demand(self) -> None:
+        # AI week 6/8 pipeline demand: Orbit=20 + Nova=0 + Titan=10 + Zenith=20 = 50
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        from datetime import date
+        pr = parse_wide_forecast(str(self.V2))
+        w = date(2026, 6, 8)
+        ai_pip = sum(
+            r.demand_hours for r in pr.pipeline_demand
+            if r.source_section == "AI" and r.week_start == w
+        )
+        assert ai_pip == 50.0
+
+    def test_target_column_used_for_total_capacity(self) -> None:
+        # AI Total Capacity = Avery.target + Blake.target = 40+40 = 80 for all weeks
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        from datetime import date
+        pr = parse_wide_forecast(str(self.V2))
+        w = date(2026, 6, 8)
+        ai_targets = [
+            r.target_hours for r in pr.person_forecast
+            if r.source_section == "AI" and r.week_start == w
+        ]
+        assert sum(t for t in ai_targets if t is not None) == 80.0
+
+    def test_pipeline_opportunity_not_counted_in_demand(self) -> None:
+        # Pipeline opportunities (no weekly demand) must NOT appear in demand totals.
+        # Phantom Deal → pipeline_opportunity, not pipeline_demand
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.V2))
+        opp_names = {r.prospect_or_deal for r in pr.pipeline_opportunities}
+        demand_names = {r.prospect_or_deal for r in pr.pipeline_demand}
+        assert "Phantom Deal" in opp_names
+        assert "Phantom Deal" not in demand_names
+
+    def test_candidate_engineers_not_counted_as_demand(self) -> None:
+        # "Avery" and "Blake" are Candidate Engineer(s) in pipeline rows.
+        # They must NOT appear in person_forecast (allocated) records.
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.V2))
+        # person_forecast only has actual engineers with target hours
+        pf_names = {r.person_name for r in pr.person_forecast}
+        # Pipeline candidate names (Avery, Blake as short names) should only appear
+        # in candidate_people lists, not as person_forecast person_name entries
+        # (Avery Strand is the full name in engineer rows; "Avery" is the candidate shortname)
+        candidate_shortnames = set()
+        for rec in pr.pipeline_demand:
+            candidate_shortnames.update(rec.candidate_people)
+        # Short candidate names like "Avery" should not be standalone person_forecast entries
+        assert "Avery" not in pf_names
+        assert "Blake" not in pf_names
+        # But full names are fine (they're real engineers)
+        assert "Avery Strand" in pf_names
+        assert "Blake Okafor" in pf_names
+
+    def test_utilization_percentage_comparison(self) -> None:
+        # Team Utilization "162.5%" → stored as 1.625 decimal.
+        # Calculated = (130/80) = 1.625. Should match (no mismatch).
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        from datetime import date
+        pr = parse_wide_forecast(str(self.V2))
+        util_metrics = [
+            sm for sm in pr.summary_metrics
+            if sm.source_section == "AI" and sm.metric_name == "team_utilization"
+            and sm.week_start == date(2026, 6, 8)
+        ]
+        assert util_metrics
+        # Should be stored as decimal fraction (1.625)
+        assert abs(util_metrics[0].metric_value - 1.625) < 0.01
+        # No mismatch for this metric
+        util_mismatches = [
+            m for m in pr.metric_mismatches
+            if m.source_section == "AI" and m.metric_name == "team_utilization"
+            and m.week_start == date(2026, 6, 8)
+        ]
+        assert util_mismatches == []
+
+    def test_metric_mismatch_creates_warning_issue(self) -> None:
+        """A deliberate mismatch in a fixture should create a RowIssue."""
+        import tempfile, os
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        # Create minimal CSV with a deliberately wrong Total Demand
+        csv_content = (
+            "AI,,,,,,\n"
+            ",,,,6/8/2026,6/15/2026,\n"
+            "Engineer,Target,,,6/8/2026,6/15/2026,\n"
+            "Alex,40,,,40,40,\n"
+            "Pipeline,Probability,Allocation,Skillset,6/8/2026,6/15/2026,Candidate Engineer(s)\n"
+            "Deal A,0.8,20,AI,20,20,Alex\n"
+            "Total Demand,,,,999,999,,\n"  # deliberately wrong (should be 60 each)
+            "Total Capacity,,,,80,80,,\n"
+            "Weekly Gap,,,,-919,-919,,\n"
+            "Team Utilization,,,,75.0%,75.0%,,\n"
+            "Hire Status,,,,NO HIRE,NO HIRE,,\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(csv_content)
+            tmp = f.name
+        try:
+            pr = parse_wide_forecast(tmp)
+            assert len(pr.metric_mismatches) > 0
+            td_mismatch = [m for m in pr.metric_mismatches if m.metric_name == "total_demand"]
+            assert td_mismatch, "Should have total_demand mismatch"
+            assert td_mismatch[0].difference > 900
+        finally:
+            os.unlink(tmp)
+
+    def test_metric_mismatch_becomes_row_issue(self) -> None:
+        """Metric mismatches must appear in profile result.issues as warning-level."""
+        import tempfile, os
+        from manager_os.profile import profile_forecast_csv
+        csv_content = (
+            "AI,,,,,,\n"
+            ",,,,6/8/2026,6/15/2026,\n"
+            "Engineer,Target,,,6/8/2026,6/15/2026,\n"
+            "Alex,40,,,40,40,\n"
+            "Pipeline,Probability,Allocation,Skillset,6/8/2026,6/15/2026,Candidate Engineer(s)\n"
+            "Deal A,0.8,20,AI,20,20,Alex\n"
+            "Total Demand,,,,999,999,,\n"
+            "Total Capacity,,,,80,80,,\n"
+            "Weekly Gap,,,,-919,-919,,\n"
+            "Team Utilization,,,,75.0%,75.0%,,\n"
+            "Hire Status,,,,NO HIRE,NO HIRE,,\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(csv_content)
+            tmp = f.name
+        try:
+            result = profile_forecast_csv(tmp)
+            mismatch_issues = [i for i in result.issues if i.issue_type == "metric_mismatch"]
+            assert mismatch_issues, "Should have metric_mismatch RowIssues"
+            assert mismatch_issues[0].field == "total_demand"
+        finally:
+            os.unlink(tmp)
+
+    def test_metric_mismatch_suppresses_no_issues_found(self) -> None:
+        """When metric mismatches exist, 'No issues found' must not appear."""
+        import tempfile, os
+        csv_content = (
+            "AI,,,,,,\n"
+            ",,,,6/8/2026,6/15/2026,\n"
+            "Engineer,Target,,,6/8/2026,6/15/2026,\n"
+            "Alex,40,,,40,40,\n"
+            "Pipeline,Probability,Allocation,Skillset,6/8/2026,6/15/2026,Candidate Engineer(s)\n"
+            "Deal A,0.8,20,AI,20,20,Alex\n"
+            "Total Demand,,,,999,999,,\n"
+            "Total Capacity,,,,80,80,,\n"
+            "Weekly Gap,,,,-919,-919,,\n"
+            "Team Utilization,,,,75.0%,75.0%,,\n"
+            "Hire Status,,,,NO HIRE,NO HIRE,,\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(csv_content)
+            tmp = f.name
+        try:
+            cli_result = CliRunner().invoke(
+                cli_app,
+                ["profile-forecast", "--path", tmp],
+                env=_env(tmp),
+            )
+            assert "No issues found" not in cli_result.output
+            assert "Safe to run manager-os ingest" not in cli_result.output
+        finally:
+            os.unlink(tmp)
+
+    def test_metric_mismatch_suppresses_safe_to_ingest(self) -> None:
+        """When metric mismatches exist, 'Safe to run ingest' must not appear."""
+        import tempfile, os
+        csv_content = (
+            "AI,,,,,,\n"
+            ",,,,6/8/2026,6/15/2026,\n"
+            "Engineer,Target,,,6/8/2026,6/15/2026,\n"
+            "Alex,40,,,40,40,\n"
+            "Pipeline,Probability,Allocation,Skillset,6/8/2026,6/15/2026,Candidate Engineer(s)\n"
+            "Deal A,0.8,20,AI,20,20,Alex\n"
+            "Total Demand,,,,999,999,,\n"
+            "Total Capacity,,,,80,80,,\n"
+            "Weekly Gap,,,,-919,-919,,\n"
+            "Team Utilization,,,,75.0%,75.0%,,\n"
+            "Hire Status,,,,NO HIRE,NO HIRE,,\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(csv_content)
+            tmp = f.name
+        try:
+            cli_result = CliRunner().invoke(
+                cli_app,
+                ["profile-forecast", "--path", tmp],
+                env=_env(tmp),
+            )
+            assert "Safe to run" not in cli_result.output
+        finally:
+            os.unlink(tmp)
+
+    def test_v2_no_metric_mismatch_issues(self) -> None:
+        """v2 fixture with correct formula should produce zero metric_mismatch issues."""
+        result = profile_forecast_csv(str(self.V2))
+        mismatch_issues = [i for i in result.issues if i.issue_type == "metric_mismatch"]
+        assert mismatch_issues == [], mismatch_issues
+

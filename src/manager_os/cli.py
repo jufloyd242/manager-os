@@ -1624,6 +1624,7 @@ _ISSUE_LABEL: dict[str, str] = {
     "malformed_date": "malformed date",
     "unknown_person": "unknown person",
     "unknown_client": "unknown client",
+    "metric_mismatch": "metric mismatch",
 }
 
 
@@ -1858,8 +1859,15 @@ def profile_forecast(
             "malformed_date": "red",
             "unknown_person": "yellow",
             "unknown_client": "yellow",
+            "metric_mismatch": "yellow",
         }
-        for issue in result.issues:
+        # Limit display to first 25 issues; metric_mismatch issues can be many
+        _display_issues = result.issues[:25]
+        if len(result.issues) > 25:
+            issue_tbl.title = (
+                f"Issues ({len(result.issues)} found, showing first 25)"
+            )
+        for issue in _display_issues:
             label = _ISSUE_LABEL.get(issue.issue_type, issue.issue_type)
             style = _ISSUE_STYLE.get(issue.issue_type, "white")
             issue_tbl.add_row(
@@ -1885,7 +1893,7 @@ def profile_forecast(
 
     warn_count = len([i for i in result.issues if i.issue_type in (
         "unknown_person", "unknown_client", "overallocated",
-        "zero_allocation", "missing_date",
+        "zero_allocation", "missing_date", "metric_mismatch",
     )])
     error_count = len([i for i in result.issues if i.issue_type in (
         "malformed_date", "malformed_allocation",

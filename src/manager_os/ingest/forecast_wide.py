@@ -520,11 +520,12 @@ def _compare_metrics(result: WideParseResult, acc: dict) -> None:
     for section, weeks in acc.items():
         for week_date, data in weeks.items():
             eng_planned = data["eng_planned"]
+            eng_target = data["eng_target"]
             pip_demand = data["pip_demand"]
-            # total_capacity = engineer planned hours (not target)
-            # total_demand   = pipeline demand hours only
-            calc_capacity = eng_planned
-            calc_demand = pip_demand
+            # Total Demand = engineer planned hours + pipeline demand hours
+            # Total Capacity = sum of engineer Target values for this section/week
+            calc_demand = eng_planned + pip_demand
+            calc_capacity = eng_target
             calc_gap = calc_capacity - calc_demand
             calc_util = (calc_demand / calc_capacity) if calc_capacity > 0 else 0.0
             calcs = {
@@ -540,6 +541,10 @@ def _compare_metrics(result: WideParseResult, acc: dict) -> None:
                 sheet_val = sheet[key]
                 if sheet_val is None:
                     continue
+                # Normalize both values to the same scale before comparing.
+                # team_utilization is stored as a decimal fraction (105.81% → 1.0581)
+                # after _parse_utilization.  The calculated value is already a fraction.
+                # Other metrics are in hours.
                 diff = abs(calc_val - sheet_val)
                 if diff > _COMPARISON_TOLERANCE:
                     result.metric_mismatches.append(MetricMismatch(
@@ -552,6 +557,6 @@ def _compare_metrics(result: WideParseResult, acc: dict) -> None:
                     ))
                     result.warnings.append(
                         f"Metric mismatch [{section}] {week_date} {metric_name}: "
-                        f"spreadsheet={sheet_val:.3f} calculated={calc_val:.3f} "
-                        f"diff={diff:.3f}"
+                        f"spreadsheet={sheet_val:.4f} calculated={calc_val:.4f} "
+                        f"diff={diff:.4f}"
                     )
