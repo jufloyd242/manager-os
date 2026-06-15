@@ -1,22 +1,38 @@
 # Client organizations
 # Fields: name (canonical), aliases (list of strings for entity resolution), engagement
 
-- name: "Acme Corp"
-  aliases: ["Acme", "acme", "ACME", "Acme Corp", "acme-corp"]
-  engagement: "ML Platform Build"
+- name: "Advertising Research Foundation"
+  aliases: ["ARF", "Advertising Research Foundation", "advertising research foundation"]
+  engagement: "ADK"
 
-- name: "Big Retail Co"
-  aliases: ["Big Retail", "big retail", "BRC", "Big Retail Co", "bigretail"]
-  engagement: "Recommendation Engine"
+- name: "Equifax"
+  aliases: ["Equifax", "equifax", "Equifax Engagement"]
+  engagement: "CCAI"
 
-- name: "FinServ Partners"
-  aliases: ["FinServ", "finserv", "FSP", "FinServ Partners", "fin serv"]
-  engagement: "Fraud Detection Platform"
+- name: "Gannett"
+  aliases: ["Gannett", "gannett"]
+  engagement: "CCAI"
 
-- name: "MedTech Solutions"
-  aliases: ["MedTech", "medtech", "MTS", "MedTech Solutions", "med tech"]
-  engagement: "Clinical NLP Pipeline"
+- name: "Kravet"
+  aliases: ["Kravet", "kravet", "Kravet Engagement"]
+  engagement: "CCAI"
 
-- name: "Global Logistics Inc"
-  aliases: ["Global Logistics", "global logistics", "GLI", "Global Logistics Inc"]
-  engagement: "Supply Chain Optimization"
+- name: "HCA"
+  aliases: ["HCA"]
+  engagement: "GenAI"
+
+- name: "HNB"
+  aliases: ["HNB", "Huntington", "Huntington National Bank", "huntington national bank", "huntington"]
+  engagement: "ADK, Agent building"
+
+- name: "Madhive"
+  aliases: ["Madhive"]
+  engagement: "CPE"
+
+- name: "Google GKE"
+  aliases: ["Google GKE", "GKE"]
+  engagement: "GKE benchmarking"
+
+- name: "Carrier"
+  aliases: ["Carrier", "carrier"]
+  engagement: "ADK"

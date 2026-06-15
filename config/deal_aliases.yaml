@@ -1,10 +1,84 @@
-# Deal name normalization
-# Maps raw deal names (as they appear in CSVs or notes) to canonical deal names
-# Format: "raw name": "canonical name"
+# Deal aliases
+# Purpose: map canonical deal/opportunity names to aliases found in deals.csv,
+# Obsidian notes, comments, and status exports.
+#
+# Important:
+# - This is only for real opportunities / SOWs / presales deals.
+# - Do not add signed delivery clients here unless they need a deal-specific alias.
+# - Because deals.csv does not include a clean opportunity-name column, these
+#   canonical names use "<customer> - <NetSuite Opportunity ID>".
+# - For customers with multiple opportunities, aliases are intentionally
+#   deal-specific to avoid mapping every "SEI" mention to the wrong opportunity.
 
-"ACME ML Platform Q3": "Acme Corp — ML Platform Build"
-"Big Retail Recs v2": "Big Retail Co — Recommendation Engine Phase 2"
-"FinServ Fraud Detection": "FinServ Partners — Fraud Detection Platform"
-"MedTech NLP - SOW 2": "MedTech Solutions — Clinical NLP SOW 2"
-"GLI Supply Chain POC": "Global Logistics Inc — Supply Chain POC"
-"Acme Corp Expansion": "Acme Corp — Platform Expansion"
+"MTY Franchising Inc. - OPP025010":
+  - "OPP025010"
+  - "MTY"
+  - "MTY Franchising"
+  - "MTY Franchising Inc."
+  - "MTY Franchising Inc"
+  - "PRJ5205"
+  - "SBG 6/15"
+  - "MTY SOW"
+  - "MTY legal review"
+  - "MTY Google funding"
+
+"Southwest Florida Water Management - OPP031267":
+  - "OPP031267"
+  - "Southwest Florida Water Management"
+  - "Southwest Florida Water"
+  - "SWFWMD"
+  - "PRJ5147"
+  - "SBG 6/29"
+  - "Southwest Florida Water SOW"
+  - "Southwest Florida Water Management SOW"
+
+"Mitchell International, Inc. - OPP032405":
+  - "OPP032405"
+  - "Mitchell"
+  - "Mitchell International"
+  - "Mitchell International, Inc."
+  - "PRJ5278"
+  - "SBG 7/6"
+  - "Mitchell SOW"
+  - "Mitchell ECA"
+
+"Broad Institute of MIT and Harvard - OPP032788":
+  - "OPP032788"
+  - "Broad"
+  - "Broad Institute"
+  - "Broad Institute of MIT and Harvard"
+  - "PRJ5244"
+  - "SBG 6/22"
+  - "Broad SOW"
+
+"Insight Public Sector, Inc - OPP033115":
+  - "OPP033115"
+  - "Insight"
+  - "Insight Public Sector"
+  - "Insight Public Sector, Inc"
+  - "PRJ5236"
+  - "SBG 6/22"
+  - "Insight SOW"
+  - "Insight SAFR"
+  - "SEI phase 1"
+
+"Strategic Education, Inc - OPP033536":
+  - "OPP033536"
+  - "PRJ5272"
+  - "SBG 7/13"
+  - "SEI turnkey hosting"
+  - "SEI developer support"
+  - "SEI support of 20+ developers"
+  - "Strategic Education turnkey hosting"
+  - "turn key hosting"
+  - "turnkey hosting"
+
+"Strategic Education, Inc - OPP033665":
+  - "OPP033665"
+  - "SEI chatbot modernization"
+  - "SEI chatbot modernization proposal"
+  - "SEI MCAI phase 2"
+  - "MCAI phase 2"
+  - "chatbot modernization"
+  - "modernization of chatbots"
+  - "Strategic Education chatbot modernization"

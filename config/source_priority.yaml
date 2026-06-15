@@ -4,8 +4,8 @@
 # Confidence weights per source (0.0 - 1.0)
 # Higher weight = more authoritative
 confidence_weights:
-  obsidian: 0.9
-  workspace_summary: 0.7
+  obsidian: 0.8
+  workspace_summary: 0.85
   deals: 1.0
   forecast: 1.0
   gws: 0.8

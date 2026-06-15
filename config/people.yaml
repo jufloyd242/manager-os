@@ -1,27 +1,57 @@
-# Team members
+# Team members / people
 # Fields: name (canonical), aliases (list of strings for entity resolution), role, level
 
-- name: "Alice Chen"
-  aliases: ["Alice", "alice", "alice.chen", "Alice Chen"]
-  role: "Senior ML Engineer"
+- name: "Alok Gupta"
+  aliases: ["Alok", "alok", "Alok Gupta"]
+  role: "Staff AI Engineer"
   level: "L5"
 
-- name: "Bob Martinez"
-  aliases: ["Bob", "bob", "bob.martinez", "Bob Martinez"]
-  role: "ML Engineer"
+- name: "Kevin Tuuri"
+  aliases: ["Kevin", "kevin", "Kevin Tuuri"]
+  role: "Senior AI Engineer"
   level: "L4"
 
-- name: "Carmen Liu"
-  aliases: ["Carmen", "carmen", "carmen.liu", "Carmen Liu"]
-  role: "Senior Data Engineer"
+- name: "Rajeshwar Satyaditya"
+  aliases: ["Satya", "satya", "Rajeshwar Satyaditya", "Rajeshwar"]
+  role: "Senior AI Engineer"
+  level: "L4"
+
+- name: "Chris Presley"
+  aliases: ["Chris", "chris"]
+  role: "Director"
+  level: ""
+
+- name: "George Kalisse"
+  aliases: ["George", "george", "George Kalisse"]
+  role: "Senior AI Engineer"
+  level: "L4"
+
+- name: "Krishna Padmanaban"
+  aliases: ["Krishna", "krishna", "Krishna Padmanaban"]
+  role: "Senior AI Engineer"
+  level: "L4"
+
+- name: "Prabha Arivalagan"
+  aliases: ["Prabha", "prabha", "Prabha Arivalagan"]
+  role: "Senior AI Engineer"
+  level: "L4"
+
+- name: "Taylor Stacey"
+  aliases: ["Taylor", "taylor", "Taylor Stacey"]
+  role: "Staff AI Engineer"
   level: "L5"
 
-- name: "David Park"
-  aliases: ["David", "david", "david.park", "David Park"]
-  role: "AI/ML Consultant"
+- name: "Zheng Yang"
+  aliases: ["Zheng", "zheng", "Zheng Yang"]
+  role: "Senior AI Engineer"
   level: "L4"
 
-- name: "Elena Torres"
-  aliases: ["Elena", "elena", "elena.torres", "Elena Torres"]
+- name: "Jason Brancazio"
+  aliases: ["Jason", "jason", "Jason Brancazio"]
   role: "Staff ML Engineer"
-  level: "L6"
+  level: "L5"
+
+- name: "Luis Chinchilla Garcia"
+  aliases: ["Luis", "luis", "Luis Chinchilla Garcia"]
+  role: "Senior ML Engineer"
+  level: "L4"
