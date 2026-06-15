@@ -226,6 +226,7 @@ class DealRow(BaseModel):
     id: str = Field(default_factory=_new_id)
     account: str
     deal_name: str
+    deal_id: str = ""
     stage: str = ""
     close_date: date | None = None
     technical_owner: str = ""
@@ -236,6 +237,14 @@ class DealRow(BaseModel):
     staffing_feasibility: StaffingFeasibilityType = "feasible"
     blockers: str = ""
     next_action: str = ""
+    # NetSuite-specific fields
+    next_steps: str = ""
+    delivery_comment: str = ""
+    forecast_category: str = ""
+    probability: float | None = None
+    services_amount: float | None = None
+    last_status_changed_date: date | None = None
+    source_format: str = "normalized"
     updated_at: datetime = Field(default_factory=_now)
 
 

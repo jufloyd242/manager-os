@@ -1929,6 +1929,9 @@ _DEAL_ISSUE_LABEL: dict[str, str] = {
     "unknown_client": "unknown client",
     "high_value_no_staffing": "no staffing info",
     "malformed_probability": "malformed probability",
+    "malformed_services_amount": "malformed services $",
+    "no_next_steps": "no next steps",
+    "stale_status_date": "stale status",
 }
 
 _DEAL_ISSUE_STYLE: dict[str, str] = {
@@ -1941,6 +1944,9 @@ _DEAL_ISSUE_STYLE: dict[str, str] = {
     "unknown_client": "yellow",
     "high_value_no_staffing": "yellow",
     "malformed_probability": "red",
+    "malformed_services_amount": "red",
+    "no_next_steps": "dim",
+    "stale_status_date": "yellow",
 }
 
 
@@ -2033,6 +2039,7 @@ def profile_deals(
     ))
     console.print(f"  [dim]File:[/dim]    {result.path}")
     console.print(f"  [dim]Rows:[/dim]    {result.total_rows}")
+    console.print(f"  [dim]Format:[/dim]  {result.detected_format}")
     console.print(f"  [dim]Sample:[/dim]  {result.sample_size} of {result.total_rows}")
     console.print()
 
@@ -2058,7 +2065,7 @@ def profile_deals(
     console.print()
 
     # Required fields status
-    _REQ = ["account", "deal_name"]
+    _REQ = ["account", "deal_name"] if result.detected_format != "netsuite" else ["deal_id", "account"]
     req_tbl = Table(
         title="Required Fields",
         show_header=False,
@@ -2074,6 +2081,23 @@ def profile_deals(
             req_tbl.add_row("[green]✓ FOUND[/green]", f"{display} ({canonical})")
         else:
             req_tbl.add_row("[red]✗ MISSING[/red]", f"[red]{display} ({canonical})[/red]")
+    # Show deal_name separately for NetSuite (derived)
+    if result.detected_format == "netsuite":
+        if result.derived_deal_name_count > 0:
+            req_tbl.add_row(
+                "[green]✓ DERIVED[/green]",
+                f"deal name (deal_name) — derived from Customer + Opportunity ID "
+                f"[dim]({result.derived_deal_name_count} rows)[/dim]"
+            )
+        elif "deal_name" in result.fields_found:
+            req_tbl.add_row("[green]✓ FOUND[/green]", "deal name (deal_name)")
+    else:
+        if "deal_name" not in _REQ:
+            display = _DEALS_FIELD_DISPLAY.get("deal_name", "deal name")
+            if "deal_name" in result.fields_found:
+                req_tbl.add_row("[green]✓ FOUND[/green]", f"{display} (deal_name)")
+            else:
+                req_tbl.add_row("[red]✗ MISSING[/red]", f"[red]{display} (deal_name)[/red]")
     console.print(req_tbl)
     console.print()
 
@@ -2081,6 +2105,12 @@ def profile_deals(
     _OPT_DISPLAY = [
         ("stage", "stage"),
         ("close_date", "close date"),
+        ("forecast_category", "forecast category"),
+        ("probability", "probability"),
+        ("services_amount", "services ($)"),
+        ("last_status_changed_date", "last status changed"),
+        ("next_steps", "next steps"),
+        ("delivery_comment", "delivery comment"),
         ("technical_owner", "owner"),
         ("ae_name", "AE/ECA"),
         ("loe_status", "LOE status"),
@@ -2103,10 +2133,41 @@ def profile_deals(
     console.print(opt_tbl)
     console.print()
 
+    # NetSuite-specific summary table
+    if result.detected_format == "netsuite" and result.netsuite_summary:
+        ns = result.netsuite_summary
+        ns_tbl = Table(
+            title="NetSuite Summary",
+            show_header=False,
+            box=None,
+            pad_edge=False,
+            show_edge=False,
+        )
+        ns_tbl.add_column("Metric", style="dim", no_wrap=True)
+        ns_tbl.add_column("Value", justify="right")
+        ns_tbl.add_row("Deal names derived", str(ns.get("derived_deal_names", 0)))
+        ns_tbl.add_row("Closing within 14 days", str(ns.get("close_date_soon", 0)))
+        ns_tbl.add_row("Stale status (>30 days)", str(ns.get("stale_status_date", 0)))
+        ns_tbl.add_row("Missing next steps", str(ns.get("no_next_steps", 0)))
+        if ns.get("malformed_close_date", 0):
+            ns_tbl.add_row("[red]Malformed close date[/red]", str(ns["malformed_close_date"]))
+        if ns.get("malformed_probability", 0):
+            ns_tbl.add_row("[red]Malformed probability[/red]", str(ns["malformed_probability"]))
+        if ns.get("malformed_services_amount", 0):
+            ns_tbl.add_row("[red]Malformed services $[/red]", str(ns["malformed_services_amount"]))
+        console.print(ns_tbl)
+        console.print()
+
     # Issues table
     if result.issues:
+        _warn_issues = [i for i in result.issues if getattr(i, 'severity', 'warning') != 'info']
+        _info_issues = [i for i in result.issues if getattr(i, 'severity', 'warning') == 'info']
+        _display_issues = _warn_issues[:25] + _info_issues[:5]
+        title_suffix = f" ({len(result.issues)} found)"
+        if len(result.issues) > len(_display_issues):
+            title_suffix = f" ({len(result.issues)} found, showing {len(_display_issues)})"
         issue_tbl = Table(
-            title=f"Issues ({len(result.issues)} found)",
+            title=f"Issues{title_suffix}",
             show_header=True,
             header_style="bold",
             box=rich_box.SIMPLE,
@@ -2119,7 +2180,7 @@ def profile_deals(
         issue_tbl.add_column("Value")
         issue_tbl.add_column("Detail")
 
-        for issue in result.issues:
+        for issue in _display_issues:
             label = _DEAL_ISSUE_LABEL.get(issue.issue_type, issue.issue_type)
             style = _DEAL_ISSUE_STYLE.get(issue.issue_type, "white")
             issue_tbl.add_row(
@@ -2143,10 +2204,10 @@ def profile_deals(
         )
         raise typer.Exit(1)
 
-    error_types = {"malformed_close_date", "malformed_probability"}
+    error_types = {"malformed_close_date", "malformed_probability", "malformed_services_amount"}
     warn_types = {
         "close_date_soon", "missing_close_date", "missing_sow", "missing_loe",
-        "no_owner", "unknown_client", "high_value_no_staffing",
+        "no_owner", "unknown_client", "high_value_no_staffing", "stale_status_date",
     }
     error_count = len([i for i in result.issues if i.issue_type in error_types])
     warn_count = len([i for i in result.issues if i.issue_type in warn_types])

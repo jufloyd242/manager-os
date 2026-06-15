@@ -577,3 +577,411 @@ class TestProfileDealsJSONOutput:
         issue = parsed["issues"][0]
         assert "issue_type" in issue
         assert "field" in issue
+
+
+# ===========================================================================
+# NetSuite deal format tests
+# ===========================================================================
+
+NS_FIXTURE = FIXTURES / "deals_netsuite.csv"
+
+_NS_HEADER = (
+    "NetSuite Opportunity ID,NetSuite Customer,NetSuite Delivery Comment,"
+    "NetSuite Next Steps,NetSuite Opportunity Status,NetSuite Expected Close Date,"
+    "NetSuite Forecast Category,NetSuite Probability (%),NetSuite Services ($),"
+    "NetSuite Last Status Changed Date"
+)
+
+
+def _ns_csv(tmp_path: Path, rows: list[str], name: str = "deals_ns.csv") -> Path:
+    """Create a NetSuite-format CSV with the standard header + given rows."""
+    content = _NS_HEADER + "\n" + "\n".join(rows) + "\n"
+    p = tmp_path / name
+    p.write_text(content, encoding="utf-8")
+    return p
+
+
+class TestNetSuiteFormatDetection:
+    def test_fixture_detected_as_netsuite(self) -> None:
+        from manager_os.ingest.deals import is_netsuite_format
+        assert is_netsuite_format(str(NS_FIXTURE)) is True
+
+    def test_normalized_fixture_not_detected_as_netsuite(self) -> None:
+        from manager_os.ingest.deals import is_netsuite_format
+        assert is_netsuite_format(str(FIXTURES / "deals.csv")) is False
+
+    def test_profile_detected_format_netsuite(self) -> None:
+        result = profile_deals_csv(str(NS_FIXTURE), reference_date=_REF)
+        assert result.detected_format == "netsuite"
+
+    def test_profile_normalized_fixture_detected_format(self) -> None:
+        result = profile_deals_csv(
+            str(FIXTURES / "deals.csv"), reference_date=date(2025, 1, 1)
+        )
+        assert result.detected_format == "normalized"
+
+
+class TestNetSuiteColumnMapping:
+    def test_netsuite_customer_maps_to_account(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert "account" in result.fields_found
+
+    def test_netsuite_opportunity_id_maps_to_deal_id(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert "deal_id" in result.fields_found
+
+    def test_netsuite_stage_mapped(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert "stage" in result.fields_found
+
+    def test_netsuite_close_date_mapped(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert "close_date" in result.fields_found
+
+    def test_netsuite_forecast_category_mapped(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert "forecast_category" in result.fields_found
+
+    def test_netsuite_probability_mapped(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert "probability" in result.fields_found
+
+    def test_netsuite_services_amount_mapped(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert "services_amount" in result.fields_found
+
+    def test_netsuite_next_steps_mapped(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,Send SOW,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert "next_steps" in result.fields_found
+
+    def test_netsuite_last_status_changed_date_mapped(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert "last_status_changed_date" in result.fields_found
+
+
+class TestNetSuiteDealName:
+    def test_deal_name_derived_from_customer_and_id(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert result.derived_deal_name_count == 1
+
+    def test_derived_deal_name_does_not_block_ingest(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert result.can_ingest is True
+
+    def test_derived_deal_name_format(self) -> None:
+        from manager_os.ingest.deals import _derive_deal_name
+        assert _derive_deal_name("MTY Franchising Inc.", "OPP025010") == "MTY Franchising Inc. - OPP025010"
+        assert _derive_deal_name("Acme Corp", "") == "Acme Corp"
+        assert _derive_deal_name("", "OPP999") == "OPP999"
+
+    def test_fixture_derived_deal_names(self) -> None:
+        result = profile_deals_csv(str(NS_FIXTURE), reference_date=_REF)
+        # All 6 rows get derived deal names
+        assert result.derived_deal_name_count == 6
+
+    def test_missing_deal_name_not_in_fields_missing(self, tmp_path: Path) -> None:
+        # NetSuite format: deal_name is derived, not a raw column; must not be missing
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert "deal_name" not in result.fields_missing
+
+
+class TestNetSuiteCanIngest:
+    def test_netsuite_fixture_can_ingest(self) -> None:
+        result = profile_deals_csv(str(NS_FIXTURE), reference_date=_REF)
+        assert result.can_ingest is True
+
+    def test_netsuite_missing_deal_id_cannot_ingest(self, tmp_path: Path) -> None:
+        # If deal_id is missing (no Opportunity ID column), cannot ingest
+        p = tmp_path / "deals_bad.csv"
+        p.write_text(
+            "NetSuite Customer,NetSuite Opportunity Status\n"
+            "Acme Inc.,Proposal\n",
+            encoding="utf-8",
+        )
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert result.can_ingest is False
+
+    def test_netsuite_missing_customer_cannot_ingest(self, tmp_path: Path) -> None:
+        p = tmp_path / "deals_bad.csv"
+        p.write_text(
+            "NetSuite Opportunity ID,NetSuite Opportunity Status\n"
+            "OPP001,Proposal\n",
+            encoding="utf-8",
+        )
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert result.can_ingest is False
+
+
+class TestNetSuiteProspectValidation:
+    def test_unknown_netsuite_customer_not_flagged(self, tmp_path: Path) -> None:
+        """NetSuite Customer values are prospects — never validate against clients.yaml."""
+        p = _ns_csv(tmp_path, [
+            "OPP001,Completely Unknown Prospect Corp,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        clients_list = [ClientConfig(name="Known Client A", aliases=[])]
+        result = profile_deals_csv(str(p), clients=clients_list, reference_date=_REF)
+        unknown = [i for i in result.issues if i.issue_type == "unknown_client"]
+        assert unknown == [], "NetSuite prospects must NOT be validated against clients.yaml"
+
+    def test_netsuite_fixture_prospect_not_in_clients(self) -> None:
+        clients_list = [ClientConfig(name="Some Other Client", aliases=[])]
+        result = profile_deals_csv(str(NS_FIXTURE), clients=clients_list, reference_date=_REF)
+        unknown = [i for i in result.issues if i.issue_type == "unknown_client"]
+        assert unknown == []
+
+
+class TestNetSuiteParsers:
+    def test_close_date_natural_language(self, tmp_path: Path) -> None:
+        # "Jun 19, 2026" style date must parse without error
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Jun 19 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        malformed = [i for i in result.issues if i.issue_type == "malformed_close_date"]
+        assert malformed == []
+
+    def test_last_status_changed_date_parses(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,May 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        malformed = [i for i in result.issues if i.issue_type == "malformed_close_date"]
+        assert malformed == []
+
+    def test_probability_decimal_parses(self) -> None:
+        from manager_os.ingest.deals import _parse_probability
+        assert _parse_probability("0.65") == pytest.approx(0.65)
+        assert _parse_probability("0.9") == pytest.approx(0.9)
+
+    def test_probability_percent_string_parses(self) -> None:
+        from manager_os.ingest.deals import _parse_probability
+        assert _parse_probability("75%") == pytest.approx(0.75)
+        assert _parse_probability("75.00%") == pytest.approx(0.75)
+        assert _parse_probability("40%") == pytest.approx(0.40)
+
+    def test_probability_large_integer_is_percent(self) -> None:
+        from manager_os.ingest.deals import _parse_probability
+        # 90 → treated as percentage since > 1.0 → 0.90
+        result = _parse_probability("90")
+        assert result == pytest.approx(0.90)
+
+    def test_services_amount_with_dollar_and_commas(self) -> None:
+        from manager_os.ingest.deals import _parse_services_amount
+        assert _parse_services_amount("$213,960") == pytest.approx(213960.0)
+        assert _parse_services_amount("$125,000") == pytest.approx(125000.0)
+
+    def test_services_amount_plain_number(self) -> None:
+        from manager_os.ingest.deals import _parse_services_amount
+        assert _parse_services_amount("75000") == pytest.approx(75000.0)
+        assert _parse_services_amount("50000") == pytest.approx(50000.0)
+
+    def test_services_amount_blank_returns_none(self) -> None:
+        from manager_os.ingest.deals import _parse_services_amount
+        assert _parse_services_amount("") is None
+        assert _parse_services_amount("nan") is None
+
+    def test_malformed_close_date_creates_warning(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,NOT-A-DATE,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert any(i.issue_type == "malformed_close_date" for i in result.issues)
+
+    def test_malformed_probability_creates_warning(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,not-a-number,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert any(i.issue_type == "malformed_probability" for i in result.issues)
+
+
+class TestNetSuiteNextSteps:
+    def test_blank_next_steps_is_info_level(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,Some delivery comment,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        ns_issues = [i for i in result.issues if i.issue_type == "no_next_steps"]
+        assert len(ns_issues) == 1
+        assert ns_issues[0].severity == "info"
+
+    def test_blank_next_steps_does_not_block_ingest(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        assert result.can_ingest is True
+
+    def test_fixture_row_5_has_blank_next_steps(self) -> None:
+        result = profile_deals_csv(str(NS_FIXTURE), reference_date=_REF)
+        ns_issues = [i for i in result.issues if i.issue_type == "no_next_steps"]
+        assert len(ns_issues) >= 1
+
+    def test_next_steps_present_no_no_next_steps_issue(self, tmp_path: Path) -> None:
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,Schedule follow-up call,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        ns_issues = [i for i in result.issues if i.issue_type == "no_next_steps"]
+        assert ns_issues == []
+
+
+class TestNetSuiteStaleStatus:
+    def test_stale_status_date_creates_warning(self, tmp_path: Path) -> None:
+        # Status changed more than 30 days ago
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jan 1 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        stale = [i for i in result.issues if i.issue_type == "stale_status_date"]
+        assert stale
+
+    def test_recent_status_date_not_stale(self, tmp_path: Path) -> None:
+        # Status changed within the last 30 days
+        p = _ns_csv(tmp_path, [
+            "OPP001,Acme Inc.,,,Proposal,Aug 1 2026,Pipeline,0.5,50000,Jun 10 2026"
+        ])
+        result = profile_deals_csv(str(p), reference_date=_REF)
+        stale = [i for i in result.issues if i.issue_type == "stale_status_date"]
+        assert stale == []
+
+
+class TestNetSuiteIngest:
+    """Smoke test: NetSuite fixture ingests into DuckDB without error."""
+
+    def test_netsuite_fixture_ingests(self) -> None:
+        import duckdb
+        from manager_os.db import init_schema
+        from manager_os.ingest.deals import ingest_deals
+
+        conn = duckdb.connect(":memory:")
+        init_schema(conn)
+        result = ingest_deals(str(NS_FIXTURE), conn)
+        assert result.ingested == 6
+        assert result.failed == 0
+
+    def test_netsuite_ingest_stores_deal_id(self) -> None:
+        import duckdb
+        from manager_os.db import init_schema
+        from manager_os.ingest.deals import ingest_deals
+
+        conn = duckdb.connect(":memory:")
+        init_schema(conn)
+        ingest_deals(str(NS_FIXTURE), conn)
+        rows = conn.execute("SELECT deal_id FROM deals WHERE deal_id IS NOT NULL").fetchall()
+        assert len(rows) == 6
+        deal_ids = {r[0] for r in rows}
+        assert "OPP001001" in deal_ids
+
+    def test_netsuite_ingest_stores_derived_deal_name(self) -> None:
+        import duckdb
+        from manager_os.db import init_schema
+        from manager_os.ingest.deals import ingest_deals
+
+        conn = duckdb.connect(":memory:")
+        init_schema(conn)
+        ingest_deals(str(NS_FIXTURE), conn)
+        rows = conn.execute("SELECT deal_name FROM deals").fetchall()
+        names = {r[0] for r in rows}
+        assert "Acme Analytics Inc. - OPP001001" in names
+
+    def test_netsuite_ingest_stores_source_format(self) -> None:
+        import duckdb
+        from manager_os.db import init_schema
+        from manager_os.ingest.deals import ingest_deals
+
+        conn = duckdb.connect(":memory:")
+        init_schema(conn)
+        ingest_deals(str(NS_FIXTURE), conn)
+        rows = conn.execute("SELECT DISTINCT source_format FROM deals").fetchall()
+        formats = {r[0] for r in rows}
+        assert "netsuite" in formats
+
+    def test_normalized_ingest_regression(self) -> None:
+        """Regression: normalized deals ingest must still work."""
+        import duckdb
+        from manager_os.db import init_schema
+        from manager_os.ingest.deals import ingest_deals
+
+        conn = duckdb.connect(":memory:")
+        init_schema(conn)
+        result = ingest_deals(str(FIXTURES / "deals.csv"), conn)
+        assert result.ingested == 5
+        assert result.failed == 0
+
+
+class TestNetSuiteCLI:
+    def test_netsuite_fixture_cli_exits_0(self) -> None:
+        result = _run(
+            ["profile-deals", "--path", str(NS_FIXTURE)],
+            _env(str(NS_FIXTURE)),
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_netsuite_fixture_cli_shows_format(self) -> None:
+        result = _run(
+            ["profile-deals", "--path", str(NS_FIXTURE)],
+            _env(str(NS_FIXTURE)),
+        )
+        assert "netsuite" in result.output.lower()
+
+    def test_netsuite_fixture_cli_shows_derived(self) -> None:
+        result = _run(
+            ["profile-deals", "--path", str(NS_FIXTURE)],
+            _env(str(NS_FIXTURE)),
+        )
+        assert "derived" in result.output.lower()
+
+    def test_netsuite_fixture_cli_no_missing_required(self) -> None:
+        result = _run(
+            ["profile-deals", "--path", str(NS_FIXTURE)],
+            _env(str(NS_FIXTURE)),
+        )
+        assert "Cannot ingest" not in result.output
+        assert "MISSING" not in result.output
+
+    def test_netsuite_fixture_json_can_ingest(self) -> None:
+        result = _run(
+            ["profile-deals", "--path", str(NS_FIXTURE), "--json"],
+            _env(str(NS_FIXTURE)),
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["can_ingest"] is True
+        assert parsed["detected_format"] == "netsuite"

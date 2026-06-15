@@ -231,7 +231,15 @@ CREATE TABLE IF NOT EXISTS forecast_summary_metric (
     record_type VARCHAR,
     source_row INTEGER,
     ingested_at TIMESTAMP NOT NULL
-)
+);
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS deal_id VARCHAR;
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS next_steps VARCHAR;
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS delivery_comment VARCHAR;
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS forecast_category VARCHAR;
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS probability FLOAT;
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS services_amount FLOAT;
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS last_status_changed_date DATE;
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS source_format VARCHAR
 """
 
 _ALL_TABLES = [

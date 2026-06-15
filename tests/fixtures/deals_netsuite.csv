@@ -1,0 +1,7 @@
+NetSuite Opportunity ID,NetSuite Customer,NetSuite Delivery Comment,NetSuite Next Steps,NetSuite Opportunity Status,NetSuite Expected Close Date,NetSuite Forecast Category,NetSuite Probability (%),NetSuite Services ($),NetSuite Last Status Changed Date
+OPP001001,Acme Analytics Inc.,SOW submitted for legal review. Awaiting customer signature.,Schedule follow-up call with procurement team this week.,Proposal,Jul 31 2026,Upside,0.65,"$125,000",Jun 1 2026
+OPP001002,Global Logistics Corp.,Initial scoping call complete. Requirements doc in progress.,Send draft SOW by end of week.,Discovery,Aug 15 2026,Pipeline,0.4,75000,Jun 10 2026
+OPP001003,Mega Retail Partners,Customer confirmed budget approval. Legal reviewing SOW.,Get signature before quarter end.,Negotiation,Jun 19 2026,Commit,0.9,"$350,000",Jun 12 2026
+OPP001004,Future Fintech LLC.,Proposal submitted. No response for 3 weeks.,Follow up with champion — last contact was May 15.,Proposal,Jun 20 2026,Upside,75%,"$180,000",May 10 2026
+OPP001005,Sunrise Healthcare Sys.,Scoping workshop scheduled for next week.,,Discovery,Sep 30 2026,Pipeline,40%,50000,Jun 5 2026
+OPP001006,Prospect Not In Clients,Initial outreach sent. No formal engagement yet.,Await response to intro email.,Prospecting,Oct 15 2026,Pipeline,0.1,"$25,000",Jun 13 2026
