@@ -132,24 +132,19 @@ def _ingest_wide_forecast(
     # PersonForecastRecord → staffing_forecast
     for record in parse_result.person_forecast:
         try:
-            row = StaffingForecastRow(
-                person_name=record.person_name,
-                week_start=record.week_start,
-                client="",
-                project=record.source_section,
-                allocation_pct=record.planned_hours,
-                forecast_type="capacity",  # type: ignore[arg-type]
-                notes=(
-                    f"section={record.source_section}"
-                    + (f" target_hours={record.target_hours}" if record.target_hours is not None else "")
-                ),
-                ingested_at=now,
-            )
+            planned = record.planned_hours         # hours (e.g. 32)
+            target  = record.target_hours          # hours (e.g. 40)
+            # Compute real allocation percentage: planned / target * 100
+            # If target is missing or zero, store 0 and let dashboard show "no target"
+            if target and target > 0:
+                alloc_pct = (planned / target) * 100.0
+            else:
+                alloc_pct = 0.0
+
             row_id = content_hash(
-                f"{row.person_name}::{row.week_start}::{row.project}::capacity"
+                f"{record.person_name}::{record.week_start}::{record.source_section}::capacity"
             )
-            row = row.model_copy(update={"id": row_id})
-            if not force and _row_exists(conn, row.id):
+            if not force and _row_exists(conn, row_id):
                 result.skipped += 1
                 result.skip_reasons["already_exists"] = result.skip_reasons.get("already_exists", 0) + 1
                 continue
@@ -157,12 +152,21 @@ def _ingest_wide_forecast(
                 """
                 INSERT OR REPLACE INTO staffing_forecast
                     (id, person_id, person_name, week_start, client, project,
-                     allocation_pct, forecast_type, notes, ingested_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     allocation_pct, forecast_type, notes, ingested_at,
+                     planned_hours, target_hours)
+                VALUES (?, NULL, ?, ?, '', ?, ?, 'capacity', ?, ?, ?, ?)
                 """,
-                [row.id, row.person_id, row.person_name, row.week_start,
-                 row.client, row.project, row.allocation_pct,
-                 row.forecast_type, row.notes, row.ingested_at],
+                [
+                    row_id,
+                    record.person_name,
+                    record.week_start,
+                    record.source_section,
+                    alloc_pct,
+                    f"section={record.source_section}",
+                    now,
+                    planned,
+                    target,
+                ],
             )
             result.ingested += 1
         except Exception as exc:

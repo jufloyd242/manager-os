@@ -376,7 +376,16 @@ with tabs[3]:
 # ------------------------------------------------------------------
 
 with tabs[4]:
-    from manager_os.build.dashboard_data import get_forecast_rows, get_forecast_summary
+    from manager_os.build.dashboard_data import (
+        get_forecast_rows,
+        get_forecast_summary,
+        get_forecast_week_list,
+        get_people_allocation_for_week,
+    )
+
+    @st.cache_data(ttl=300)
+    def _forecast_weeks(d):
+        return get_forecast_week_list(conn, as_of=d)
 
     @st.cache_data(ttl=300)
     def _forecast_rows(d):
@@ -386,12 +395,64 @@ with tabs[4]:
     def _forecast_summary(d):
         return get_forecast_summary(conn, as_of=d)
 
+    @st.cache_data(ttl=300)
+    def _week_alloc(week):
+        return get_people_allocation_for_week(conn, week_start=week)
+
+    forecast_weeks = _forecast_weeks(selected_date)
     forecast_rows = _forecast_rows(selected_date)
     forecast_summary = _forecast_summary(selected_date)
 
     if not forecast_rows:
         st.info("No forecast data. Run `manager-os ingest --source forecast` first.")
     else:
+        # ---- Week selector ----
+        st.subheader("Week Allocation")
+        week_options = [str(w) for w in forecast_weeks]
+        default_idx = 0  # nearest week
+        if week_options:
+            col_wk1, col_wk2, col_wk3 = st.columns([3, 1, 1])
+            with col_wk1:
+                selected_week_str = st.selectbox(
+                    "Forecast week",
+                    options=week_options,
+                    index=default_idx,
+                    key="fc_week_sel",
+                )
+            from datetime import date as _date
+            selected_week = _date.fromisoformat(selected_week_str) if selected_week_str else (forecast_weeks[0] if forecast_weeks else selected_date)
+
+            week_alloc = _week_alloc(selected_week)
+            if week_alloc:
+                import pandas as pd
+                rows_disp = []
+                for wa in week_alloc:
+                    pct = wa["allocation_pct"]
+                    planned_h = wa["planned_hours"]
+                    target_h = wa["target_hours"]
+                    warn = wa["warning"] or ""
+                    if target_h and target_h > 0:
+                        hours_str = f"{planned_h:.0f} / {target_h:.0f} hrs"
+                        pct_str = f"{pct:.0f}%"
+                    else:
+                        hours_str = f"{planned_h:.0f} hrs"
+                        pct_str = "no target"
+                    badge = "🔴" if pct > 100 else ("🟡" if pct < 50 and target_h else "🟢")
+                    rows_disp.append({
+                        "": badge,
+                        "Person": wa["person_name"],
+                        "Hours": hours_str,
+                        "Allocation": pct_str,
+                        "Projects": ", ".join(wa["projects"]),
+                        "Warning": warn,
+                    })
+                df_week = pd.DataFrame(rows_disp)
+                st.dataframe(df_week, use_container_width=True, hide_index=True)
+            else:
+                st.info(f"No forecast rows for week {selected_week}.")
+
+        st.divider()
+
         # Summary buckets
         st.subheader("Staffing Summary")
         for label in ("2w", "30d", "60d"):
@@ -415,10 +476,9 @@ with tabs[4]:
 
         st.divider()
 
-        # Detailed table
-        st.subheader("Weekly Allocations")
+        # Detailed table (multi-week view)
+        st.subheader("All Weeks — Allocation Detail")
 
-        # Filter person
         all_people = sorted({r.person_name for r in forecast_rows})
         selected_people = st.multiselect("Filter person", options=all_people, default=all_people)
         show_only_issues = st.checkbox("Show only over/under-allocated", value=False)
@@ -436,7 +496,7 @@ with tabs[4]:
                 "Week": str(r.week_start),
                 "Client": r.client,
                 "Project": r.project,
-                "Allocation %": r.allocation_pct,
+                "Allocation %": f"{r.allocation_pct:.0f}%",
                 "Type": r.forecast_type,
                 "Issue": "🔴 Over" if r.is_overallocated else ("🟡 Under" if r.is_underallocated else ""),
             } for r in filtered_fc])

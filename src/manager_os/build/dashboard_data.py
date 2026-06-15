@@ -230,13 +230,33 @@ def get_people_rows(conn, as_of: date | None = None) -> list[DashboardPeopleRow]
     for r in sig_rows:
         sig_map[r[0]] = (r[1], _rank_to_sev.get(r[2]))
 
-    # Latest forecast allocation per person
-    fc_rows = conn.execute(
-        "SELECT person_name, SUM(allocation_pct) FROM staffing_forecast "
-        "WHERE week_start >= ? GROUP BY person_name",
+    # Current-week allocation per person.
+    # Use the NEAREST forecast week on or after as_of (not a sum across weeks).
+    # For wide-format rows (forecast_type='capacity'), allocation_pct is already
+    # planned_hours / target_hours * 100.  For normalized rows it's already a
+    # percentage.  Either way we want the single-week value for the current week.
+    nearest_week_row = conn.execute(
+        """
+        SELECT MIN(week_start)
+        FROM staffing_forecast
+        WHERE week_start >= ?
+        """,
         [as_of],
-    ).fetchall()
-    fc_map = {r[0]: r[1] for r in fc_rows if r[0]}
+    ).fetchone()
+    nearest_week = nearest_week_row[0] if nearest_week_row and nearest_week_row[0] else None
+
+    fc_map: dict[str, float] = {}
+    if nearest_week:
+        fc_rows = conn.execute(
+            """
+            SELECT person_name, SUM(allocation_pct)
+            FROM staffing_forecast
+            WHERE week_start = ?
+            GROUP BY person_name
+            """,
+            [nearest_week],
+        ).fetchall()
+        fc_map = {r[0]: float(r[1] or 0.0) for r in fc_rows if r[0]}
 
     result = []
     for name, p in sorted(people_map.items()):
@@ -284,6 +304,92 @@ def get_signals_for_person(conn, person_name: str) -> list[Signal]:
         s for s in get_today_signals(conn, min_severity="low")
         if s.entity_name == person_name and s.entity_type == "person"
     ]
+
+
+def get_forecast_week_list(conn, as_of: date | None = None, limit: int = 12) -> list[date]:
+    """Return the list of distinct forecast weeks on or after *as_of*, up to *limit*."""
+    if as_of is None:
+        as_of = date.today()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT week_start
+        FROM staffing_forecast
+        WHERE week_start >= ?
+        ORDER BY week_start
+        LIMIT ?
+        """,
+        [as_of, limit],
+    ).fetchall()
+    result = []
+    for (ws,) in rows:
+        try:
+            result.append(ws if isinstance(ws, date) else date.fromisoformat(str(ws)))
+        except Exception:
+            pass
+    return result
+
+
+def get_people_allocation_for_week(
+    conn,
+    week_start: date,
+) -> list[dict]:
+    """Return per-person allocation detail for a single forecast week.
+
+    Each entry has:
+        person_name   str
+        planned_hours float   (0.0 if not set)
+        target_hours  float | None
+        allocation_pct float  (planned/target*100, or 0 when no target)
+        projects      list[str]
+        warning       str | None   (set when allocation_pct > 150% or target missing)
+    """
+    rows = conn.execute(
+        """
+        SELECT person_name,
+               SUM(COALESCE(planned_hours, allocation_pct)) AS planned,
+               MAX(target_hours)                            AS target,
+               SUM(allocation_pct)                         AS alloc_pct_sum,
+               STRING_AGG(DISTINCT project, ', ')          AS projects
+        FROM staffing_forecast
+        WHERE week_start = ?
+          AND forecast_type IN ('capacity', 'confirmed', 'likely')
+        GROUP BY person_name
+        ORDER BY person_name
+        """,
+        [week_start],
+    ).fetchall()
+
+    result = []
+    for person_name, planned, target, alloc_pct_sum, projects in rows:
+        planned = float(planned or 0.0)
+        target_val = float(target) if target is not None else None
+
+        # Prefer explicit planned_hours / target_hours ratio;
+        # fall back to stored allocation_pct sum for normalized rows.
+        if target_val is not None and target_val > 0:
+            alloc_pct = (planned / target_val) * 100.0
+        elif alloc_pct_sum is not None:
+            alloc_pct = float(alloc_pct_sum)
+        else:
+            alloc_pct = 0.0
+
+        warning = None
+        if target_val is None or target_val == 0:
+            warning = "no capacity target"
+        elif alloc_pct > 150:
+            warning = f"{alloc_pct:.0f}% — dangerously overallocated"
+        elif alloc_pct > 100:
+            warning = f"{alloc_pct:.0f}% — overallocated"
+
+        result.append({
+            "person_name":    person_name,
+            "planned_hours":  planned,
+            "target_hours":   target_val,
+            "allocation_pct": round(alloc_pct, 1),
+            "projects":       [p.strip() for p in (projects or "").split(",") if p.strip()],
+            "warning":        warning,
+        })
+    return result
 
 
 # ------------------------------------------------------------------
@@ -445,30 +551,44 @@ def get_forecast_rows(conn, as_of: date | None = None) -> list[DashboardForecast
     horizon = as_of + timedelta(days=60)
 
     rows = conn.execute(
-        "SELECT person_name, week_start, client, project, SUM(allocation_pct), forecast_type "
-        "FROM staffing_forecast "
-        "WHERE week_start >= ? AND week_start <= ? "
-        "GROUP BY person_name, week_start, client, project, forecast_type "
-        "ORDER BY week_start, person_name",
+        """
+        SELECT person_name, week_start, client, project,
+               SUM(allocation_pct)              AS alloc_pct,
+               forecast_type,
+               SUM(COALESCE(planned_hours, 0))  AS planned,
+               MAX(target_hours)                AS target
+        FROM staffing_forecast
+        WHERE week_start >= ? AND week_start <= ?
+          AND forecast_type IN ('capacity', 'confirmed', 'likely')
+        GROUP BY person_name, week_start, client, project, forecast_type
+        ORDER BY week_start, person_name
+        """,
         [as_of, horizon],
     ).fetchall()
 
     result = []
     for row in rows:
-        person_name, week_start, client, project, alloc, fc_type = row
+        person_name, week_start, client, project, alloc, fc_type, planned, target = row
         try:
             ws = week_start if isinstance(week_start, date) else date.fromisoformat(str(week_start))
         except Exception:
             continue
+        planned_h = float(planned or 0.0)
+        target_h  = float(target) if target is not None else None
+        # Use real percentage when target is available (wide-format rows)
+        if target_h and target_h > 0:
+            alloc_pct = (planned_h / target_h) * 100.0
+        else:
+            alloc_pct = float(alloc or 0)
         result.append(DashboardForecastRow(
             person_name=person_name,
             week_start=ws,
             client=client or "",
             project=project or "",
-            allocation_pct=float(alloc or 0),
+            allocation_pct=round(alloc_pct, 1),
             forecast_type=fc_type or "confirmed",  # type: ignore[arg-type]
-            is_overallocated=float(alloc or 0) > 100,
-            is_underallocated=float(alloc or 0) < 50,
+            is_overallocated=alloc_pct > 100,
+            is_underallocated=alloc_pct < 50,
         ))
     return result
 

@@ -12,6 +12,8 @@ from manager_os.build.dashboard_data import (
     get_deal_rows,
     get_forecast_rows,
     get_forecast_summary,
+    get_forecast_week_list,
+    get_people_allocation_for_week,
     get_people_rows,
     get_today_signals,
 )
@@ -73,16 +75,26 @@ def _seed_deal(conn, deal_name: str, account: str = "Acme Corp",
     )
 
 
-def _seed_forecast(conn, person_name: str, week_start: date, alloc: float,
-                   client: str = "Acme", fc_type: str = "confirmed") -> None:
+def _seed_forecast(
+    conn,
+    person_name: str,
+    week_start: date,
+    alloc: float,
+    client: str = "Acme",
+    fc_type: str = "confirmed",
+    planned_hours: float | None = None,
+    target_hours: float | None = None,
+) -> None:
     row_id = content_hash(f"{person_name}::{week_start}::{client}::proj")
     conn.execute(
         """
         INSERT INTO staffing_forecast
-            (id, person_name, week_start, client, project, allocation_pct, forecast_type, ingested_at)
-        VALUES (?, ?, ?, ?, 'proj', ?, ?, CURRENT_TIMESTAMP)
+            (id, person_name, week_start, client, project, allocation_pct,
+             forecast_type, ingested_at, planned_hours, target_hours)
+        VALUES (?, ?, ?, ?, 'proj', ?, ?, CURRENT_TIMESTAMP, ?, ?)
         """,
-        [row_id, person_name, week_start.isoformat(), client, alloc, fc_type],
+        [row_id, person_name, week_start.isoformat(), client, alloc, fc_type,
+         planned_hours, target_hours],
     )
 
 
@@ -330,3 +342,233 @@ def test_get_today_signals_min_severity_filter(conn) -> None:
     severities = {s.severity for s in sigs}
     assert "low" not in severities
     assert "high" in severities
+
+
+# ==================================================================
+# Forecast allocation math fixes
+# ==================================================================
+
+
+class TestPerWeekAllocation:
+    """Allocation must be per-week, not summed across all weeks."""
+
+    def test_allocation_is_for_current_week_only(self, conn) -> None:
+        """get_people_rows must not sum across multiple forecast weeks."""
+        today = date.today()
+        next_week = today + timedelta(days=7)
+        # Seed Alice on two different weeks
+        _seed_forecast(conn, "Alice Chen", today,      80.0, fc_type="confirmed")
+        _seed_forecast(conn, "Alice Chen", next_week, 100.0, fc_type="confirmed")
+        _seed_note(conn, "Alice Chen", note_type="1on1")
+
+        rows = get_people_rows(conn, as_of=today)
+        alice = next(r for r in rows if r.name == "Alice Chen")
+        # Must show current week's 80%, NOT 80+100=180%
+        assert alice.allocation_pct == 80.0, (
+            f"Expected 80% (current week only), got {alice.allocation_pct}"
+        )
+
+    def test_allocation_uses_nearest_future_week(self, conn) -> None:
+        """When as_of falls between weeks, use the nearest week on or after as_of."""
+        today = date.today()
+        future_week = today + timedelta(days=3)
+        _seed_forecast(conn, "Bob Martinez", future_week, 60.0)
+        _seed_note(conn, "Bob Martinez", note_type="1on1")
+
+        rows = get_people_rows(conn, as_of=today)
+        bob = next(r for r in rows if r.name == "Bob Martinez")
+        assert bob.allocation_pct == 60.0
+
+    def test_allocation_zero_weeks_shows_zero(self, conn) -> None:
+        """Person with no forecast rows has 0% allocation."""
+        _seed_note(conn, "Carmen Liu", note_type="1on1")
+        rows = get_people_rows(conn, as_of=date.today())
+        carmen = next((r for r in rows if r.name == "Carmen Liu"), None)
+        assert carmen is not None
+        assert carmen.allocation_pct == 0.0
+
+
+class TestHoursBasedAllocation:
+    """planned_hours / target_hours must yield the correct percentage."""
+
+    def test_planned_over_target_gives_correct_pct(self, conn) -> None:
+        today = date.today()
+        alloc_rows = get_people_allocation_for_week(conn, week_start=today)
+        # Empty DB → empty list
+        assert alloc_rows == []
+
+    def test_full_week_40_of_40_is_100_pct(self, conn) -> None:
+        today = date.today()
+        _seed_forecast(conn, "Alex Rivera", today, alloc=100.0,
+                       fc_type="capacity",
+                       planned_hours=40.0, target_hours=40.0)
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        assert len(rows) == 1
+        assert rows[0]["allocation_pct"] == 100.0
+        assert rows[0]["planned_hours"] == 40.0
+        assert rows[0]["target_hours"] == 40.0
+        assert rows[0]["warning"] is None
+
+    def test_partial_week_24_of_40_is_60_pct(self, conn) -> None:
+        today = date.today()
+        _seed_forecast(conn, "Jordan Lee", today, alloc=60.0,
+                       fc_type="capacity",
+                       planned_hours=24.0, target_hours=40.0)
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        assert rows[0]["allocation_pct"] == 60.0
+
+    def test_overallocation_warning_above_150(self, conn) -> None:
+        today = date.today()
+        _seed_forecast(conn, "Sam Chen", today, alloc=160.0,
+                       fc_type="capacity",
+                       planned_hours=64.0, target_hours=40.0)
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        assert rows[0]["warning"] is not None
+        assert "dangerously" in rows[0]["warning"] or "160" in rows[0]["warning"]
+
+    def test_overallocation_warning_above_100(self, conn) -> None:
+        today = date.today()
+        _seed_forecast(conn, "Dana Kim", today, alloc=120.0,
+                       fc_type="capacity",
+                       planned_hours=48.0, target_hours=40.0)
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        assert rows[0]["warning"] is not None
+
+    def test_zero_target_shows_no_capacity_warning(self, conn) -> None:
+        today = date.today()
+        _seed_forecast(conn, "Lee Park", today, alloc=0.0,
+                       fc_type="capacity",
+                       planned_hours=32.0, target_hours=0.0)
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        assert rows[0]["warning"] == "no capacity target"
+
+    def test_blank_planned_hours_counts_as_zero(self, conn) -> None:
+        today = date.today()
+        _seed_forecast(conn, "Alex Zero", today, alloc=0.0,
+                       fc_type="capacity",
+                       planned_hours=0.0, target_hours=40.0)
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        assert rows[0]["planned_hours"] == 0.0
+        assert rows[0]["allocation_pct"] == 0.0
+
+
+class TestPipelineRowsExcluded:
+    """Pipeline/candidate demand rows must NOT count as engineer allocation."""
+
+    def _seed_pipeline(self, conn, week_start: date) -> None:
+        row_id = content_hash(f"pipeline::Alpha Inc::{week_start}")
+        conn.execute(
+            """
+            INSERT INTO forecast_pipeline_demand
+                (id, source_section, week_start, prospect_or_deal, probability,
+                 requested_allocation, skillset, demand_hours, candidate_people,
+                 staffing_status, record_type, forecast_type, source_row,
+                 ingested_at)
+            VALUES (?, 'AI', ?, 'Alpha Inc', 0.8, 20, 'ML', 20, '["Alex/Jordan"]',
+                    'unassigned', 'pipeline_demand', 'pipeline_demand', 1,
+                    CURRENT_TIMESTAMP)
+            """,
+            [row_id, week_start.isoformat()],
+        )
+
+    def test_pipeline_demand_not_in_person_alloc(self, conn) -> None:
+        today = date.today()
+        self._seed_pipeline(conn, today)
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        # Pipeline rows should NOT produce person allocation entries
+        person_names = {r["person_name"] for r in rows}
+        assert "Alpha Inc" not in person_names
+        assert "Alex/Jordan" not in person_names
+
+    def test_pipeline_rows_dont_inflate_people_tab(self, conn) -> None:
+        today = date.today()
+        self._seed_pipeline(conn, today)
+        _seed_forecast(conn, "Real Engineer", today, alloc=80.0)
+        _seed_note(conn, "Real Engineer", note_type="1on1")
+        rows = get_people_rows(conn, as_of=today)
+        real = next((r for r in rows if r.name == "Real Engineer"), None)
+        assert real is not None
+        assert real.allocation_pct == 80.0  # must not be inflated by pipeline
+
+
+class TestForecastWeekList:
+    """get_forecast_week_list returns correct sorted distinct weeks."""
+
+    def test_returns_weeks_on_or_after_as_of(self, conn) -> None:
+        today = date.today()
+        past = today - timedelta(days=7)
+        _seed_forecast(conn, "Alice", past, 80.0)
+        _seed_forecast(conn, "Alice", today, 90.0)
+        weeks = get_forecast_week_list(conn, as_of=today)
+        assert today in weeks
+        assert past not in weeks
+
+    def test_weeks_sorted_ascending(self, conn) -> None:
+        today = date.today()
+        w2 = today + timedelta(days=7)
+        w3 = today + timedelta(days=14)
+        _seed_forecast(conn, "Alice", w3, 80.0)
+        _seed_forecast(conn, "Alice", today, 80.0)
+        _seed_forecast(conn, "Alice", w2, 80.0)
+        weeks = get_forecast_week_list(conn, as_of=today)
+        assert weeks == sorted(weeks)
+
+
+class TestForecastSummaryTotalsMatch:
+    """Dashboard totals must match what the forecast has for that week."""
+
+    def test_per_week_totals_consistent_with_fixture(self, conn) -> None:
+        """Ingest the wide fixture and verify dashboard allocation is per-week."""
+        import os
+        fixture = os.path.join(
+            os.path.dirname(__file__), "..", "fixtures", "wide_forecast.csv"
+        )
+        from manager_os.ingest.forecast import ingest_forecast
+        ingest_forecast(fixture, conn)
+
+        # Alex Rivera: week of 2026-06-16 has planned=40, target=40 → 100%
+        rows = get_people_allocation_for_week(
+            conn, week_start=date(2026, 6, 16)
+        )
+        alex = next((r for r in rows if r["person_name"] == "Alex Rivera"), None)
+        assert alex is not None, "Alex Rivera not found in fixture allocation"
+        assert alex["target_hours"] == 40.0
+        assert alex["planned_hours"] == 40.0
+        assert alex["allocation_pct"] == 100.0
+
+        # Alex Rivera: week of 2026-06-30 has planned=0, target=40 → 0%
+        rows_june30 = get_people_allocation_for_week(
+            conn, week_start=date(2026, 6, 30)
+        )
+        alex_june30 = next(
+            (r for r in rows_june30 if r["person_name"] == "Alex Rivera"), None
+        )
+        assert alex_june30 is not None
+        assert alex_june30["planned_hours"] == 0.0
+        assert alex_june30["allocation_pct"] == 0.0
+
+    def test_no_ai_ml_section_double_counting(self, conn) -> None:
+        """Engineers appearing in both AI and ML sections are counted once per week."""
+        today = date.today()
+        # Two rows for same person in same week (different sections/clients) — should sum
+        row_id1 = content_hash(f"double::Alice::{today}::AI")
+        row_id2 = content_hash(f"double::Alice::{today}::ML")
+        for rid, section, ph, th in [
+            (row_id1, "AI", 20.0, 40.0),
+            (row_id2, "ML", 20.0, 40.0),
+        ]:
+            conn.execute(
+                """
+                INSERT INTO staffing_forecast
+                    (id, person_name, week_start, client, project, allocation_pct,
+                     forecast_type, ingested_at, planned_hours, target_hours)
+                VALUES (?, 'Alice', ?, '', ?, 50.0, 'capacity', CURRENT_TIMESTAMP, ?, ?)
+                """,
+                [rid, today.isoformat(), section, ph, th],
+            )
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        alice = next((r for r in rows if r["person_name"] == "Alice"), None)
+        assert alice is not None
+        # 20+20=40 planned / MAX(target)=40 → 100% (sum planned, max target)
+        assert alice["planned_hours"] == 40.0
+        assert alice["allocation_pct"] == 100.0
