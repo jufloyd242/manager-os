@@ -479,3 +479,116 @@ class TestSOWDeadlineWindow:
         assert len(sigs) == 0
 
 
+# ===========================================================================
+# Phase 5 — noise filters, deal source, global budget
+# ===========================================================================
+
+
+class TestNoiseFilters:
+    """Risk signals from headings, system docs, and non-actionable snippets are suppressed."""
+
+    def test_critical_skill_heading_is_not_high_risk(self, conn) -> None:
+        """A note whose only 'critical' usage is in a heading like '**Critical Skill:**'
+        should not produce a high-severity signal."""
+        body = (
+            "## Engagement Status\n\n"
+            "- **Critical Skill:** Gemini Enterprise CX (GECX) / CCAI.\n"
+            "- Team is fully staffed and on track.\n"
+        )
+        _seed_note(conn, body=body, entity_name="Acme Corp")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        # Should be downgraded — not high severity
+        assert not any(s[0] == "high" for s in sigs), (
+            "Heading-only 'Critical Skill' should not create a high-severity signal"
+        )
+
+    def test_critical_risks_section_heading_is_not_high(self, conn) -> None:
+        body = "## Critical Risks\n\nNo specific blockers at this time.\n"
+        _seed_note(conn, body=body, entity_name="Client Beta")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        assert not any(s[0] == "high" for s in sigs)
+
+    def test_gemini_md_is_skipped(self, conn) -> None:
+        """Notes from GEMINI.md / instruction docs must not produce risk signals."""
+        import uuid
+        raw_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO raw_documents
+                (id, source_type, source_path, content_hash, content, ingested_at)
+            VALUES (?, 'obsidian', '/vault/.gemini/GEMINI.md', ?, 'blocked content', CURRENT_TIMESTAMP)
+            """,
+            [raw_id, raw_id],
+        )
+        note_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO notes (id, raw_document_id, note_date, note_type, entity_type,
+                               entity_name, title, body, tags, created_at)
+            VALUES (?, ?, ?, 'client', 'client', 'Acme', 'GEMINI', 'This is blocked.', '[]', CURRENT_TIMESTAMP)
+            """,
+            [note_id, raw_id, date.today().isoformat()],
+        )
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT id FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        assert len(sigs) == 0, "GEMINI.md notes must not produce risk signals"
+
+    def test_actionable_blocked_note_remains_high(self, conn) -> None:
+        """A note that says 'the integration is blocked by client approval' should stay high."""
+        body = "The integration work is blocked by client approval. Risk of escalation."
+        _seed_note(conn, body=body, entity_name="Acme Corp")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        assert any(s[0] == "high" for s in sigs)
+
+    def test_image_artifact_snippet_is_suppressed_or_downgraded(self, conn) -> None:
+        """Notes whose only keyword match is inside an image export artifact are downgraded."""
+        body = (
+            "Meeting notes.\n\n"
+            "![Exported image](Exported%20image%20critical%20dates.png)\n\n"
+            "Action items TBD.\n"
+        )
+        _seed_note(conn, body=body, entity_name="Corp A")
+        run_rule_extraction(conn, run_date=date.today())
+        sigs = conn.execute(
+            "SELECT severity FROM signals WHERE signal_type = 'risk'"
+        ).fetchall()
+        # Should not be high — image artifact is not actionable
+        assert not any(s[0] == "high" for s in sigs)
+
+
+class TestDealSourcePath:
+    """SOW near-deadline signals should store a readable deals:: source path."""
+
+    def test_deal_signal_source_path_contains_deals_prefix(self, conn) -> None:
+        close = date.today() + timedelta(days=3)
+        _seed_deal(conn, "Big Deal", "Acme Corp", close, sow_status="pending")
+        run_rule_extraction(conn, run_date=date.today())
+        row = conn.execute(
+            "SELECT source_path FROM signals WHERE signal_type = 'sow_loe_review'"
+        ).fetchone()
+        assert row is not None
+        sp = row[0]
+        assert sp.startswith("deals::"), f"Expected deals:: prefix, got: {sp!r}"
+
+    def test_deal_signal_source_path_not_empty(self, conn) -> None:
+        close = date.today() + timedelta(days=5)
+        _seed_deal(conn, "Another Deal", "Client Co", close, sow_status="pending")
+        run_rule_extraction(conn, run_date=date.today())
+        row = conn.execute(
+            "SELECT source_path FROM signals WHERE signal_type = 'sow_loe_review'"
+        ).fetchone()
+        assert row is not None
+        assert row[0], "Deal signal source_path must not be empty"
+
+

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
@@ -44,6 +45,102 @@ _MEDIUM_RISK_KEYWORDS = [
 _LOW_RISK_KEYWORDS = [
     "bloated",
 ]
+
+# ------------------------------------------------------------------
+# Noise filters for rule 1
+# ------------------------------------------------------------------
+
+# Source path substrings that indicate non-actionable / system / template docs.
+# Notes from these paths are excluded from risk signals or downgraded to low.
+_NOISY_SOURCE_SUBSTRINGS = [
+    "gemini.md",
+    "/.gemini/",
+    "GEMINI.md",
+    "templates/",
+    "instructions/",
+    "job description",
+    "job-description",
+    "system/",
+    "/prompt",
+    "AGENTS.md",
+    "README.md",
+]
+
+# Note titles / filenames that are almost always noisy.
+_NOISY_TITLE_LOWER = [
+    "gemini",
+    "agent instruction",
+    "system prompt",
+    "template",
+    "job description",
+    "readme",
+    "agents.md",
+]
+
+# A snippet is only actionable if it contains one of these phrases,
+# indicating a real consequence rather than a structural keyword.
+_ACTIONABLE_RISK_TERMS = [
+    "blocked",
+    "blocking",
+    "at risk",
+    "overdue",
+    "escalat",
+    "delay",
+    "miss the",
+    "missing deadline",
+    "not signed",
+    "unsigned",
+    "production",
+    "outage",
+    "incident",
+    "resign",
+    "leaving",
+    "sow",
+    "contract",
+    "staffing gap",
+    "no resource",
+    "delivery risk",
+]
+
+
+def _is_noisy_source(source_path: str, title: str) -> bool:
+    """Return True if the note looks like a system/template/instruction document."""
+    sp_lower = (source_path or "").lower()
+    if any(sub in sp_lower for sub in _NOISY_SOURCE_SUBSTRINGS):
+        return True
+    title_lower = (title or "").lower()
+    if any(t in title_lower for t in _NOISY_TITLE_LOWER):
+        return True
+    return False
+
+
+def _snippet_is_heading_or_label(s: str) -> bool:
+    """Return True if the text is a markdown heading, bold label, or image artifact."""
+    s = s.strip()
+    if not s:
+        return True
+    # Markdown heading
+    if re.match(r'^#{1,6}\s+', s):
+        return True
+    # Bold-only label ending with colon: "**Critical Skill:**" or "**Key Concerns:**"
+    if re.match(r'^\*\*[A-Za-z][^*]{0,60}:\*\*\s*$', s):
+        return True
+    # Bullet whose text is only a bold label: "- **Critical Skill:**"
+    if re.match(r'^[-*•]\s+\*\*[^*]{0,60}:\*\*\s*$', s):
+        return True
+    # Markdown image or export artifact containing ]( or ![
+    if '](' in s or '![' in s:
+        return True
+    # HTML comment or metadata line
+    if s.startswith('<!--') or s.startswith('<'):
+        return True
+    return False
+
+
+def _snippet_is_actionable(snippet: str) -> bool:
+    """Return True if the snippet contains at least one actionable risk term."""
+    lower = snippet.lower()
+    return any(term in lower for term in _ACTIONABLE_RISK_TERMS)
 
 
 def _contains_risk_keyword(text: str) -> bool:
@@ -148,6 +245,10 @@ def _rule_risk_keywords(conn, run_date: date) -> list[Signal]:
         # Use the actual vault path when available; fall back to doc id
         source_path = file_path or raw_document_id or note_id
 
+        # Skip system/template/instruction documents entirely
+        if _is_noisy_source(source_path, title):
+            continue
+
         # Determine entity for the signal
         etype = entity_type or "team"
         ename = entity_name or title or "Unknown"
@@ -158,8 +259,22 @@ def _rule_risk_keywords(conn, run_date: date) -> list[Signal]:
 
         severity, confidence = _risk_keyword_severity(body or "")
 
-        # Downgrade to low when there is no named entity (generic notes)
         has_named_entity = bool(entity_name and entity_name.strip())
+
+        # Extract best actionable snippet
+        trigger_snippet = _extract_risk_snippet(body or "", max_chars=120)
+
+        # If we could not find a non-heading, actionable snippet, downgrade sharply.
+        # This prevents section headings ("## Critical Risks") from creating high signals.
+        if not trigger_snippet:
+            severity = "low"
+            confidence = min(confidence, 0.40)
+        elif severity == "high" and not _snippet_is_actionable(trigger_snippet):
+            # High keyword found but snippet isn't truly actionable — downgrade to medium
+            severity = "medium"
+            confidence = min(confidence, 0.60)
+
+        # Downgrade to low when there is no named entity (generic notes)
         if not has_named_entity and severity == "high":
             severity = "medium"
             confidence = min(confidence, 0.65)
@@ -167,8 +282,6 @@ def _rule_risk_keywords(conn, run_date: date) -> list[Signal]:
             severity = "low"
             confidence = min(confidence, 0.50)
 
-        # Build a useful summary: include the triggering sentence or phrase
-        trigger_snippet = _extract_risk_snippet(body or "", max_chars=120)
         display_title = title or "untitled"
         if trigger_snippet:
             summary = f"{display_title}: {trigger_snippet}"
@@ -201,19 +314,35 @@ def _rule_risk_keywords(conn, run_date: date) -> list[Signal]:
 
 
 def _extract_risk_snippet(body: str, max_chars: int = 120) -> str:
-    """Return the first sentence or phrase that contains a risk keyword."""
-    lower = body.lower()
+    """Return the best actionable sentence containing a risk keyword.
+
+    Prefers sentences that are not headings/labels and that contain an
+    actionable term.  Falls back to the first keyword sentence if needed.
+    """
     all_keywords = _HIGH_RISK_KEYWORDS + _MEDIUM_RISK_KEYWORDS + _LOW_RISK_KEYWORDS
-    # Split into sentences
-    import re
     sentences = re.split(r"(?<=[.!?])\s+|\n+", body)
+
+    first_match: str = ""
     for sent in sentences:
         sent_lower = sent.lower()
-        if any(kw in sent_lower for kw in all_keywords):
-            snippet = sent.strip()
+        if not any(kw in sent_lower for kw in all_keywords):
+            continue
+        stripped = sent.strip()
+        if _snippet_is_heading_or_label(stripped):
+            continue
+        if not first_match:
+            first_match = stripped
+        if _snippet_is_actionable(stripped):
+            snippet = stripped
             if len(snippet) > max_chars:
                 snippet = snippet[:max_chars].rsplit(" ", 1)[0] + "…"
             return snippet
+
+    # Fall back to first non-heading match (may not be fully actionable)
+    if first_match:
+        if len(first_match) > max_chars:
+            first_match = first_match[:max_chars].rsplit(" ", 1)[0] + "…"
+        return first_match
     return ""
 
 
@@ -273,22 +402,44 @@ def _rule_sow_near_deadline(conn, run_date: date) -> list[Signal]:
     """Emit sow_loe_review signal for deals closing within 14 days without a signed SOW."""
     deadline = run_date + timedelta(days=14)
 
-    rows = conn.execute(
-        """
-        SELECT id, account, deal_name, close_date, sow_status, loe_status,
-               probability, services_amount
-        FROM deals
-        WHERE close_date IS NOT NULL
-          AND close_date <= ?
-          AND close_date >= ?
-          AND (sow_status IS NULL OR sow_status != 'signed')
-        """,
-        [deadline, run_date],
-    ).fetchall()
+    # deal_id is an optional column added for NetSuite; fall back gracefully
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, account, deal_name, close_date, sow_status, loe_status,
+                   probability, services_amount, deal_id
+            FROM deals
+            WHERE close_date IS NOT NULL
+              AND close_date <= ?
+              AND close_date >= ?
+              AND (sow_status IS NULL OR sow_status != 'signed')
+            """,
+            [deadline, run_date],
+        ).fetchall()
+        has_deal_id = True
+    except Exception:
+        rows = conn.execute(
+            """
+            SELECT id, account, deal_name, close_date, sow_status, loe_status,
+                   probability, services_amount
+            FROM deals
+            WHERE close_date IS NOT NULL
+              AND close_date <= ?
+              AND close_date >= ?
+              AND (sow_status IS NULL OR sow_status != 'signed')
+            """,
+            [deadline, run_date],
+        ).fetchall()
+        has_deal_id = False
 
     signals = []
     for row in rows:
-        _, account, deal_name, close_date, sow_status, loe_status, probability, services_amount = row
+        if has_deal_id:
+            _, account, deal_name, close_date, sow_status, loe_status, probability, services_amount, deal_id = row
+        else:
+            _, account, deal_name, close_date, sow_status, loe_status, probability, services_amount = row
+            deal_id = None
+
         if isinstance(close_date, str):
             close_date = date.fromisoformat(close_date)
         days_left = (close_date - run_date).days
@@ -298,12 +449,15 @@ def _rule_sow_near_deadline(conn, run_date: date) -> list[Signal]:
         if services_amount:
             value_str = f" (${services_amount:,.0f})"
 
+        # Build a readable source reference: "deals::OPP025010" or "deals::{deal_name}"
+        source_ref = f"deals::{deal_id}" if deal_id else f"deals::{deal_name}"
+
         sig_id = _signal_dedup_id(run_date, f"deal::{deal_name}", "sow_loe_review", deal_name)
         sig = Signal(
             id=sig_id,
             signal_date=run_date,
             source="rule",
-            source_path="",
+            source_path=source_ref,
             entity_type="deal",
             entity_name=deal_name,
             signal_type="sow_loe_review",

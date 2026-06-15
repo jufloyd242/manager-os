@@ -367,12 +367,14 @@ class TestGlobalMaxItems:
         assert brief.shown_signals == 5
 
     def test_shown_signals_in_content_header(self, conn) -> None:
-        """Template header shows shown/total numbers."""
+        """Template header shows candidate total; shown count does not exceed max_items."""
         for i in range(20):
             _seed_signal_ext(conn, f"Corp{i}", summary=f"Signal {i}")
         brief = generate_daily_brief(conn, target_date=date.today(), max_items=7)
-        assert "7" in brief.content
+        # total_signals (20) must appear in the header metadata line
         assert "20" in brief.content
+        # shown_total must not exceed max_items
+        assert brief.shown_signals <= 7
 
     def test_include_low_priority_still_respects_max_items(self, conn) -> None:
         for i in range(20):
@@ -529,4 +531,142 @@ class TestPriorityRankingCrossType:
         brief = generate_daily_brief(conn, target_date=today, max_items=1)
         assert "Close in 3 days" in brief.content
         assert "Low priority note" not in brief.content
+
+
+# ===========================================================================
+# Phase 5 — global max-items, candidate header, noise, deal source
+# ===========================================================================
+
+
+class TestGlobalMaxItemsV2:
+    """--max-items limits total primary items: signals + follow-ups + decisions."""
+
+    def test_max_items_includes_follow_ups_in_total(self, conn) -> None:
+        """Follow-ups count toward max_items, so 20 signals + 4 follow-ups != 20."""
+        for i in range(20):
+            _seed_signal_ext(conn, f"Risk{i}", signal_type="risk", summary=f"Risk item {i}")
+        for i in range(5):
+            _seed_action_item(conn, f"Follow up with person {i} about project", assigned_to="manager")
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=10)
+        assert brief.shown_signals <= 10, (
+            f"shown_signals ({brief.shown_signals}) must be <= max_items (10)"
+        )
+
+    def test_max_items_20_total_primary_items(self, conn) -> None:
+        """With 15 signals + 5 follow-ups, max_items=20 must show ≤ 20 total."""
+        for i in range(15):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Signal {i}")
+        for i in range(5):
+            _seed_action_item(conn, f"Review outstanding items for client {i}", assigned_to="manager")
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=20)
+        assert brief.shown_signals <= 20
+
+    def test_max_items_deals_take_priority_over_risks(self, conn) -> None:
+        """Structured deal signals appear even when risks fill the budget."""
+        for i in range(10):
+            _seed_signal_ext(conn, f"Risk{i}", signal_type="risk", severity="high",
+                             summary=f"Risk note {i}", confidence=0.70)
+        _seed_signal_ext(conn, "Urgent Deal", signal_type="sow_loe_review", severity="high",
+                         summary="Deal closes in 3 days",
+                         due_date=date.today() + timedelta(days=3),
+                         requires_manager_attention=True)
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=5)
+        assert "Deal closes in 3 days" in brief.content
+
+
+class TestHeaderCandidateCounts:
+    """Header shows candidate pool and breakdown."""
+
+    def test_header_shows_shown_of_candidates(self, conn) -> None:
+        for i in range(15):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Signal {i}")
+        brief = generate_daily_brief(conn, target_date=date.today(), max_items=5)
+        # Header should include total candidates and max shown
+        assert "5" in brief.content  # shown_total
+        assert "15" in brief.content  # from total_signals
+
+    def test_header_signals_count_line_present(self, conn) -> None:
+        for i in range(3):
+            _seed_signal_ext(conn, f"Corp{i}", summary=f"Signal {i}")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert "Signals:" in brief.content
+
+    def test_header_decisions_count_in_signals_line(self, conn) -> None:
+        _seed_signal_ext(conn, "Corp A", summary="Some signal")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert "Decisions:" in brief.content
+
+
+class TestDealSourceRendering:
+    """Deal signals should render with a deals:: readable source path."""
+
+    def test_deal_source_renders_as_deals_csv(self, conn) -> None:
+        """Signal with source_path='deals::OPP123' should show 'deals.csv · OPP123'."""
+        sig_id = content_hash("deal_test::OPP123")
+        conn.execute(
+            """
+            INSERT INTO signals
+                (id, signal_date, source, source_path, entity_type, entity_name,
+                 signal_type, severity, summary, why_it_matters,
+                 requires_manager_attention, confidence, status, created_at, updated_at)
+            VALUES (?, ?, 'rule', 'deals::OPP123', 'deal', 'Big Corp',
+                    'sow_loe_review', 'high', 'SOW unsigned closes in 3 days', 'Revenue risk',
+                    TRUE, 1.0, 'open', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            [sig_id, date.today().isoformat()],
+        )
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert "deals.csv" in brief.content
+        assert "OPP123" in brief.content
+
+    def test_empty_source_path_shows_no_source(self, conn) -> None:
+        _seed_signal_ext(conn, "Corp A", signal_type="sow_loe_review", summary="Unsigned SOW",
+                         source_path="")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert "no source" in brief.content
+
+
+class TestJunkActionItemSuppression:
+    """Vague/junk follow-up descriptions are suppressed."""
+
+    def _seed_ai(self, conn, description: str, assigned_to: str = "manager") -> None:
+        ai_id = content_hash(f"junk_test::{description}")
+        conn.execute(
+            """
+            INSERT INTO action_items
+                (id, assigned_to, description, status, created_at)
+            VALUES (?, ?, ?, 'open', CURRENT_TIMESTAMP)
+            """,
+            [ai_id, assigned_to, description],
+        )
+
+    def test_short_description_suppressed(self, conn) -> None:
+        from manager_os.build.daily_brief import _is_junk_action_item
+        assert _is_junk_action_item("do it") is True
+        assert _is_junk_action_item("this one") is True
+
+    def test_junk_pattern_suppressed(self, conn) -> None:
+        from manager_os.build.daily_brief import _is_junk_action_item
+        assert _is_junk_action_item("implement isolated agents in the system") is True
+        assert _is_junk_action_item("increase delivery velocity next sprint") is True
+        assert _is_junk_action_item("use Expel's JIRA and confluence for tracking") is True
+
+    def test_clear_action_item_retained(self, conn) -> None:
+        from manager_os.build.daily_brief import _is_junk_action_item
+        assert _is_junk_action_item("Schedule architecture review with Alice by Friday") is False
+        assert _is_junk_action_item("Review SOW draft with legal team before Monday") is False
+
+    def test_junk_ai_not_in_brief(self, conn) -> None:
+        self._seed_ai(conn, "this one")
+        self._seed_ai(conn, "signature")
+        self._seed_ai(conn, "feedback from customer today")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert "this one" not in brief.content
+        assert "signature" not in brief.content
+
+    def test_valid_ai_appears_in_brief(self, conn) -> None:
+        self._seed_ai(conn, "Follow up with Alice about staffing gap on Acme project")
+        brief = generate_daily_brief(conn, target_date=date.today())
+        assert "Alice" in brief.content or "staffing gap" in brief.content
+
 

@@ -1,8 +1,9 @@
 # Daily Brief -- {{ brief_date }}
 
-Showing {{ shown_signals }} of {{ total_signals }} signal(s) | {{ open_action_items }} follow-up(s) | {{ meeting_count }} meeting(s) today
+Showing {{ shown_total }} of {{ total_candidates }} candidate item(s).
+Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Decisions: {{ total_decisions }} | Meetings today: {{ meeting_count }}
 {% if total_hidden > 0 %}
-*{{ total_hidden }} lower-priority item(s) hidden -- see dashboard*
+*{{ total_hidden }} item(s) not shown -- see dashboard*
 {% endif %}
 {% if suppressed_count > 0 %}
 *{{ suppressed_count }} duplicate signal(s) suppressed*

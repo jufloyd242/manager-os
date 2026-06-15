@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date, datetime
 from pathlib import Path
 
@@ -207,6 +208,7 @@ def _load_action_items(conn) -> list[ActionItem]:
 # Minimum token count and min length for a useful action item
 _AI_MIN_WORDS = 3
 _AI_MIN_CHARS = 10
+_AI_MAX_CHARS = 250  # Very long descriptions are usually boilerplate paragraphs
 
 # Phrases that indicate template/meta/boilerplate junk
 _JUNK_PATTERNS = [
@@ -224,7 +226,50 @@ _JUNK_PATTERNS = [
     "your name",
     "your action",
     "see dashboard",
+    # Additional vague fragments
+    "implement isolated",
+    "increase delivery velocity",
+    "use expel",
+    "feedback from customer",
+    "increase delivery",
+    # Job description / boilerplate sentences
+    "achieve these goals",
+    "operate like developer",
+    "not settle for finding",
+    "hands-on project",
+    "we will unlock",
+    "we will learn the loopholes",
+    "we will strive to be",
+    "we will recommend a process",
+    "be moving along",
+    "get back to you",
+    "internalize, but",
+    "always seek advise",
+    "of the session",
+    "this one",
+    "be approving",
+    "longer sales cycles",
+    # Hobby / personal items that leak from personal notes
+    "pickleball",
+    "golf",
 ]
+
+# Regex for action item descriptions that are clearly fragments / not real items.
+# Catches:
+#   - Truncated bold markdown: s**, **A, *A
+#   - Bare bullet lines: - or *
+#   - Truncated list continuations: "s of ...", "s from ...", "s for ...",
+#     "s (Review", "s (For", "s (1:", i.e. any line that starts with a lone 's '
+#     (these are split-off tails of "**Actions for ...**" bullets)
+_JUNK_RE = re.compile(
+    r'^(?:'
+    r's\*\*'                              # s**
+    r'|\*{1,2}\s*[a-zA-Z]'               # *A or **A (truncated bold)
+    r'|[-*]\s*$'                          # bare bullet
+    r'|s\s+(?:of|from|for|\(|/)\s*'      # s of / s from / s for / s ( / s /
+    r')',
+    re.IGNORECASE,
+)
 
 
 def _is_junk_action_item(description: str) -> bool:
@@ -238,9 +283,18 @@ def _is_junk_action_item(description: str) -> bool:
     # Too few words (excludes single-word fragments)
     if len(desc.split()) < _AI_MIN_WORDS:
         return True
+    # Very long descriptions are usually boilerplate paragraphs, not action items
+    if len(desc) > _AI_MAX_CHARS:
+        return True
+    # Ends with == (malformed markdown from copy-paste)
+    if desc.endswith("=="):
+        return True
     # Matches a known junk pattern
     desc_lower = desc.lower()
     if any(pat in desc_lower for pat in _JUNK_PATTERNS):
+        return True
+    # Looks like a code/markdown fragment
+    if _JUNK_RE.match(desc):
         return True
     return False
 
@@ -342,9 +396,9 @@ def _section_alloc(bucketed: dict, total: int) -> dict[str, int]:
     }
     structured_used = sum(structured.values())
 
-    # Risks fill whatever the structured sections haven't claimed
+    # Risks fill whatever the structured sections haven't claimed, capped at 5
     risk_budget = max(0, total - structured_used)
-    risk_alloc = min(risk_budget, has["risk_signals"])
+    risk_alloc = min(risk_budget, 5, has["risk_signals"])
 
     # Redistribute any leftover (when fewer risks than budget) to structured sections
     leftover = risk_budget - risk_alloc
@@ -364,6 +418,45 @@ def _section_alloc(bucketed: dict, total: int) -> dict[str, int]:
         "other":       structured["other"],
         "follow_ups":  4,  # action item cap — independent of signal budget
     }
+
+
+def _global_alloc(bucketed: dict, n_decisions: int, n_follow_ups: int, total: int) -> dict[str, int]:
+    """Allocate *total* primary items across ALL sections including decisions and follow-ups.
+
+    The budget is: deals + utilization + people + risks + other + decisions + follow_ups = total
+    Section priorities: structured signals first, then decisions, then follow-ups, then risks.
+    """
+    has = {k: len(v) for k, v in bucketed.items()}
+
+    # Fixed floors for structured non-risk sections
+    alloc: dict[str, int] = {
+        "deals":       min(has["deal_signals"],       4),
+        "utilization": min(has["utilization_signals"], 3),
+        "people":      min(has["people_signals"],      2),
+        "other":       min(has["other_signals"],       1),
+        "decisions":   min(n_decisions,                3),
+        "follow_ups":  min(n_follow_ups,               4),
+    }
+    used = sum(alloc.values())
+    remaining = max(0, total - used)
+
+    # Risks get at most 5, capped by available and remaining budget
+    risk_alloc = min(remaining, 5, has["risk_signals"])
+    alloc["risks"] = risk_alloc
+    remaining -= risk_alloc
+
+    # Any further leftover goes to deals → people → utilization → follow_ups
+    for key, pool_key in (("deals", "deal_signals"), ("people", "people_signals"),
+                          ("utilization", "utilization_signals"), ("follow_ups", None)):
+        if remaining <= 0:
+            break
+        pool = has.get(pool_key, n_follow_ups) if pool_key else n_follow_ups
+        extra = min(pool - alloc[key], remaining)
+        if extra > 0:
+            alloc[key] += extra
+            remaining -= extra
+
+    return alloc
 
 
 # ---------------------------------------------------------------------------
@@ -434,37 +527,29 @@ def generate_daily_brief(
     overflow: dict[str, int] = {}
 
     if max_items is not None:
-        # ---- Section-balanced global budget ----
-        # Allocate budget proportionally across section types so one noisy
-        # section can't consume the whole brief.
+        # ---- Global budget: decisions + follow-ups + signals all count toward max_items ----
         bucketed_all = _bucket_signals(visible_signals)
+        alloc = _global_alloc(bucketed_all, len(decisions), len(manager_ais_ranked), max_items)
 
-        # Section allocations: structured signals get guaranteed slots;
-        # risks get a capped share to prevent crowding.
-        total = max_items
-        alloc = _section_alloc(bucketed_all, total)
-
-        critical_shown = bucketed_all["critical_signals"]  # always include critical
-        risks_shown    = bucketed_all["risk_signals"][:alloc["risks"]]
-        people_shown   = bucketed_all["people_signals"][:alloc["people"]]
-        deals_shown    = bucketed_all["deal_signals"][:alloc["deals"]]
+        critical_shown    = bucketed_all["critical_signals"]  # criticals always included
+        risks_shown       = bucketed_all["risk_signals"][:alloc["risks"]]
+        people_shown      = bucketed_all["people_signals"][:alloc["people"]]
+        deals_shown       = bucketed_all["deal_signals"][:alloc["deals"]]
         utilization_shown = bucketed_all["utilization_signals"][:alloc["utilization"]]
-        other_shown    = bucketed_all["other_signals"][:alloc["other"]]
+        other_shown       = bucketed_all["other_signals"][:alloc["other"]]
+        decisions_shown   = decisions[:alloc["decisions"]]
+        follow_ups_shown  = manager_ais_ranked[:alloc["follow_ups"]]
 
         overflow = {
-            "critical": 0,
-            "risks": max(0, len(bucketed_all["risk_signals"]) - len(risks_shown)),
-            "people": max(0, len(bucketed_all["people_signals"]) - len(people_shown)),
-            "deals": max(0, len(bucketed_all["deal_signals"]) - len(deals_shown)),
-            "utilization": max(0, len(bucketed_all["utilization_signals"]) - len(utilization_shown)),
-            "other": max(0, len(bucketed_all["other_signals"]) - len(other_shown)),
+            "critical":    0,
+            "risks":       max(0, len(bucketed_all["risk_signals"])       - len(risks_shown)),
+            "people":      max(0, len(bucketed_all["people_signals"])     - len(people_shown)),
+            "deals":       max(0, len(bucketed_all["deal_signals"])       - len(deals_shown)),
+            "utilization": max(0, len(bucketed_all["utilization_signals"])- len(utilization_shown)),
+            "other":       max(0, len(bucketed_all["other_signals"])      - len(other_shown)),
+            "decisions":   max(0, len(decisions)         - len(decisions_shown)),
+            "follow_ups":  max(0, len(manager_ais_ranked)- len(follow_ups_shown)),
         }
-
-        # Decisions and follow-ups get a small fixed allocation
-        decisions_shown = decisions[:3]
-        overflow["decisions"] = max(0, len(decisions) - len(decisions_shown))
-        follow_ups_shown = manager_ais_ranked[:min(alloc.get("follow_ups", 4), 4)]
-        overflow["follow_ups"] = max(0, len(manager_ais_ranked) - len(follow_ups_shown))
 
     else:
         # ---- Per-section mode (default) ----
@@ -495,18 +580,22 @@ def generate_daily_brief(
         follow_ups_shown = manager_ais_ranked[: limits["follow_ups"]]
         overflow["follow_ups"] = max(0, len(manager_ais_ranked) - len(follow_ups_shown))
 
-    # Meetings (same in both modes)
+    # Meetings are shown up to the default limit in both modes (not counted against signal budget)
     meet_limit = _DEFAULT_LIMITS["meetings"]
     meetings_shown = meetings[:meet_limit]
     overflow["meetings"] = max(0, len(meetings) - len(meetings_shown))
 
-    # Totals for header
-    total_hidden = sum(overflow.values())
-    total_open_action_items = len(all_action_items)
+    # --- Totals for header ---
     shown_signal_count = (
         len(critical_shown) + len(risks_shown) + len(people_shown)
         + len(deals_shown) + len(utilization_shown) + len(other_shown)
     )
+    # Total primary items shown = signals + decisions + follow-ups (not meetings, not other_ais)
+    shown_total = shown_signal_count + len(decisions_shown) + len(follow_ups_shown)
+    # Candidate pool = everything available before limits
+    total_candidates = len(all_signals) + len(manager_ais_ranked) + len(decisions) + len(meetings)
+    total_hidden = sum(overflow.values())
+    total_open_action_items = len(all_action_items)
 
     # Render template
     env = Environment(
@@ -515,14 +604,18 @@ def generate_daily_brief(
         trim_blocks=True,
         lstrip_blocks=True,
     )
-    # Custom filter for readable source path — prefers note filename, falls back to raw value
+    # Custom filter for readable source path
     def _readable_path(p: str) -> str:
         if not p:
             return "(no source)"
-        # Looks like a hex hash (>= 32 hex chars with no path separator)?
         stripped = p.strip()
+        # Hex hash (>= 32 chars, all hex) — suppress
         if len(stripped) >= 32 and all(c in "0123456789abcdefABCDEF" for c in stripped):
             return "(no source)"
+        # deals::OPP025010 → "deals.csv · OPP025010"
+        if stripped.startswith("deals::"):
+            ref = stripped[len("deals::"):]
+            return f"deals.csv · {ref}"
         return Path(p).name if p else "(no source)"
 
     env.filters["basename"] = lambda p: Path(p).name if p else ""
@@ -534,6 +627,11 @@ def generate_daily_brief(
         generated_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
         total_signals=len(all_signals),
         shown_signals=shown_signal_count,
+        # Global candidate/shown counts for header
+        total_candidates=total_candidates,
+        shown_total=shown_total,
+        total_follow_ups=len(manager_ais_ranked),
+        total_decisions=len(decisions),
         suppressed_count=suppressed_count,
         open_action_items=total_open_action_items,
         meeting_count=len(meetings),
@@ -551,7 +649,7 @@ def generate_daily_brief(
         meetings=meetings_shown,
         # Overflow counts per section
         overflow=overflow,
-        # Legacy compat (action_items was used by old template / tests)
+        # Legacy compat
         action_items=all_action_items,
     )
 
@@ -560,7 +658,7 @@ def generate_daily_brief(
         brief_date=target_date,
         content=content,
         signal_ids=signal_ids,
-        shown_signals=shown_signal_count,
+        shown_signals=shown_total,
     )
 
     _write_brief_to_db(conn, brief)
