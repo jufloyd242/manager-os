@@ -85,7 +85,21 @@ def _deduplicate_signals(signals: list[Signal]) -> tuple[list[Signal], int]:
 # Ranking
 # ---------------------------------------------------------------------------
 
-def _score_signal(signal: Signal, today: date) -> float:
+def _brief_item_id(prefix: str, db_id: str) -> str:
+    """Return the stable brief item ID used in the rendered markdown.
+
+    Format: ``<prefix>:<first-16-chars-of-db-id>``
+    The short prefix makes IDs readable in the CLI / markdown.
+    """
+    return f"{prefix}:{db_id[:16]}"
+
+
+def _score_signal(
+    signal: Signal,
+    today: date,
+    direct_index: dict[str, str] | None = None,
+    source_index: dict[str, str] | None = None,
+) -> float:
     """Compute a relevance score for a signal. Higher = more urgent."""
     score = float(_SEVERITY_SCORE.get(signal.severity, 5))
     if signal.requires_manager_attention:
@@ -106,12 +120,29 @@ def _score_signal(signal: Signal, today: date) -> float:
         score -= 10
     # Low-confidence signals rank lower
     score *= max(signal.confidence, 0.1)
+    # Apply feedback adjustments when indexes are available
+    if direct_index is not None:
+        from manager_os.build.feedback import apply_feedback_score
+        item_id = _brief_item_id("signal", signal.id)
+        score = apply_feedback_score(
+            score, item_id, signal.source_path,
+            direct_index, source_index or {},
+        )
     return score
 
 
-def _rank_signals(signals: list[Signal], today: date) -> list[Signal]:
+def _rank_signals(
+    signals: list[Signal],
+    today: date,
+    direct_index: dict[str, str] | None = None,
+    source_index: dict[str, str] | None = None,
+) -> list[Signal]:
     """Return signals sorted by relevance score descending."""
-    return sorted(signals, key=lambda s: _score_signal(s, today), reverse=True)
+    return sorted(
+        signals,
+        key=lambda s: _score_signal(s, today, direct_index, source_index),
+        reverse=True,
+    )
 
 
 def _apply_limit(
@@ -524,8 +555,20 @@ def generate_daily_brief(
     decisions = _load_decisions(conn)
     meetings = _load_meetings(conn, target_date)
 
-    # Rank globally, deduplicate, then apply low-priority filter
-    ranked_signals = _rank_signals(all_signals, target_date)
+    # Load feedback indexes for ranking adjustments (graceful if table missing)
+    try:
+        from manager_os.build.feedback import (
+            load_feedback_index,
+            load_source_feedback_index,
+        )
+        direct_fb = load_feedback_index(conn)
+        source_fb = load_source_feedback_index(conn)
+    except Exception:
+        direct_fb = {}
+        source_fb = {}
+
+    # Rank globally with feedback, deduplicate, then apply low-priority filter
+    ranked_signals = _rank_signals(all_signals, target_date, direct_fb, source_fb)
     deduped_signals, suppressed_count = _deduplicate_signals(ranked_signals)
     visible_signals = (
         [s for s in deduped_signals if s.severity != "low"]
@@ -640,6 +683,49 @@ def generate_daily_brief(
     # Quality-filter flag: shown < max_items means filters suppressed some items
     quality_filtered = max_items is not None and shown_total < max_items
 
+    # ---- Annotate each shown item with a stable brief_id for feedback CLI ----
+    class _Tagged:
+        """Thin wrapper that adds a ``brief_id`` attribute to any item."""
+        __slots__ = ("_item", "brief_id")
+        def __init__(self, item, brief_id: str) -> None:
+            self._item = item
+            self.brief_id = brief_id
+        def __getattr__(self, name: str):
+            return getattr(self._item, name)
+
+    def _tag_signals(items: list, prefix: str) -> list:
+        return [_Tagged(s, _brief_item_id(prefix, s.id)) for s in items]
+
+    def _tag_ais(items: list, prefix: str) -> list:
+        return [_Tagged(ai, _brief_item_id(prefix, ai.id)) for ai in items]
+
+    def _tag_deals(items: list) -> list:
+        """Deal signals use the OPP ID from source_path when available."""
+        tagged = []
+        for s in items:
+            sp = s.source_path or ""
+            if sp.startswith("deals::"):
+                ref = sp[len("deals::"):]
+                brid = f"deal:{ref}"
+            else:
+                brid = _brief_item_id("deal", s.id)
+            tagged.append(_Tagged(s, brid))
+        return tagged
+
+    # Tag all sections
+    critical_shown  = _tag_signals(critical_shown,    "signal")
+    risks_shown     = _tag_signals(risks_shown,        "signal")
+    people_shown    = _tag_signals(people_shown,       "signal")
+    deal_signals_t  = _tag_deals(deals_shown)
+    utilization_shown = _tag_signals(utilization_shown, "signal")
+    other_shown     = _tag_signals(other_shown,        "signal")
+    follow_ups_shown  = _tag_ais(follow_ups_shown,     "action")
+    other_ais_shown   = _tag_ais(other_ais_shown,      "waiting")
+    decisions_shown_t = [
+        _Tagged(d, _brief_item_id("decision", d["id"] if isinstance(d, dict) else d.id))
+        for d in decisions_shown
+    ]
+
     # Render template
     env = Environment(
         loader=FileSystemLoader(str(_PROMPTS_DIR)),
@@ -681,14 +767,14 @@ def generate_daily_brief(
         meeting_count=len(meetings),
         total_hidden=total_hidden,
         quality_filtered=quality_filtered,
-        # Sections
+        # Sections (tagged with brief_id for feedback)
         critical_signals=critical_shown,
         risk_signals=risks_shown,
         people_signals=people_shown,
-        deal_signals=deals_shown,
+        deal_signals=deal_signals_t,
         utilization_signals=utilization_shown,
         other_signals=other_shown,
-        decisions=decisions_shown,
+        decisions=decisions_shown_t,
         follow_ups=follow_ups_shown,
         other_action_items=other_ais_shown,
         meetings=meetings_shown,

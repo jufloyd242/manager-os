@@ -2547,6 +2547,175 @@ def config_audit(
         console.print()
 
 
+# ---------------------------------------------------------------------------
+# feedback  (sub-command group: list / mark / summary)
+# ---------------------------------------------------------------------------
+
+feedback_app = typer.Typer(help="Manage brief item feedback.")
+app.add_typer(feedback_app, name="feedback")
+
+
+@feedback_app.command("list")
+def feedback_list(
+    limit: int = typer.Option(20, "--limit", "-n", help="Number of recent entries to show."),
+) -> None:
+    """List recent feedback entries."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.feedback import list_feedback
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+    entries = list_feedback(conn, limit=limit)
+
+    if not entries:
+        console.print("[dim]No feedback recorded yet.[/dim]")
+        console.print(
+            "  Use [bold]manager-os feedback mark <item_id> <rating>[/bold] "
+            "to record feedback from the daily brief.\n"
+            "  Item IDs appear in the brief as [signal:abc123], [action:def456], etc."
+        )
+        return
+
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Item ID", style="cyan", no_wrap=True)
+    table.add_column("Rating", style="bold")
+    table.add_column("Reason", overflow="fold")
+    table.add_column("When", style="dim")
+
+    _RATING_STYLE = {
+        "useful":          "green",
+        "noisy":           "yellow",
+        "stale":           "dim",
+        "wrong":           "red",
+        "missing-context": "blue",
+    }
+    for e in entries:
+        style = _RATING_STYLE.get(e["rating"], "")
+        when = ""
+        if e["created_at"]:
+            try:
+                when = str(e["created_at"])[:16]
+            except Exception:
+                when = str(e["created_at"])
+        table.add_row(
+            e["item_id"],
+            f"[{style}]{e['rating']}[/{style}]" if style else e["rating"],
+            e["reason"] or "",
+            when,
+        )
+    console.print(table)
+    console.print()
+
+
+@feedback_app.command("mark")
+def feedback_mark(
+    item_id: str = typer.Argument(
+        ...,
+        help="Brief item ID from the daily brief, e.g. signal:abc123, deal:OPP025010",
+    ),
+    rating: str = typer.Argument(
+        ...,
+        help="Rating: useful | noisy | stale | wrong | missing-context",
+    ),
+    reason: Optional[str] = typer.Option(
+        None, "--reason", "-r", help="Optional free-text reason."
+    ),
+) -> None:
+    """Mark a brief item with a feedback rating.
+
+    Item IDs appear in the daily brief as [signal:abc123], [action:def456],
+    [deal:OPP025010], [waiting:abc123], or [decision:abc123].
+
+    Examples:
+
+      manager-os feedback mark signal:abc123 noisy --reason "generic historical note"
+
+      manager-os feedback mark deal:OPP025010 useful
+    """
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.feedback import mark, VALID_RATINGS
+
+    if rating not in VALID_RATINGS:
+        console.print(f"[red]Invalid rating {rating!r}.[/red]")
+        console.print(f"Valid values: {', '.join(sorted(VALID_RATINGS))}")
+        raise typer.Exit(1)
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+
+    try:
+        mark(conn, item_id=item_id, rating=rating, reason=reason)
+    except Exception as exc:
+        console.print(f"[red]Error recording feedback: {exc}[/red]")
+        raise typer.Exit(1)
+
+    _RATING_STYLE = {
+        "useful": "green", "noisy": "yellow", "stale": "dim",
+        "wrong": "red", "missing-context": "blue",
+    }
+    style = _RATING_STYLE.get(rating, "bold")
+    console.print(
+        f"[{style}]✓[/{style}]  [{style}]{item_id}[/{style}] → "
+        f"[{style}]{rating}[/{style}]"
+        + (f"  [dim]({reason})[/dim]" if reason else "")
+    )
+
+
+@feedback_app.command("summary")
+def feedback_summary() -> None:
+    """Show a summary of all recorded feedback."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.feedback import get_feedback_summary
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+    s = get_feedback_summary(conn)
+
+    console.print()
+    console.print("[bold cyan]Feedback Summary[/bold cyan]")
+    console.print("─" * 44)
+
+    # Counts by rating
+    rating_table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    rating_table.add_column("Rating")
+    rating_table.add_column("Count", justify="right")
+
+    _STYLES = {
+        "useful": "green", "noisy": "yellow", "stale": "dim",
+        "wrong": "red", "missing-context": "blue",
+    }
+    for rating, count in s["counts_by_rating"].items():
+        style = _STYLES.get(rating, "")
+        rating_table.add_row(
+            f"[{style}]{rating}[/{style}]" if style else rating,
+            str(count),
+        )
+    rating_table.add_row("[dim]──────[/dim]", "[dim]─────[/dim]")
+    rating_table.add_row("[bold]Total[/bold]", f"[bold]{s['total']}[/bold]")
+    console.print(rating_table)
+
+    def _show_top(title: str, rows: list, col_a: str = "Source") -> None:
+        if not rows:
+            return
+        console.print()
+        console.print(f"[bold]{title}[/bold]")
+        t = Table(show_header=False, box=None, padding=(0, 2))
+        t.add_column(col_a, style="dim")
+        t.add_column("Count", justify="right")
+        for src, n in rows:
+            t.add_row(str(src), str(n))
+        console.print(t)
+
+    _show_top("Top noisy sources",   s["top_noisy_sources"])
+    _show_top("Top stale sources",   s["top_stale_sources"])
+    _show_top("Top wrong types",     s["top_wrong_types"],  col_a="Signal type")
+    _show_top("Useful item types",   s["useful_types"],     col_a="Item type")
+    console.print()
+
+
 if __name__ == "__main__":
     app()
 

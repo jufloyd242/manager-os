@@ -239,7 +239,21 @@ ALTER TABLE deals ADD COLUMN IF NOT EXISTS forecast_category VARCHAR;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS probability FLOAT;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS services_amount FLOAT;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS last_status_changed_date DATE;
-ALTER TABLE deals ADD COLUMN IF NOT EXISTS source_format VARCHAR
+ALTER TABLE deals ADD COLUMN IF NOT EXISTS source_format VARCHAR;
+CREATE TABLE IF NOT EXISTS feedback (
+    id           VARCHAR PRIMARY KEY,
+    item_id      VARCHAR NOT NULL,
+    item_type    VARCHAR NOT NULL,
+    rating       VARCHAR NOT NULL,
+    reason       VARCHAR,
+    source_path  VARCHAR,
+    entity_name  VARCHAR,
+    signal_type  VARCHAR,
+    created_at   TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS feedback_item_id_idx ON feedback (item_id);
+CREATE INDEX IF NOT EXISTS feedback_source_path_idx ON feedback (source_path);
+CREATE INDEX IF NOT EXISTS feedback_rating_idx ON feedback (rating)
 """
 
 _ALL_TABLES = [
@@ -260,6 +274,7 @@ _ALL_TABLES = [
     "meeting_prep",
     "extraction_failures",
     "signal_status_log",
+    "feedback",
 ]
 
 

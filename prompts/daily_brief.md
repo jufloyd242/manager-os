@@ -17,7 +17,7 @@ Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Waiting on: 
 {% if critical_signals %}
 ## Critical -- Act Now
 {% for s in critical_signals %}
-- **{{ s.entity_name }}** — {{ s.summary }}
+- [{{ s.brief_id }}] **{{ s.entity_name }}** — {{ s.summary }}
   - Why: {{ s.why_it_matters }}
 {% if s.due_date %}  - Due: {{ s.due_date }}
 {% endif %}  - Source: {{ s.source_path | readable_path }}
@@ -27,7 +27,7 @@ Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Waiting on: 
 {% if deal_signals %}
 ## Deals / Pipeline
 {% for s in deal_signals %}
-- **{{ s.entity_name }}** — {{ s.summary }}
+- [{{ s.brief_id }}] **{{ s.entity_name }}** — {{ s.summary }}
   - Why: {{ s.why_it_matters }}
 {% if s.due_date %}  - Due: {{ s.due_date }}
 {% endif %}  - Source: {{ s.source_path | readable_path }}
@@ -40,7 +40,7 @@ Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Waiting on: 
 {% if utilization_signals %}
 ## Capacity / Staffing
 {% for s in utilization_signals %}
-- **{{ s.entity_name }}** — {{ s.summary }}
+- [{{ s.brief_id }}] **{{ s.entity_name }}** — {{ s.summary }}
   - Why: {{ s.why_it_matters }}
 {% if s.source_path %}  - Source: {{ s.source_path | readable_path }}
 {% endif %}{% endfor %}
@@ -52,7 +52,7 @@ Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Waiting on: 
 {% if decisions %}
 ## Decisions Owed
 {% for d in decisions %}
-- **{{ d.entity_name or 'General' }}**: {{ d.description }}
+- [{{ d.brief_id }}] **{{ d.entity_name or 'General' }}**: {{ d.description }}
 {% if d.decision_date %}  - By: {{ d.decision_date }}
 {% endif %}{% endfor %}
 {% if overflow.decisions > 0 %}
@@ -63,7 +63,7 @@ Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Waiting on: 
 {% if risk_signals %}
 ## Top Risks
 {% for s in risk_signals %}
-- **{{ s.entity_name }}** — {{ s.summary }}
+- [{{ s.brief_id }}] **{{ s.entity_name }}** — {{ s.summary }}
   - Why: {{ s.why_it_matters }}
   - Source: {{ s.source_path | readable_path }}
 {% endfor %}
@@ -75,7 +75,7 @@ Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Waiting on: 
 {% if follow_ups %}
 ## Follow-ups You Owe
 {% for ai in follow_ups %}
-- [ ] {{ ai.description }}
+- [{{ ai.brief_id }}] {{ ai.description }}
 {% if ai.due_date %}  - By: {{ ai.due_date }}
 {% endif %}{% endfor %}
 {% if overflow.follow_ups > 0 %}
@@ -86,7 +86,7 @@ Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Waiting on: 
 {% if people_signals %}
 ## People
 {% for s in people_signals %}
-- **{{ s.entity_name }}** — {{ s.summary }}
+- [{{ s.brief_id }}] **{{ s.entity_name }}** — {{ s.summary }}
 {% if s.source_path %}  - Source: {{ s.source_path | readable_path }}
 {% endif %}{% endfor %}
 {% if overflow.people > 0 %}
@@ -108,7 +108,7 @@ Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Waiting on: 
 {% if other_action_items %}
 ## Waiting On / Others
 {% for ai in other_action_items %}
-- **{{ ai.assigned_to }}**: {{ ai.description }}
+- [{{ ai.brief_id }}] **{{ ai.assigned_to }}**: {{ ai.description }}
 {% if ai.due_date %}  - By: {{ ai.due_date }}
 {% endif %}{% endfor %}
 {% if overflow.waiting_on > 0 %}
@@ -119,7 +119,7 @@ Signals: {{ total_signals }} | Follow-ups: {{ total_follow_ups }} | Waiting on: 
 {% if other_signals %}
 ## Other Signals
 {% for s in other_signals %}
-- **[{{ s.signal_type }}] {{ s.entity_name }}** — {{ s.summary }}
+- [{{ s.brief_id }}] **[{{ s.signal_type }}] {{ s.entity_name }}** — {{ s.summary }}
   - Source: {{ s.source_path | readable_path }}
 {% endfor %}
 {% if overflow.other > 0 %}

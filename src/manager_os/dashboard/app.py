@@ -155,23 +155,45 @@ with tabs[0]:
             st.subheader(section_title)
             for s in section_signals:
                 badge = _SEVERITY_BADGE.get(s.severity, s.severity.upper())
+                brief_id = f"signal:{s.id[:16]}"
                 with st.expander(f"{badge} **{s.entity_name}** — {s.summary}", expanded=(s.severity == "critical")):
                     if s.why_it_matters:
                         st.markdown(f"*{s.why_it_matters}*")
-                    meta_cols = st.columns(3)
+                    meta_cols = st.columns(4)
                     meta_cols[0].caption(f"Type: `{s.signal_type}`")
                     meta_cols[1].caption(f"Source: `{s.source}`")
                     meta_cols[2].caption(f"Due: {s.due_date or 'none'}")
+                    meta_cols[3].caption(f"ID: `{brief_id}`")
 
-                    btn_cols = st.columns(3)
-                    if btn_cols[0].button("✓ Acknowledge", key=f"ack_{s.id}"):
-                        update_signal_status(conn, s.id, "acknowledged")
-                        st.cache_data.clear()
-                        st.rerun()
-                    if btn_cols[1].button("✕ Dismiss", key=f"dis_{s.id}"):
-                        update_signal_status(conn, s.id, "dismissed")
-                        st.cache_data.clear()
-                        st.rerun()
+                    st.caption("**Feedback:**")
+                    fb_cols = st.columns(7)
+                    _FB_RATINGS = [
+                        ("✅ Useful",           "useful",          "green"),
+                        ("🔇 Noisy",            "noisy",           "orange"),
+                        ("🕰️ Stale",            "stale",           "gray"),
+                        ("❌ Wrong",            "wrong",           "red"),
+                        ("🔍 Missing context",  "missing-context", "blue"),
+                        ("✓ Acknowledge",       None,              None),
+                        ("✕ Dismiss",           None,              None),
+                    ]
+                    for col_i, (label, fb_rating, _color) in enumerate(_FB_RATINGS):
+                        key = f"fb_{s.id}_{col_i}"
+                        if fb_cols[col_i].button(label, key=key):
+                            if fb_rating:
+                                try:
+                                    from manager_os.build.feedback import mark as fb_mark
+                                    fb_mark(conn, item_id=brief_id, rating=fb_rating,
+                                            source_path=s.source_path,
+                                            entity_name=s.entity_name,
+                                            signal_type=s.signal_type)
+                                except Exception:
+                                    pass
+                            elif label.startswith("✓"):
+                                update_signal_status(conn, s.id, "acknowledged")
+                            else:
+                                update_signal_status(conn, s.id, "dismissed")
+                            st.cache_data.clear()
+                            st.rerun()
 
     # Action items section
     if action_items:
