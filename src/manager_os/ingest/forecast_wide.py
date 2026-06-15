@@ -401,9 +401,10 @@ def parse_wide_forecast(csv_path: str) -> WideParseResult:
                 if col_idx >= len(row):
                     continue
                 cell = row.iloc[col_idx]
-                planned = _parse_float(str(cell).strip() if pd.notna(cell) else "")
-                if planned is None:
-                    continue
+                planned_raw = _parse_float(str(cell).strip() if pd.notna(cell) else "")
+                # A blank weekly cell means 0 planned hours — the engineer still
+                # has capacity for this week.  Do NOT skip; target must be counted.
+                planned = planned_raw if planned_raw is not None else 0.0
                 result.person_forecast.append(PersonForecastRecord(
                     source_section=current_section,
                     person_name=first_cell,

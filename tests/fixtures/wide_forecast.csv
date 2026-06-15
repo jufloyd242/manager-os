@@ -6,10 +6,10 @@ Jordan Lee,40,,,40,40,40,40,40,40
 Pipeline,Probability,Requested Alloc,Skillset,2026-06-16,2026-06-23,2026-06-30,2026-07-07,2026-07-14,Assignee
 Prospect Alpha Inc,0.8,20,ML Engineering,20,20,20,0,20,Alex/Jordan
 Prospect Beta Ltd,0.5,10,ML,10,10,10,10,0,?
-Total Demand,,,,30,30,30,10,20,
-Total Capacity,,,,80,80,40,80,80,
-Weekly Gap,,,,50,50,10,70,60,
-Team Utilization,,,,37%,37%,75%,12%,25%,
+Total Demand,,,,110,110,70,90,100,
+Total Capacity,,,,80,80,80,80,80,
+Weekly Gap,,,,-30,-30,10,-10,-20,
+Team Utilization,,,,137.5%,137.5%,87.5%,112.5%,125.0%,
 Hire Status,,,,green,green,green,green,green,
 ML,,,,,,,,,
 ,,,,2206-06-16,2026-06-23,2026-06-30,2026-07-07,2026-07-14,
@@ -17,8 +17,8 @@ Engineer,Target,,,2206-06-16,2026-06-23,2026-06-30,2026-07-07,2026-07-14,Average
 Sam Chen,40,,,40,40,40,40,40,40
 Pipeline,Probability,Requested Alloc,Skillset,2206-06-16,2026-06-23,2026-06-30,2026-07-07,2026-07-14,Assignee
 Deal Corp SOW,0.9,30,ML,0,30,30,30,30,Sam
-Total Demand,,,,0,30,30,30,30,
+Total Demand,,,,40,70,70,70,70,
 Total Capacity,,,,40,40,40,40,40,
-Weekly Gap,,,,40,10,10,10,10,
-Team Utilization,,,,0%,75%,75%,75%,75%,
+Weekly Gap,,,,0,-30,-30,-30,-30,
+Team Utilization,,,,100.0%,175.0%,175.0%,175.0%,175.0%,
 Hire Status,,,,green,green,green,green,green,

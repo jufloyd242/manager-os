@@ -1,0 +1,12 @@
+ML,,,,,,,
+,,,,2026-07-07,2026-07-14,2026-07-21,2026-07-28,
+Engineer,Target,,,2026-07-07,2026-07-14,2026-07-21,2026-07-28,
+Eng Alpha,40,,,40,40,,
+Eng Beta,40,,,40,40,40,40,
+Pipeline,Probability,Allocation,Skillset,2026-07-07,2026-07-14,2026-07-21,2026-07-28,Candidate Engineer(s)
+Deal X,0.8,20,ML,20,20,20,20,Eng Alpha
+Total Demand,,,,100,100,60,60,
+Total Capacity,,,,80,80,80,80,
+Weekly Gap,,,,-20,-20,20,20,
+Team Utilization,,,,125.0%,125.0%,75.0%,75.0%,
+Hire Status,,,,NO HIRE,NO HIRE,NO HIRE,NO HIRE,

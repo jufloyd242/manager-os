@@ -1064,3 +1064,109 @@ class TestMetricComparison:
         mismatch_issues = [i for i in result.issues if i.issue_type == "metric_mismatch"]
         assert mismatch_issues == [], mismatch_issues
 
+
+# ===========================================================================
+# Capacity calculation with blank (zero) planned-hours weeks
+# ===========================================================================
+
+class TestCapacityCalculation:
+    """Verify Total Capacity counts all engineers regardless of planned_hours.
+
+    Fixture: wide_forecast_blank_capacity.csv
+    - ML section, two engineers (Eng Alpha target=40, Eng Beta target=40)
+    - Eng Alpha has blank cells (0 planned) for weeks 7/21 and 7/28
+    - Eng Beta has 40 planned for all four weeks
+    - Total Capacity must be 80 for every week (including blank-Alpha weeks)
+    """
+
+    BLANK = FIXTURES / "wide_forecast_blank_capacity.csv"
+
+    def test_detected_as_wide(self) -> None:
+        from manager_os.ingest.forecast_wide import is_wide_format
+        assert is_wide_format(str(self.BLANK)) is True
+
+    def test_capacity_includes_zero_planned_engineer(self) -> None:
+        """Total Capacity = sum of Target, not sum of planned hours."""
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        from datetime import date
+        pr = parse_wide_forecast(str(self.BLANK))
+        # Week 7/21: Eng Alpha blank (→0 planned), Eng Beta=40; both Targets=40
+        # calc_capacity must be 80, not 40
+        cap_mismatches = [
+            m for m in pr.metric_mismatches if m.metric_name == "total_capacity"
+        ]
+        assert cap_mismatches == [], (
+            f"total_capacity mismatches when one engineer has blank planned cells: "
+            f"{cap_mismatches}"
+        )
+
+    def test_no_metric_mismatches(self) -> None:
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.BLANK))
+        assert pr.metric_mismatches == [], pr.metric_mismatches
+
+    def test_person_forecast_record_created_for_blank_cell(self) -> None:
+        """A blank weekly cell should still produce a PersonForecastRecord with planned=0."""
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        from datetime import date
+        pr = parse_wide_forecast(str(self.BLANK))
+        alpha_rows = [
+            r for r in pr.person_forecast
+            if r.person_name == "Eng Alpha" and r.week_start == date(2026, 7, 21)
+        ]
+        assert len(alpha_rows) == 1, "Blank cell must still create a PersonForecastRecord"
+        assert alpha_rows[0].planned_hours == 0.0
+        assert alpha_rows[0].target_hours == 40.0
+
+    def test_zero_planned_does_not_remove_engineer_from_capacity(self) -> None:
+        """Eng Alpha rows with planned=0 must still contribute target=40 to capacity."""
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        from datetime import date
+        pr = parse_wide_forecast(str(self.BLANK))
+        # All four weeks should have person_forecast records for Eng Alpha
+        alpha_weeks = {
+            r.week_start for r in pr.person_forecast if r.person_name == "Eng Alpha"
+        }
+        expected_weeks = {
+            date(2026, 7, 7), date(2026, 7, 14), date(2026, 7, 21), date(2026, 7, 28)
+        }
+        assert alpha_weeks == expected_weeks
+
+    def test_weekly_gap_uses_full_capacity(self) -> None:
+        """Weekly gap must use full capacity (80) even for blank-planned-hours weeks."""
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.BLANK))
+        gap_mismatches = [
+            m for m in pr.metric_mismatches if m.metric_name == "weekly_gap"
+        ]
+        assert gap_mismatches == [], (
+            f"weekly_gap mismatches: {gap_mismatches}"
+        )
+
+    def test_zero_planned_hours_not_warning_issue(self) -> None:
+        """planned_hours=0 (blank cell) must not produce any warning-level RowIssue."""
+        result = profile_forecast_csv(str(self.BLANK))
+        for issue in result.issues:
+            assert issue.issue_type not in (
+                "zero_allocation", "missing_allocation"
+            ), f"Unexpected warning issue for zero/blank planned hours: {issue}"
+
+    def test_no_metric_mismatch_issues_in_profile(self) -> None:
+        """After fix, blank-capacity fixture must produce zero metric_mismatch RowIssues."""
+        result = profile_forecast_csv(str(self.BLANK))
+        mismatch_issues = [i for i in result.issues if i.issue_type == "metric_mismatch"]
+        assert mismatch_issues == [], mismatch_issues
+
+    def test_capacity_summary_metric_parsed_correctly(self) -> None:
+        """Total Capacity summary rows should be 80 for all 4 weeks."""
+        from manager_os.ingest.forecast_wide import parse_wide_forecast
+        pr = parse_wide_forecast(str(self.BLANK))
+        cap_rows = [
+            sm for sm in pr.summary_metrics if sm.metric_name == "total_capacity"
+        ]
+        assert len(cap_rows) == 4
+        for row in cap_rows:
+            assert row.metric_value == 80.0, (
+                f"Expected total_capacity=80, got {row.metric_value} for week {row.week_start}"
+            )
+
