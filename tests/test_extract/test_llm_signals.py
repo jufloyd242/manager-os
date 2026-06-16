@@ -119,33 +119,35 @@ def test_unavailable_when_llm_disabled(conn) -> None:
 # ------------------------------------------------------------------
 
 
-def _seed_note(conn, body: str, entity_name: str = "Alice Chen") -> None:
+def _seed_raw_document(conn, source_path: str = "notes/2024-01-01.md", metadata: dict | None = None) -> str:
+    import uuid
+
+    if metadata is None:
+        metadata = {"source_tier": "signal"}
+    raw_id = str(uuid.uuid4())
+    conn.execute(
+        """INSERT INTO raw_documents (id, ingested_at, source_type, source_path,
+                                      content_hash, content, metadata)
+           VALUES (?, CURRENT_TIMESTAMP, 'obsidian', ?, 'hash', '', ?)""",
+        [raw_id, source_path, json.dumps(metadata)],
+    )
+    return raw_id
+
+
+def _seed_note(conn, raw_document_id: str, body: str, entity_name: str = "Alice Chen") -> None:
     import uuid
 
     conn.execute(
         """INSERT INTO notes (id, raw_document_id, note_date, note_type, entity_type,
                               entity_name, title, body, tags, created_at)
-           VALUES (?, 'raw', ?, '1on1', 'person', ?, 'Note', ?, '[]', CURRENT_TIMESTAMP)""",
-        [str(uuid.uuid4()), date.today().isoformat(), entity_name, body],
-    )
-
-
-def _seed_raw_document(conn, source_path: str = "notes/2024-01-01.md", metadata: dict | None = None) -> None:
-    import uuid
-
-    if metadata is None:
-        metadata = {"source_tier": "signal"}
-    conn.execute(
-        """INSERT INTO raw_documents (id, ingested_at, source_type, source_path,
-                                      content_hash, content, metadata)
-           VALUES (?, CURRENT_TIMESTAMP, 'obsidian', ?, 'hash', '', ?)""",
-        [str(uuid.uuid4()), source_path, json.dumps(metadata)],
+           VALUES (?, ?, ?, '1on1', 'person', ?, 'Note', ?, '[]', CURRENT_TIMESTAMP)""",
+        [str(uuid.uuid4()), raw_document_id, date.today().isoformat(), entity_name, body],
     )
 
 
 def test_run_llm_extraction_writes_signals(conn) -> None:
-    _seed_raw_document(conn)
-    _seed_note(conn, "Alice is blocked on Acme data access. Risk of delay on pipeline milestone.")
+    raw_id = _seed_raw_document(conn)
+    _seed_note(conn, raw_id, "Alice is blocked on Acme data access. Risk of delay on pipeline milestone.")
     mock_response = json.dumps([_valid_signal(
         signal_type="blocker",
         summary="Alice is blocked on Acme data access.",
@@ -162,8 +164,8 @@ def test_run_llm_extraction_writes_signals(conn) -> None:
 
 
 def test_run_llm_extraction_idempotent(conn) -> None:
-    _seed_raw_document(conn)
-    _seed_note(conn, "Risk on Acme project delivery.")
+    raw_id = _seed_raw_document(conn)
+    _seed_note(conn, raw_id, "Risk on Acme project delivery.")
     mock_response = json.dumps([_valid_signal(
         entity_type="client",
         entity_name="Acme Corp",
@@ -180,8 +182,8 @@ def test_run_llm_extraction_idempotent(conn) -> None:
 
 
 def test_run_llm_extraction_empty_response(conn) -> None:
-    _seed_raw_document(conn)
-    _seed_note(conn, "All good today, no issues noted.")
+    raw_id = _seed_raw_document(conn)
+    _seed_note(conn, raw_id, "All good today, no issues noted.")
     with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
          patch("manager_os.llm.gemini_cli.generate", return_value="[]"):
         result = run_llm_extraction(conn)
@@ -189,8 +191,8 @@ def test_run_llm_extraction_empty_response(conn) -> None:
 
 
 def test_run_llm_extraction_logs_failure_on_bad_response(conn) -> None:
-    _seed_raw_document(conn)
-    _seed_note(conn, "Something is wrong with this client.")
+    raw_id = _seed_raw_document(conn)
+    _seed_note(conn, raw_id, "Something is wrong with this client.")
     with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
          patch("manager_os.llm.gemini_cli.generate", return_value="This is not JSON at all !!!"):
         result = run_llm_extraction(conn)
@@ -207,3 +209,115 @@ def test_run_llm_extraction_empty_db(conn) -> None:
         result = run_llm_extraction(conn)
     assert result.written == 0
     assert result.failed == 0
+
+
+def test_run_llm_extraction_limit_limits_candidates(conn) -> None:
+    """--llm-limit should cap the number of notes sent to the LLM."""
+    for i in range(5):
+        raw_id = _seed_raw_document(conn, source_path=f"notes/note-{i}.md")
+        _seed_note(conn, raw_id, f"Risk {i}.", entity_name=f"Person {i}")
+    mock_response = json.dumps([_valid_signal()])
+    with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
+         patch("manager_os.llm.gemini_cli.generate", return_value=mock_response) as gen_mock:
+        result = run_llm_extraction(conn, max_candidates=2)
+    assert result.candidates_considered == 2
+    assert gen_mock.call_count == 2
+
+
+def test_run_llm_extraction_source_path_filter(conn) -> None:
+    """--llm-source-path should only process matching notes."""
+    raw_alice = _seed_raw_document(conn, source_path="work/alice.md")
+    _seed_note(conn, raw_alice, "Alice risk.", entity_name="Alice")
+    raw_bob = _seed_raw_document(conn, source_path="work/bob.md")
+    _seed_note(conn, raw_bob, "Bob risk.", entity_name="Bob")
+    mock_response = json.dumps([_valid_signal()])
+    with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
+         patch("manager_os.llm.gemini_cli.generate", return_value=mock_response) as gen_mock:
+        result = run_llm_extraction(conn, source_path_filter="alice")
+    assert result.candidates_considered == 1
+    assert gen_mock.call_count == 1
+
+
+def test_run_llm_extraction_note_id_filter(conn) -> None:
+    """--llm-note-id should only process the matching note."""
+    import uuid
+
+    raw_target = _seed_raw_document(conn, source_path="work/target.md")
+    target_id = str(uuid.uuid4())
+    conn.execute(
+        """INSERT INTO notes (id, raw_document_id, note_date, note_type, entity_type,
+                              entity_name, title, body, tags, created_at)
+           VALUES (?, ?, ?, '1on1', 'person', ?, 'Note', ?, '[]', CURRENT_TIMESTAMP)""",
+        [target_id, raw_target, date.today().isoformat(), "Target", "Target risk."],
+    )
+    raw_other = _seed_raw_document(conn, source_path="work/other.md")
+    _seed_note(conn, raw_other, "Other risk.", entity_name="Other")
+    mock_response = json.dumps([_valid_signal()])
+    with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
+         patch("manager_os.llm.gemini_cli.generate", return_value=mock_response) as gen_mock:
+        result = run_llm_extraction(conn, note_id=target_id)
+    assert result.candidates_considered == 1
+    assert gen_mock.call_count == 1
+
+
+def test_run_llm_extraction_since_days_filter(conn) -> None:
+    """--llm-since-days should only process recent notes."""
+    from datetime import timedelta
+
+    old_date = (date.today() - timedelta(days=30)).isoformat()
+    recent_date = (date.today() - timedelta(days=2)).isoformat()
+
+    raw_old = _seed_raw_document(conn, source_path="work/old.md")
+    conn.execute(
+        """INSERT INTO notes (id, raw_document_id, note_date, note_type, entity_type,
+                              entity_name, title, body, tags, created_at)
+           VALUES ('old-id', ?, ?, '1on1', 'person', ?, 'Note', ?, '[]', CURRENT_TIMESTAMP)""",
+        [raw_old, old_date, "Old", "Old risk."],
+    )
+    raw_recent = _seed_raw_document(conn, source_path="work/recent.md")
+    conn.execute(
+        """INSERT INTO notes (id, raw_document_id, note_date, note_type, entity_type,
+                              entity_name, title, body, tags, created_at)
+           VALUES ('recent-id', ?, ?, '1on1', 'person', ?, 'Note', ?, '[]', CURRENT_TIMESTAMP)""",
+        [raw_recent, recent_date, "Recent", "Recent risk."],
+    )
+    mock_response = json.dumps([_valid_signal()])
+    with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
+         patch("manager_os.llm.gemini_cli.generate", return_value=mock_response) as gen_mock:
+        result = run_llm_extraction(conn, since_days=7)
+    assert result.candidates_considered == 1
+    assert gen_mock.call_count == 1
+
+
+def test_run_llm_extraction_progress_callback(conn) -> None:
+    """Progress callback should receive stage and candidate events."""
+    raw_id = _seed_raw_document(conn)
+    _seed_note(conn, raw_id, "Risk note.")
+    events = []
+
+    def _cb(event, payload):
+        events.append((event, payload))
+
+    mock_response = json.dumps([_valid_signal()])
+    with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
+         patch("manager_os.llm.gemini_cli.generate", return_value=mock_response):
+        run_llm_extraction(conn, progress_callback=_cb)
+
+    event_names = {e[0] for e in events}
+    assert "stage_start" in event_names
+    assert "stage_end" in event_names
+    assert "candidate_start" in event_names
+    assert "candidate_end" in event_names
+
+
+def test_run_llm_extraction_unlimited_when_limit_zero(conn) -> None:
+    """max_candidates=None should process all available signal notes."""
+    for i in range(5):
+        raw_id = _seed_raw_document(conn, source_path=f"notes/note-{i}.md")
+        _seed_note(conn, raw_id, f"Risk {i}.", entity_name=f"Person {i}")
+    mock_response = json.dumps([_valid_signal()])
+    with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
+         patch("manager_os.llm.gemini_cli.generate", return_value=mock_response) as gen_mock:
+        result = run_llm_extraction(conn, max_candidates=None)
+    assert result.candidates_considered == 5
+    assert gen_mock.call_count == 5

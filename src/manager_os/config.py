@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     config_dir: str = "./config"
     gemini_model: str = "gemini-2.0-flash"
 
+    # LLM extraction (Gemini CLI provider)
+    llm_enabled: bool = True
+    llm_provider: str = "gemini_cli"
+    gemini_cli_bin: str = "gemini"
+    gemini_cli_model: str = "gemini-2.0-flash"
+    gemini_cli_timeout_seconds: int = 120
+    gemini_cli_workdir: str = ""
+    llm_max_candidates: int = 25
+    llm_max_chars_per_note: int = 6000
+
 
 def get_settings() -> Settings:
     return Settings()

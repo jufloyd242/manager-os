@@ -312,7 +312,15 @@ def _do_dry_run_ingest(
     console.print()
 
 
-def _do_dry_run_extract(settings, run_date: "date", mode: str) -> None:
+def _do_dry_run_extract(
+    settings,
+    run_date: "date",
+    mode: str,
+    llm_limit: int | None = None,
+    llm_source_path: Optional[str] = None,
+    llm_note_id: Optional[str] = None,
+    llm_since_days: Optional[int] = None,
+) -> None:
     """Print a dry-run preview for extract — copies notes to in-memory DB,
     runs extraction there, reports counts. The real DB is never written."""
     import duckdb as _duckdb
@@ -377,6 +385,15 @@ def _do_dry_run_extract(settings, run_date: "date", mode: str) -> None:
     )
     console.print(f"  [dim]Date:[/dim]   {run_date}")
     console.print(f"  [dim]Notes:[/dim]  {note_count} note(s) in database")
+    if mode in ("llm", "both"):
+        limit_str = str(llm_limit) if llm_limit is not None else "unlimited"
+        console.print(f"  [dim]LLM limit:[/dim] {limit_str}")
+        if llm_source_path:
+            console.print(f"  [dim]LLM source path:[/dim] {llm_source_path}")
+        if llm_note_id:
+            console.print(f"  [dim]LLM note id:[/dim] {llm_note_id}")
+        if llm_since_days:
+            console.print(f"  [dim]LLM since days:[/dim] {llm_since_days}")
     console.print()
 
     tbl = Table(
@@ -403,6 +420,27 @@ def _do_dry_run_extract(settings, run_date: "date", mode: str) -> None:
             str(result.failed),
         )
         _step_results.append(("signals (rules)", result))
+
+    if mode in ("llm", "both"):
+        from manager_os.extract.llm_signals import run_llm_extraction, LLMExtractionUnavailable
+        try:
+            llm_result = run_llm_extraction(
+                mem_conn,
+                run_date=run_date,
+                max_candidates=llm_limit,
+                source_path_filter=llm_source_path,
+                note_id=llm_note_id,
+                since_days=llm_since_days,
+            )
+            tbl.add_row(
+                "signals (llm)",
+                str(llm_result.written),
+                str(llm_result.skipped),
+                str(llm_result.failed),
+            )
+            _step_results.append(("signals (llm)", llm_result))
+        except LLMExtractionUnavailable as exc:
+            console.print(f"[yellow]LLM extraction skipped: {exc}[/yellow]")
 
     ai_result = extract_action_items_from_all_notes(mem_conn)
     tbl.add_row(
@@ -610,8 +648,42 @@ def extract(
         "--dry-run",
         help="Preview what would be extracted without writing to the database.",
     ),
+    progress: bool = typer.Option(
+        True,
+        "--progress/--no-progress",
+        help="Show live progress output during extraction.",
+    ),
+    llm_limit: Optional[int] = typer.Option(
+        None,
+        "--llm-limit",
+        help="Maximum notes to send to the LLM. 0 means unlimited. "
+             "Defaults to MANAGER_OS_LLM_MAX_CANDIDATES or 25.",
+    ),
+    llm_timeout_seconds: Optional[int] = typer.Option(
+        None,
+        "--llm-timeout-seconds",
+        help="Per-note LLM timeout. Defaults to MANAGER_OS_GEMINI_CLI_TIMEOUT_SECONDS or 120.",
+    ),
+    llm_source_path: Optional[str] = typer.Option(
+        None,
+        "--llm-source-path",
+        help="Only send notes whose source_path contains this substring to the LLM.",
+    ),
+    llm_note_id: Optional[str] = typer.Option(
+        None,
+        "--llm-note-id",
+        help="Only send the note with this exact id to the LLM.",
+    ),
+    llm_since_days: Optional[int] = typer.Option(
+        None,
+        "--llm-since-days",
+        help="Only send notes newer than this many days to the LLM.",
+    ),
 ) -> None:
     """Extract signals and action items from ingested documents."""
+    import os as _os
+    import time as _time
+
     from manager_os.config import get_settings
     from manager_os.db import get_connection
     from manager_os.extract.signals import run_rule_extraction
@@ -625,8 +697,27 @@ def extract(
     settings = get_settings()
     run_date = date.fromisoformat(extract_date) if extract_date else date.today()
 
+    # Resolve LLM limit: CLI > env > default. 0 means unlimited.
+    effective_llm_limit: int | None
+    if llm_limit is not None:
+        effective_llm_limit = llm_limit if llm_limit != 0 else None
+    else:
+        effective_llm_limit = int(
+            _os.environ.get("MANAGER_OS_LLM_MAX_CANDIDATES", "25")
+        )
+    if llm_limit is not None and llm_limit == 0:
+        console.print("[yellow]⚠ --llm-limit 0 selected — LLM candidates are unlimited.[/yellow]")
+
     if dry_run:
-        _do_dry_run_extract(settings, run_date, mode)
+        _do_dry_run_extract(
+            settings,
+            run_date,
+            mode,
+            llm_limit=effective_llm_limit,
+            llm_source_path=llm_source_path,
+            llm_note_id=llm_note_id,
+            llm_since_days=llm_since_days,
+        )
         return
 
     conn = get_connection(settings.db_path)
@@ -637,6 +728,8 @@ def extract(
         console.print("[red]No notes found in the database. Run 'manager-os ingest' first.[/red]")
         raise typer.Exit(1)
 
+    console.print(f"[dim]Extracting from {doc_count} note(s) — {run_date}[/dim]")
+
     table = Table(title=f"Extraction results — {run_date}", show_header=True)
     table.add_column("Step", style="cyan")
     table.add_column("Written", justify="right", style="green")
@@ -646,14 +739,49 @@ def extract(
     _step_results: list[tuple[str, object]] = []
 
     if mode in ("rules", "both"):
+        stage_start = _time.monotonic()
+        console.print("[dim]  → Running rule-based signal extraction...[/dim]") if progress else None
         result = run_rule_extraction(conn, run_date=run_date)
+        if progress:
+            console.print(
+                f"[dim]  ← Rule extraction complete in "
+                f"{_time.monotonic() - stage_start:.2f}s "
+                f"(written={result.written}, skipped={result.skipped}, failed={result.failed})[/dim]"
+            )
         table.add_row("signals (rules)", str(result.written), str(result.skipped), str(result.failed))
         _step_results.append(("signals (rules)", result))
 
     if mode in ("llm", "both"):
         from manager_os.extract.llm_signals import run_llm_extraction, LLMExtractionUnavailable
         try:
-            llm_result = run_llm_extraction(conn, run_date=run_date)
+            def _progress_cb(event: str, payload: dict) -> None:
+                if not progress:
+                    return
+                if event == "stage_start":
+                    console.print(f"[dim]  → {payload.get('message', payload.get('stage'))}[/dim]")
+                elif event == "candidate_start":
+                    idx = payload.get("index", 0)
+                    total = payload.get("total", 0)
+                    path = payload.get("source_path", "")
+                    console.print(f"[dim]    [{idx}/{total}] LLM candidate: {path}[/dim]")
+                elif event == "stage_end" and payload.get("stage") == "llm_extraction":
+                    elapsed = payload.get("elapsed_seconds", 0.0)
+                    console.print(
+                        f"[dim]  ← LLM extraction complete in {elapsed:.2f}s "
+                        f"(written={payload.get('written')}, skipped={payload.get('skipped')}, "
+                        f"failed={payload.get('failed')})[/dim]"
+                    )
+
+            llm_result = run_llm_extraction(
+                conn,
+                run_date=run_date,
+                max_candidates=effective_llm_limit,
+                timeout_seconds=llm_timeout_seconds,
+                source_path_filter=llm_source_path,
+                note_id=llm_note_id,
+                since_days=llm_since_days,
+                progress_callback=_progress_cb,
+            )
             table.add_row("signals (llm)", str(llm_result.written), str(llm_result.skipped), str(llm_result.failed))
             _step_results.append(("signals (llm)", llm_result))
         except LLMExtractionUnavailable as exc:
