@@ -48,6 +48,7 @@ def _env(db_path: str, *, vault: str = "") -> dict[str, str]:
         "MANAGER_OS_WORKSPACE_SUMMARY_DIR": str(FIXTURES / "summaries"),
         "MANAGER_OS_GWS_SNAPSHOT_DIR": str(FIXTURES / "gws_snapshots"),
         "MANAGER_OS_CONFIG_DIR": str(REPO_ROOT / "config"),
+        "MANAGER_OS_WORKSPACE_RETRIEVAL_ENABLED": "true",
     }
 
 
@@ -374,3 +375,64 @@ class TestExtractNormalBehaviorUnchanged:
         # After real extract, signals may exist (depends on fixture content)
         # The key invariant: dry-run did not pre-write or corrupt anything.
         # We verify by checking no exception was raised above.
+
+
+# ---------------------------------------------------------------------------
+# Ingest workspace --dry-run
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceDryRun:
+    """Dry-run for --source workspace."""
+
+    def test_workspace_source_in_help(self, tmp_path: Path) -> None:
+        db = str(tmp_path / "manager_os.duckdb")
+        result = _run("ingest", "--help", db_path=db)
+        assert "workspace" in result.output.lower()
+
+    def test_dry_run_exits_0(self, tmp_path: Path) -> None:
+        db = str(tmp_path / "manager_os.duckdb")
+        result = _run("ingest", "--source", "workspace", "--dry-run", db_path=db)
+        assert result.exit_code == 0, result.output
+
+    def test_dry_run_shows_workspace_rows(self, tmp_path: Path) -> None:
+        db = str(tmp_path / "manager_os.duckdb")
+        result = _run("ingest", "--source", "workspace", "--dry-run", db_path=db)
+        assert "ws-" in result.output.lower()
+
+    def test_dry_run_writes_nothing(self, tmp_path: Path) -> None:
+        db = str(tmp_path / "manager_os.duckdb")
+        _run("ingest", "--source", "workspace", "--dry-run", db_path=db)
+        assert not Path(db).exists()
+
+    def test_workspace_source_accepted_by_ingest(self, tmp_path: Path) -> None:
+        """Normal ingest with --source workspace should work when snapshots exist."""
+        db = str(tmp_path / "manager_os.duckdb")
+        from pathlib import Path as _Path
+        # Create a mock forecast snapshot so the ingest has something to read
+        import json as _json
+        from datetime import date as _date
+        snap_dir = _Path("data/raw/workspace_snapshots/forecast")
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        snap_file = snap_dir / f"{_date.today().isoformat()}.json"
+        snap_file.write_text(_json.dumps({
+            "ok": True,
+            "rows": [
+                {"person": "Test Person", "week_start": _date.today().isoformat(),
+                 "allocation_pct": 100, "project": "Test", "client": "TestCo"}
+            ]
+        }))
+        try:
+            result = _run("ingest", "--source", "workspace", db_path=db)
+            assert result.exit_code == 0, result.output
+            assert _row_count(db, "staffing_forecast") == 1
+        finally:
+            # Clean up the test snapshot
+            if snap_file.exists():
+                snap_file.unlink()
+                try:
+                    snap_file.parent.rmdir()
+                    snap_file.parent.parent.rmdir()
+                    snap_file.parent.parent.parent.rmdir()
+                except OSError:
+                    pass

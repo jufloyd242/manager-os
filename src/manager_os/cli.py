@@ -305,6 +305,9 @@ def _do_dry_run_ingest(
         new, dup, warns = _scan_gws_dry(settings.gws_snapshot_dir)
         tbl.add_row("gws", str(new), str(dup), "; ".join(warns))
 
+    if source in ("all", "workspace"):
+        _add_workspace_dry_run_rows(tbl, target_date)
+
     if ro_conn is not None:
         ro_conn.close()
 
@@ -314,6 +317,99 @@ def _do_dry_run_ingest(
         "[yellow bold]⚠  Dry run — nothing was written to the database.[/yellow bold]"
     )
     console.print()
+
+
+def _add_workspace_dry_run_rows(tbl: Table, target_date: "date") -> None:
+    """Add dry-run rows for workspace snapshot sources."""
+    from manager_os.ingest.workspace_snapshot import _snapshot_exists
+
+    subs = [
+        ("ws-forecast", "forecast"),
+        ("ws-calendar", "calendar"),
+        ("ws-activity", "activity"),
+    ]
+    for label, subdir in subs:
+        exists = _snapshot_exists(subdir, target_date)
+        if exists:
+            tbl.add_row(label, "1", "0", "snapshot found")
+        else:
+            tbl.add_row(label, "—", "—", f"no snapshot for {target_date}")
+
+
+def _do_workspace_ingest(
+    conn,
+    settings,
+    target_date: "date",
+    force: bool = False,
+    fetch: bool = False,
+) -> "object":
+    """Run workspace snapshot ingestion.
+
+    If *fetch* is True, first retrieves fresh data from Google Workspace
+    via Gemini CLI YOLO mode, then ingests the resulting snapshots.
+    Without *fetch*, only reads pre-existing snapshot files.
+    """
+    import os as _os
+
+    from manager_os.ingest.workspace_snapshot import (
+        IngestResult,
+        ingest_workspace_forecast_snapshot,
+        ingest_workspace_calendar_snapshot,
+        ingest_workspace_activity_snapshot,
+    )
+
+    # Safety check
+    if not _os.environ.get("MANAGER_OS_WORKSPACE_RETRIEVAL_ENABLED", "false").lower() in ("true", "yes", "1"):
+        result = IngestResult()
+        result.errors.append(
+            "Workspace retrieval is disabled. Set MANAGER_OS_WORKSPACE_RETRIEVAL_ENABLED=true in .env."
+        )
+        return result
+
+    if fetch:
+        console.print("[dim]  → Fetching workspace data via Gemini CLI…[/dim]")
+        try:
+            _run_workspace_fetch(target_date)
+        except Exception as exc:
+            result = IngestResult()
+            result.errors.append(f"Workspace fetch failed: {exc}")
+            return result
+
+    result = IngestResult()
+
+    for label, fn in [
+        ("forecast", ingest_workspace_forecast_snapshot),
+        ("calendar", ingest_workspace_calendar_snapshot),
+        ("activity", ingest_workspace_activity_snapshot),
+    ]:
+        r = fn(conn, target_date, force=force)
+        result.ingested += r.ingested
+        result.skipped += r.skipped
+        result.failed += r.failed
+        result.errors.extend(r.errors)
+
+    return result
+
+
+def _run_workspace_fetch(target_date: "date") -> None:
+    """Run workspace fetch-all via Gemini CLI. Raises on failure."""
+    from manager_os.ingest.workspace_gemini import (
+        retrieve_forecast,
+        retrieve_calendar,
+        retrieve_activity,
+    )
+
+    for label, fn in [
+        ("forecast", retrieve_forecast),
+        ("calendar", retrieve_calendar),
+        ("activity", retrieve_activity),
+    ]:
+        console.print(f"[dim]    Fetching {label}…[/dim]")
+        r = fn(target_date, use_yolo=True)
+        if not r.ok:
+            console.print(f"[yellow]    ⚠ {label}: {r.error}[/yellow]")
+        else:
+            console.print(f"[dim]    ✓ {label}: {len(r.items)} item(s) → {r.written_to}[/dim]")
 
 
 def _do_dry_run_extract(
@@ -484,7 +580,7 @@ def ingest(
     source: str = typer.Option(
         "all",
         "--source",
-        help="Source to ingest: all | obsidian | forecast | deals | summary",
+        help="Source to ingest: all | obsidian | forecast | deals | summary | gws | workspace",
     ),
     ingest_date: Optional[str] = typer.Option(
         None,
@@ -507,6 +603,11 @@ def ingest(
         "--dry-run",
         help="Preview what would be ingested without writing to the database.",
     ),
+    workspace_fetch: bool = typer.Option(
+        False,
+        "--fetch",
+        help="When ingesting workspace, first retrieve fresh data from Google Workspace via Gemini CLI.",
+    ),
 ) -> None:
     """Ingest data from configured sources into DuckDB."""
     from manager_os.config import (
@@ -522,10 +623,13 @@ def ingest(
     settings = get_settings()
     target_date = date.fromisoformat(ingest_date) if ingest_date else date.today()
 
-    valid_sources = {"all", "obsidian", "forecast", "deals", "summary", "gws"}
+    valid_sources = {"all", "obsidian", "forecast", "deals", "summary", "gws", "workspace"}
     if source not in valid_sources:
         console.print(f"[red]Unknown source '{source}'. Must be one of: {', '.join(sorted(valid_sources))}[/red]")
         raise typer.Exit(1)
+
+    if workspace_fetch and source not in ("all", "workspace"):
+        console.print("[yellow]--fetch only applies to --source workspace or all. Ignored.[/yellow]")
 
     if dry_run:
         _do_dry_run_ingest(source, target_date, settings)
@@ -561,6 +665,7 @@ def ingest(
     run_deals = source in ("all", "deals")
     run_summary = source in ("all", "summary")
     run_gws = source in ("all", "gws")
+    run_workspace = source in ("all", "workspace")
 
     had_error = False
     _source_results: list[tuple[str, object]] = []
@@ -622,6 +727,16 @@ def ingest(
                                  target_date=target_date, force=force)
         table.add_row("gws", str(r.ingested), "0", str(r.skipped), str(r.failed))
         _source_results.append(("gws", r))
+        if r.failed:
+            had_error = True
+
+    if run_workspace:
+        r = _do_workspace_ingest(conn, settings, target_date, force=force, fetch=workspace_fetch)
+        table.add_row("workspace", str(r.ingested), "0", str(r.skipped), str(r.failed))
+        _source_results.append(("workspace", r))
+        if r.errors:
+            for err in r.errors[:10]:
+                console.print(f"  [yellow]⚠ workspace:[/yellow] {err}")
         if r.failed:
             had_error = True
 
