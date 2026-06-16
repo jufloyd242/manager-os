@@ -236,17 +236,71 @@ class ExtractionResult:
 
 
 # ------------------------------------------------------------------
-# Rule 1: risk keyword in note body → client/deal/person risk signal
+# Source tier filtering
+# ------------------------------------------------------------------
+
+def _note_source_tier(conn, raw_document_id: str | None, source_path: str, vault_root: str = "") -> str:
+    """Return the source_tier ('signal','context','excluded') for a note.
+
+    Checks stored metadata first, falls back to classify_source on the fly.
+    The *vault_root* env var MANAGER_OS_VAULT_PATH is used if not passed explicitly.
+    """
+    if not raw_document_id:
+        return "signal"
+    if not vault_root:
+        import os
+        vault_root = os.environ.get("MANAGER_OS_VAULT_PATH", "")
+
+    # Try stored metadata
+    try:
+        row = conn.execute(
+            "SELECT metadata FROM raw_documents WHERE id = ?", [raw_document_id]
+        ).fetchone()
+        if row and row[0]:
+            meta = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+            tier = meta.get("source_tier", "")
+            if tier in ("signal", "context", "excluded"):
+                return tier
+    except Exception:
+        pass
+
+    # Fallback: classify on the fly
+    try:
+        from manager_os.scope import classify_source, load_source_scope
+        config = load_source_scope()
+        result = classify_source(source_path=source_path, vault_root=vault_root, config=config)
+        return result.source_tier
+    except Exception:
+        return "signal"
+
+
+def _should_skip_for_extraction(tier: str, mode: str = "signal") -> bool:
+    """Return True when a note should not produce operational items.
+
+    Args:
+        tier: source_tier value (signal/context/excluded)
+        mode: 'signal' = only signal notes produce items
+              'action' = signal notes only produce actions
+              'decision' = signal notes only produce decisions
+    """
+    return tier not in ("signal",)
+
+
+# ------------------------------------------------------------------
+# Rule 1: risk keywords
 # ------------------------------------------------------------------
 
 
 def _rule_risk_keywords(conn, run_date: date) -> list[Signal]:
     """Emit a risk signal for any note whose body contains risk keywords."""
+    import os as _os_module
+    vault_root = _os_module.environ.get("MANAGER_OS_VAULT_PATH", "")
+
     rows = conn.execute(
         """
         SELECT n.id, n.raw_document_id, n.note_date, n.note_type,
                n.entity_type, n.entity_name, n.title, n.body,
-               rd.source_path as file_path
+               rd.source_path as file_path, rd.id as doc_id
         FROM notes n
         LEFT JOIN raw_documents rd ON n.raw_document_id = rd.id
         WHERE n.body IS NOT NULL
@@ -256,7 +310,7 @@ def _rule_risk_keywords(conn, run_date: date) -> list[Signal]:
     signals = []
     for row in rows:
         (note_id, raw_document_id, note_date, note_type,
-         entity_type, entity_name, title, body, file_path) = row
+         entity_type, entity_name, title, body, file_path, doc_id) = row
         if not _contains_risk_keyword(body or ""):
             continue
 
@@ -265,6 +319,11 @@ def _rule_risk_keywords(conn, run_date: date) -> list[Signal]:
 
         # Skip system/template/instruction documents entirely
         if _is_noisy_source(source_path, title):
+            continue
+
+        # Skip non-signal notes (context/excluded) from creating risk signals
+        tier = _note_source_tier(conn, raw_document_id or doc_id, source_path or "", vault_root)
+        if _should_skip_for_extraction(tier):
             continue
 
         # Determine entity for the signal

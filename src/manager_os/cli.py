@@ -2886,6 +2886,190 @@ def action_reopen(
     _action_update(item_id, "open")
 
 
+# ---------------------------------------------------------------------------
+# scope-preview
+# ---------------------------------------------------------------------------
+
+@app.command("scope-preview")
+def scope_preview(
+    vault_path: Optional[str] = typer.Option(
+        None,
+        "--vault-path",
+        help="Override MANAGER_OS_VAULT_PATH for this scan.",
+    ),
+    show_signal: bool = typer.Option(False, "--show-signal", help="List signal-tier notes."),
+    show_context: bool = typer.Option(False, "--show-context", help="List context-tier notes."),
+    show_excluded: bool = typer.Option(False, "--show-excluded", help="List excluded notes."),
+    show_stale: bool = typer.Option(False, "--show-stale", help="List stale notes only."),
+) -> None:
+    """Preview source tier classification across the Obsidian vault.
+
+    Reads the vault directly (no database required) and shows how many
+    notes fall into each tier: signal, context, or excluded.
+    """
+    from pathlib import Path as _Path
+
+    from manager_os.config import get_settings
+    from manager_os.scope import walk_vault, load_source_scope
+    from rich import box as rich_box
+    from rich.panel import Panel
+
+    settings = get_settings()
+    vault = vault_path or settings.vault_path
+
+    if not vault:
+        console.print("[red]No vault path configured. Set MANAGER_OS_VAULT_PATH or use --vault-path.[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[dim]Scanning: {vault}[/dim]")
+    report = walk_vault(vault)
+
+    console.print()
+    console.print(Panel.fit(
+        "[bold]Manager OS — Scope Preview[/bold]",
+        box=rich_box.ROUNDED,
+        border_style="cyan",
+    ))
+    console.print(f"  [dim]Vault:[/dim]   {report.vault_path}")
+    console.print(f"  [dim]Total .md notes found:[/dim]  {report.total_notes}")
+    console.print()
+
+    # Summary table
+    tbl = Table(
+        title="Tier Distribution",
+        show_header=True,
+        header_style="bold",
+        box=rich_box.SIMPLE,
+    )
+    tbl.add_column("Tier", style="bold")
+    tbl.add_column("Count", justify="right")
+    tbl.add_column("%", justify="right", style="dim")
+    total = max(report.total_notes, 1)
+    tbl.add_row("[green]Signal[/green]",   str(report.signal_count),
+                f"{report.signal_count/total*100:.0f}%")
+    tbl.add_row("[blue]Context[/blue]",    str(report.context_count),
+                f"{report.context_count/total*100:.0f}%")
+    tbl.add_row("[dim]Excluded[/dim]",     str(report.excluded_count),
+                f"{report.excluded_count/total*100:.0f}%")
+    tbl.add_row("[dim]───[/dim]", "[dim]───[/dim]", "[dim]───[/dim]")
+    tbl.add_row("[bold]Total[/bold]", f"[bold]{report.total_notes}[/bold]", "")
+    console.print(tbl)
+    console.print()
+
+    # Flags
+    flags_tbl = Table(show_header=False, box=None, padding=(0, 2))
+    flags_tbl.add_column("Flag", style="dim")
+    flags_tbl.add_column("Count", justify="right")
+    flags_tbl.add_row("Stale notes (> max_age)",        str(report.stale_count))
+    flags_tbl.add_row("Active overrides (fm forces signal)", str(report.active_override_count))
+    flags_tbl.add_row("Frontmatter-excluded notes",      str(report.fm_excluded_count))
+    console.print(flags_tbl)
+    console.print()
+
+    # Top reasons
+    if report.top_reasons:
+        reason_tbl = Table(
+            title="Top Scope Reasons",
+            show_header=True,
+            header_style="bold",
+            box=rich_box.SIMPLE,
+        )
+        reason_tbl.add_column("Reason", style="dim")
+        reason_tbl.add_column("Count", justify="right")
+        for reason, count in report.top_reasons:
+            reason_tbl.add_row(reason, str(count))
+        console.print(reason_tbl)
+        console.print()
+
+    # Folders by tier
+    for tier, label in [("signal", "Top Signal Folders"), ("context", "Top Context Folders"), ("excluded", "Top Excluded Folders")]:
+        folders = report.folders_by_tier.get(tier, {})
+        if folders:
+            ft = Table(title=label, show_header=True, header_style="bold", box=rich_box.SIMPLE)
+            ft.add_column("Folder", style="dim")
+            ft.add_column("Count", justify="right")
+            for folder, count in list(folders.items())[:10]:
+                ft.add_row(folder, str(count))
+            console.print(ft)
+            console.print()
+
+    # Detail listings
+    if show_signal:
+        console.print(f"[green bold]Signal notes ({report.signal_count}):[/green bold]")
+        for p in report.signal_paths:
+            console.print(f"  [green]•[/green] {p}")
+        console.print()
+
+    if show_context:
+        console.print(f"[blue bold]Context notes ({report.context_count}):[/blue bold]")
+        for p in report.context_paths:
+            console.print(f"  [blue]•[/blue] {p}")
+        console.print()
+
+    if show_excluded:
+        console.print(f"[dim bold]Excluded notes ({report.excluded_count}):[/dim bold]")
+        for p in report.excluded_paths:
+            console.print(f"  [dim]•[/dim] {p}")
+        console.print()
+
+    if show_stale:
+        console.print(f"[yellow bold]Stale notes ({report.stale_count}):[/yellow bold]")
+        for p in report.stale_paths:
+            console.print(f"  [yellow]•[/yellow] {p}")
+        console.print()
+
+
+# ---------------------------------------------------------------------------
+# llm-doctor
+# ---------------------------------------------------------------------------
+
+@app.command("llm-doctor")
+def llm_doctor(
+    smoke_test: bool = typer.Option(True, "--smoke-test/--no-smoke-test", help="Send a minimal prompt to verify the binary works."),
+    timeout: int = typer.Option(60, "--timeout", "-t", help="Timeout in seconds for the smoke test."),
+) -> None:
+    """Diagnose the Gemini CLI provider configuration."""
+    from manager_os.llm.gemini_cli import run_doctor
+    from rich import box as rich_box
+    from rich.panel import Panel
+
+    console.print("[dim]Running Gemini CLI diagnostics…[/dim]")
+    result = run_doctor(smoke_test=smoke_test, timeout=timeout)
+
+    console.print()
+    console.print(Panel.fit(
+        "[bold]Manager OS — LLM Doctor[/bold]",
+        box=rich_box.ROUNDED,
+        border_style="cyan",
+    ))
+
+    tbl = Table(show_header=False, box=None, padding=(0, 2))
+    tbl.add_column("Setting", style="dim")
+    tbl.add_column("Value")
+    tbl.add_row("Provider", result.provider)
+    tbl.add_row("LLM enabled", f"[green]true[/green]" if result.llm_enabled else "[red]false[/red]")
+    tbl.add_row("Gemini binary", result.gemini_bin)
+    tbl.add_row("Binary exists", f"[green]yes[/green]" if result.gemini_bin_exists else "[red]no[/red]")
+    tbl.add_row("Binary executable", f"[green]yes[/green]" if result.gemini_bin_executable else "[red]no[/red]")
+    tbl.add_row("Configured model", result.configured_model)
+    tbl.add_row("Timeout (seconds)", str(result.timeout))
+    tbl.add_row("Working directory", result.workdir or "(cwd)")
+    console.print(tbl)
+
+    if smoke_test:
+        console.print()
+        if result.smoke_test_passed:
+            console.print("[green bold]✓ Smoke test passed[/green bold]")
+            if result.smoke_test_output:
+                console.print(f"  Response: {result.smoke_test_output[:200]}")
+        else:
+            console.print(f"[red bold]✗ Smoke test failed[/red bold]")
+            if result.smoke_test_error:
+                console.print(f"  Error: {result.smoke_test_error}")
+
+    console.print()
+
+
 if __name__ == "__main__":
     app()
 

@@ -1,22 +1,20 @@
-"""Optional LLM-based signal extraction.
+"""LLM-based signal extraction via Gemini CLI.
 
-Requires one of:
-  - OPENAI_API_KEY (or OPENAI_BASE_URL for compatible endpoints)
-  - MANAGER_OS_GEMINI_MODEL + a Gemini-compatible client
+All LLM calls route through the local Gemini CLI binary using existing
+Vertex AI authentication — no API keys, no OpenAI SDK.
 
-If no LLM credentials are available, raises LLMExtractionUnavailable
-so the CLI can skip gracefully.
+Only notes classified as ``signal`` tier are sent to Gemini.  Context-tier
+notes are included as related context when explicitly attached to a signal
+note but do not produce standalone signals.
 
-Each note's body is sent to the LLM with a structured prompt. The model
-is asked to return a JSON list of signals. Results are written to the
-signals table with source="llm". Failures are logged to extraction_failures.
+Source tier determination uses ``config/source_scope.yaml`` via
+``manager_os.scope.classify_source``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
@@ -27,37 +25,12 @@ from manager_os.schemas import Signal
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
-# Availability check
+# Availability
 # ------------------------------------------------------------------
 
 
 class LLMExtractionUnavailable(RuntimeError):
-    """Raised when no LLM credentials are configured."""
-
-
-def _get_openai_client():
-    """Return an openai.OpenAI client or raise LLMExtractionUnavailable."""
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    base_url = os.environ.get("OPENAI_BASE_URL", "")
-    if not api_key:
-        raise LLMExtractionUnavailable(
-            "OPENAI_API_KEY is not set. Configure it in your .env to enable LLM extraction."
-        )
-    try:
-        import openai  # type: ignore[import]
-    except ImportError as exc:
-        raise LLMExtractionUnavailable(
-            "openai package is not installed. Run: pip install openai"
-        ) from exc
-
-    kwargs: dict[str, Any] = {"api_key": api_key}
-    if base_url:
-        kwargs["base_url"] = base_url
-    return openai.OpenAI(**kwargs)
-
-
-def _get_model_name() -> str:
-    return os.environ.get("MANAGER_OS_LLM_MODEL", "gpt-4o-mini")
+    """Raised when Gemini CLI is not configured or not available."""
 
 
 # ------------------------------------------------------------------
@@ -65,8 +38,8 @@ def _get_model_name() -> str:
 # ------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-You are an expert management assistant. Given a note from an engineering manager,
-extract actionable management signals as structured JSON.
+You are an expert engineering management assistant. Given a manager's Obsidian
+note, extract actionable management signals as strict JSON.
 
 Return ONLY a JSON array (no markdown, no explanation). Each element must have:
   entity_type: "person" | "client" | "deal" | "team" | "practice"
@@ -76,24 +49,40 @@ Return ONLY a JSON array (no markdown, no explanation). Each element must have:
                "people_health" | "utilization_risk" | "sow_loe_review"
   severity: "critical" | "high" | "medium" | "low"
   summary: string (one sentence, max 120 chars)
-  why_it_matters: string (one sentence, max 120 chars, or "")
+  why_it_matters: string (one sentence, max 200 chars, include specific evidence)
   requires_manager_attention: boolean
   confidence: float between 0.0 and 1.0
 
-If no signals are present, return [].
-Do NOT invent signals. Only extract what is clearly stated or strongly implied."""
+Rules:
+- Use ONLY the provided source text. Do NOT invent people, clients, or deals.
+- Cite specific evidence in why_it_matters (e.g. "Alice said on 6/12 that..."
+  or "Note from engagement-status.md shows Review Protocol Gap").
+- Omit weak/speculative items. If no clear signal, return [].
+- Mark old/historical items as "stale_item" with severity="low".
+- Do NOT calculate allocation %, capacity %, close-date math, or financials.
+"""
 
 
-def _build_user_prompt(note_date: str, entity_name: str, entity_type: str, body: str) -> str:
-    return (
-        f"Date: {note_date}\n"
-        f"Entity: {entity_name} ({entity_type})\n\n"
-        f"Note body:\n{body[:3000]}"  # cap tokens
-    )
+def _build_user_prompt(
+    note_date: str,
+    entity_name: str,
+    entity_type: str,
+    body: str,
+    source_tier: str = "signal",
+) -> str:
+    lines = [
+        f"Date: {note_date}",
+        f"Entity: {entity_name} ({entity_type})",
+        f"Source tier: {source_tier}",
+        "",
+        f"Note body:",
+        body[:4000],  # generous token budget for Gemini
+    ]
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------------
-# Parse and validate LLM output
+# Parse and validate
 # ------------------------------------------------------------------
 
 _VALID_ENTITY_TYPES = {"person", "client", "deal", "team", "practice"}
@@ -107,15 +96,13 @@ _VALID_SEVERITIES = {"critical", "high", "medium", "low"}
 
 def _parse_llm_response(raw: str) -> list[dict]:
     """Parse and validate the LLM JSON response. Returns valid signal dicts."""
+    from manager_os.llm.gemini_cli import _extract_json
+
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        # Try to extract a JSON array from the response
-        start = raw.find("[")
-        end = raw.rfind("]")
-        if start == -1 or end == -1:
-            raise ValueError(f"No JSON array found in LLM response: {raw[:200]}")
-        parsed = json.loads(raw[start : end + 1])
+        clean = _extract_json(raw)
+        parsed = json.loads(clean)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"Could not parse LLM response: {raw[:300]}") from exc
 
     if not isinstance(parsed, list):
         raise ValueError("Expected a JSON array from LLM.")
@@ -159,9 +146,121 @@ class LLMExtractionResult:
     failed: int = 0
     items: list[Signal] = field(default_factory=list)
 
+    # Tier/candidate counters for observability
+    candidates_considered: int = 0
+    candidates_skipped_excluded: int = 0
+    candidates_skipped_context: int = 0
+    candidates_skipped_empty_body: int = 0
+
 
 # ------------------------------------------------------------------
-# Core extraction
+# Candidate selection (tier-aware)
+# ------------------------------------------------------------------
+
+
+def _select_llm_candidates(
+    conn,
+    max_candidates: int = 50,
+) -> list[dict]:
+    """Return note rows that are signal-tier and have a non-empty body.
+
+    Uses source tier metadata in raw_documents.metadata JSON when available.
+    Falls back to running ``classify_source`` on the source_path.
+
+    Returns up to *max_candidates*, preferring notes with named entities.
+    """
+    rows = conn.execute(
+        """
+        SELECT n.id, n.note_date, n.entity_name, n.entity_type, n.body,
+               rd.source_path, rd.metadata
+        FROM notes n
+        LEFT JOIN raw_documents rd ON rd.id = n.raw_document_id
+        WHERE n.body != '' AND n.body IS NOT NULL
+        ORDER BY
+            CASE WHEN n.entity_name IS NOT NULL AND n.entity_name != '' THEN 0 ELSE 1 END,
+            n.note_date DESC
+        LIMIT ?
+        """,
+        [max_candidates],
+    ).fetchall()
+
+    # Try to resolve tiers from stored metadata or classify on the fly
+    import os as _os
+    vault_root = _os.environ.get("MANAGER_OS_VAULT_PATH", "")
+
+    candidates = []
+    excluded_cnt = context_cnt = empty_cnt = 0
+
+    for row in rows:
+        note_id, note_date_raw, entity_name, entity_type, body, source_path, metadata_raw = row
+        body = (body or "").strip()
+        if not body:
+            empty_cnt += 1
+            continue
+
+        # Determine source tier
+        tier = _resolve_tier_from_metadata(metadata_raw, source_path, vault_root)
+
+        if tier == "excluded":
+            excluded_cnt += 1
+            continue
+        if tier == "context":
+            # Context notes are not standalone LLM candidates
+            context_cnt += 1
+            continue
+
+        try:
+            nd = note_date_raw if isinstance(note_date_raw, date) else date.fromisoformat(str(note_date_raw))
+        except Exception:
+            nd = date.today()
+
+        candidates.append({
+            "note_id": note_id,
+            "note_date": nd,
+            "entity_name": entity_name or "",
+            "entity_type": entity_type or "person",
+            "body": body,
+            "source_path": source_path or "",
+        })
+
+    return candidates, excluded_cnt, context_cnt, empty_cnt
+
+
+def _resolve_tier_from_metadata(
+    metadata_raw: str | None,
+    source_path: str,
+    vault_root: str,
+) -> str:
+    """Resolve source tier: check stored metadata first, then classify.
+
+    Returns 'signal', 'context', or 'excluded'.
+    """
+    # Try stored metadata
+    if metadata_raw:
+        try:
+            meta = json.loads(metadata_raw) if isinstance(metadata_raw, str) else metadata_raw
+            tier = meta.get("source_tier", "")
+            if tier in ("signal", "context", "excluded"):
+                return tier
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            pass
+
+    # Fall back to classifying on the fly
+    try:
+        from manager_os.scope import classify_source, load_source_scope
+        config = load_source_scope()
+        result = classify_source(
+            source_path=source_path,
+            vault_root=vault_root,
+            config=config,
+        )
+        return result.source_tier
+    except Exception:
+        return "signal"  # safe default
+
+
+# ------------------------------------------------------------------
+# Core extraction (Gemini CLI — no OpenAI)
 # ------------------------------------------------------------------
 
 
@@ -173,9 +272,8 @@ def _extract_signals_from_note_llm(
     entity_type: str,
     body: str,
     source_path: str,
-    client,
-    model: str,
 ) -> LLMExtractionResult:
+    """Send a single note to Gemini CLI and write resulting signals to DB."""
     result = LLMExtractionResult()
 
     user_prompt = _build_user_prompt(
@@ -184,19 +282,21 @@ def _extract_signals_from_note_llm(
 
     raw_response = ""
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.1,
-            max_tokens=1024,
+        from manager_os.llm.gemini_cli import generate, GeminiUnavailable
+        raw_response = generate(
+            system_prompt=_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
         )
-        raw_response = response.choices[0].message.content or ""
         signal_dicts = _parse_llm_response(raw_response)
-    except LLMExtractionUnavailable:
-        raise
+    except GeminiUnavailable:
+        raise LLMExtractionUnavailable(
+            "Gemini CLI is not available. Run 'manager-os llm-doctor' to diagnose."
+        )
+    except ValueError as exc:
+        logger.warning("LLM parse failed for note %s: %s", note_id, exc)
+        _log_extraction_failure(conn, source_path, user_prompt, raw_response, str(exc))
+        result.failed += 1
+        return result
     except Exception as exc:
         logger.warning("LLM call failed for note %s: %s", note_id, exc)
         _log_extraction_failure(conn, source_path, user_prompt, raw_response, str(exc))
@@ -271,43 +371,53 @@ def _log_extraction_failure(
 # ------------------------------------------------------------------
 
 
-def run_llm_extraction(conn, run_date: date | None = None) -> LLMExtractionResult:
-    """Run LLM-based signal extraction across all notes.
+def run_llm_extraction(
+    conn,
+    run_date: date | None = None,
+    max_candidates: int | None = None,
+) -> LLMExtractionResult:
+    """Run LLM-based signal extraction across signal-tier notes.
+
+    Uses Gemini CLI.  Only signal-tier notes are sent to the model.
 
     Raises:
-        LLMExtractionUnavailable: if no API credentials are configured.
+        LLMExtractionUnavailable: if Gemini CLI is not configured.
     """
-    client = _get_openai_client()  # raises LLMExtractionUnavailable if not configured
-    model = _get_model_name()
+    import os as _os
 
     if run_date is None:
         run_date = date.today()
 
-    rows = conn.execute(
-        "SELECT n.id, n.note_date, n.entity_name, n.entity_type, n.body, r.source_path "
-        "FROM notes n "
-        "LEFT JOIN raw_documents r ON r.id = n.raw_document_id "
-        "WHERE n.body != '' AND n.body IS NOT NULL"
-    ).fetchall()
+    if max_candidates is None:
+        max_candidates = int(_os.environ.get("MANAGER_OS_LLM_MAX_CANDIDATES", "50"))
 
-    total = LLMExtractionResult()
-    for row in rows:
-        note_id, note_date_raw, entity_name, entity_type, body, source_path = row
-        try:
-            nd = note_date_raw if isinstance(note_date_raw, date) else date.fromisoformat(str(note_date_raw))
-        except Exception:
-            nd = run_date
+    # Quick availability check
+    from manager_os.llm.gemini_cli import is_gemini_available, GeminiUnavailable
+    if not is_gemini_available():
+        raise LLMExtractionUnavailable(
+            "Gemini CLI is not available. Set MANAGER_OS_GEMINI_CLI_BIN or run 'manager-os llm-doctor'."
+        )
 
+    candidates, excluded_cnt, context_cnt, empty_cnt = _select_llm_candidates(
+        conn, max_candidates=max_candidates
+    )
+
+    total = LLMExtractionResult(
+        candidates_considered=len(candidates),
+        candidates_skipped_excluded=excluded_cnt,
+        candidates_skipped_context=context_cnt,
+        candidates_skipped_empty_body=empty_cnt,
+    )
+
+    for c in candidates:
         r = _extract_signals_from_note_llm(
             conn=conn,
-            note_id=note_id,
-            note_date=nd,
-            entity_name=entity_name or "",
-            entity_type=entity_type or "person",
-            body=body or "",
-            source_path=source_path or "",
-            client=client,
-            model=model,
+            note_id=c["note_id"],
+            note_date=c["note_date"],
+            entity_name=c["entity_name"],
+            entity_type=c["entity_type"],
+            body=c["body"],
+            source_path=c["source_path"],
         )
         total.written += r.written
         total.skipped += r.skipped
@@ -315,3 +425,4 @@ def run_llm_extraction(conn, run_date: date | None = None) -> LLMExtractionResul
         total.items.extend(r.items)
 
     return total
+

@@ -3,6 +3,9 @@
 Recursively walks an Obsidian vault directory, parses each .md file
 (YAML frontmatter + body), computes a content hash for deduplication,
 and writes RawDocument + NoteRecord rows to DuckDB.
+
+Source tier metadata (signal/context/excluded) is captured in
+raw_documents.metadata JSON using ``manager_os.scope.classify_source``.
 """
 
 from __future__ import annotations
@@ -167,7 +170,7 @@ def ingest_vault(vault_path: str, conn, force: bool = False) -> IngestResult:
             continue
 
         try:
-            _ingest_file(md_file, conn, force, result)
+            _ingest_file(md_file, conn, force, result, vault)
         except Exception as exc:
             logger.warning("Failed to ingest %s: %s", md_file, exc)
             result.failed += 1
@@ -193,11 +196,40 @@ def _strip_frontmatter_block(raw_text: str) -> str:
     return "\n".join(lines[1:]).strip()
 
 
+def _build_metadata(
+    fm: dict,
+    tags: list[str],
+    source_path: str,
+    vault_root: str,
+    mtime: datetime,
+) -> dict[str, str]:
+    """Enrich raw_document metadata with source tier classification."""
+    base = {k: str(v) for k, v in fm.items() if k not in ("tags",)}
+    try:
+        from manager_os.scope import classify_source, load_source_scope
+
+        config = load_source_scope()
+        result = classify_source(
+            source_path=source_path,
+            vault_root=vault_root,
+            frontmatter=fm,
+            tags=tags,
+            modified_time=mtime,
+            config=config,
+        )
+        base.update(result.as_metadata())
+    except Exception as exc:
+        logger.debug("scope classification skipped for %s: %s", source_path, exc)
+        base["source_tier"] = "signal"  # safe default
+    return base
+
+
 def _ingest_file(
     md_file: Path,
     conn,
     force: bool,
     result: IngestResult,
+    vault_root: Path,
 ) -> None:
     raw_text = md_file.read_text(encoding="utf-8", errors="replace")
     c_hash = content_hash(raw_text)
@@ -252,7 +284,7 @@ def _ingest_file(
         file_modified_at=mtime,
         content_hash=c_hash,
         content=raw_text,
-        metadata={k: str(v) for k, v in fm.items() if k not in ("tags",)},
+        metadata=_build_metadata(fm, tags, source_path, str(vault_root), mtime),
     )
 
     note = NoteRecord(
