@@ -358,8 +358,10 @@ def _do_workspace_ingest(
         ingest_workspace_activity_snapshot,
     )
 
-    # Safety check
-    if not _os.environ.get("MANAGER_OS_WORKSPACE_RETRIEVAL_ENABLED", "false").lower() in ("true", "yes", "1"):
+    # Safety check — read from Settings (which loads .env) rather than raw os.environ
+    enabled = getattr(settings, "workspace_retrieval_enabled", False) or \
+              _os.environ.get("MANAGER_OS_WORKSPACE_RETRIEVAL_ENABLED", "false").lower() in ("true", "yes", "1")
+    if not enabled:
         result = IngestResult()
         result.errors.append(
             "Workspace retrieval is disabled. Set MANAGER_OS_WORKSPACE_RETRIEVAL_ENABLED=true in .env."

@@ -106,7 +106,15 @@ def ingest_workspace_forecast_snapshot(
             result.failed += 1
             continue
         week_start = row.get("week_start", "")
-        allocation_pct = float(row.get("allocation_pct", 0))
+        # Handle allocation as string ("50%", "100%") or number
+        raw_alloc = row.get("allocation_pct", 0)
+        try:
+            if isinstance(raw_alloc, str):
+                allocation_pct = float(raw_alloc.strip().rstrip("%"))
+            else:
+                allocation_pct = float(raw_alloc)
+        except (ValueError, TypeError):
+            allocation_pct = 0.0
         project = str(row.get("project", "")).strip()
         client = str(row.get("client", "")).strip()
 
