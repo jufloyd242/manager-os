@@ -3379,12 +3379,16 @@ def workspace_fetch_forecast(
     no_yolo: bool = typer.Option(False, "--no-yolo", help="Disable YOLO mode."),
     timeout: int = typer.Option(180, "--timeout", help="Timeout in seconds."),
     output_dir: Optional[str] = typer.Option(None, "--output-dir"),
+    doc_name: Optional[str] = typer.Option(None, "--doc", help="Document name or URL to search for (e.g. 'Delta-12 Forecast' or a Google Sheets URL)."),
 ) -> None:
     """Retrieve latest staffing forecast from Google Workspace."""
     from manager_os.ingest.workspace_gemini import retrieve_forecast
 
     run_date = date.fromisoformat(target_date) if target_date else date.today()
-    _do_workspace_fetch("forecast", retrieve_forecast, run_date, dry_run, print_prompt, no_yolo, timeout, output_dir)
+    query_hint = ""
+    if doc_name:
+        query_hint = f"Look for a document named '{doc_name}' or at URL containing '{doc_name}'."
+    _do_workspace_fetch("forecast", retrieve_forecast, run_date, dry_run, print_prompt, no_yolo, timeout, output_dir, query_hint=query_hint)
 
 
 @app.command("workspace-fetch-calendar")

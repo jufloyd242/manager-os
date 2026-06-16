@@ -217,12 +217,14 @@ def retrieve_forecast(
     output_dir: str | None = None,
     query_hint: str = "",
 ) -> RetrievalResult:
-    """Retrieve latest forecasting data from Google Workspace via Gemini CLI."""
-    from manager_os.llm.gemini_cli import GEMINI_CLI_TIMEOUT
+    """Retrieve latest forecasting data from Google Workspace via Gemini CLI.
 
+    Use *query_hint* to guide Gemini to a specific spreadsheet name or URL.
+    """
+    effective_hint = query_hint or FORECAST_QUERY or "Find the latest people/staffing forecast for AI ML team."
     prompt = FORECAST_PROMPT_TEMPLATE.format(
         read_only=_READ_ONLY_PREFIX,
-        query_hint=query_hint or FORECAST_QUERY,
+        query_hint=effective_hint,
     )
 
     result = RetrievalResult(dry_run=dry_run)
