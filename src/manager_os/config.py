@@ -81,6 +81,7 @@ class PersonConfig(BaseModel):
     aliases: list[str] = []
     role: str = ""
     level: str = ""
+    track: bool = True  # False = hide from dashboard / people-health tracking
 
     @field_validator("aliases", mode="before")
     @classmethod

@@ -321,15 +321,19 @@ def test_get_forecast_summary_buckets(conn) -> None:
     _seed_forecast(conn, "David Park", today, 120.0)
     _seed_forecast(conn, "Bob Martinez", today, 40.0)
     summary = get_forecast_summary(conn, as_of=today)
+    # Short-key aliases are available for backward compat
     assert "2w" in summary
     assert "30d" in summary
     assert "60d" in summary
     assert "David Park" in summary["2w"]["overallocated"]
     assert "Bob Martinez" in summary["2w"]["underallocated"]
+    # 100% is fully_utilized, not available
+    assert "Alice Chen" in summary["2w"]["fully_utilized"]
+    assert "Alice Chen" not in summary["2w"]["available"]
 
 
 def test_get_forecast_summary_multi_week_at_100_no_overallocated(conn) -> None:
-    """A person at 100% for two weeks must not appear 200% overallocated."""
+    """A person at 100% for two weeks must appear fully_utilized, not overallocated."""
     today = date.today()
     next_week = today + timedelta(days=7)
     _seed_forecast(conn, "Alice Chen", today, 100.0)
@@ -339,6 +343,7 @@ def test_get_forecast_summary_multi_week_at_100_no_overallocated(conn) -> None:
         "Person at 100%/week should NOT be overallocated, even across multiple weeks"
     )
     assert "Alice Chen" not in summary["2w"]["underallocated"]
+    assert "Alice Chen" in summary["2w"]["fully_utilized"]
 
 
 def test_get_forecast_summary_one_over_one_ok_is_overallocated(conn) -> None:
@@ -362,13 +367,15 @@ def test_get_forecast_summary_one_under_one_ok_is_underallocated(conn) -> None:
 
 
 def test_get_forecast_summary_exactly_100_is_available(conn) -> None:
-    """Person at exactly 100% should be 'available' (fully allocated), not under/over."""
+    """Person at exactly 100% should be 'fully_utilized', not under/over/available."""
     today = date.today()
     _seed_forecast(conn, "Alice Chen", today, 100.0)
     summary = get_forecast_summary(conn, as_of=today)
     assert "Alice Chen" not in summary["2w"]["overallocated"]
     assert "Alice Chen" not in summary["2w"]["underallocated"]
-    assert "Alice Chen" in summary["2w"]["available"]
+    # 100% is fully_utilized, not in available (which is < 100%)
+    assert "Alice Chen" in summary["2w"]["fully_utilized"]
+    assert "Alice Chen" not in summary["2w"]["available"]
 
 
 def test_get_today_signals_min_severity_filter(conn) -> None:

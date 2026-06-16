@@ -259,7 +259,22 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 CREATE INDEX IF NOT EXISTS feedback_item_id_idx ON feedback (item_id);
 CREATE INDEX IF NOT EXISTS feedback_source_path_idx ON feedback (source_path);
-CREATE INDEX IF NOT EXISTS feedback_rating_idx ON feedback (rating)
+CREATE INDEX IF NOT EXISTS feedback_rating_idx ON feedback (rating);
+CREATE TABLE IF NOT EXISTS deal_documents (
+    id            VARCHAR PRIMARY KEY,
+    deal_id       VARCHAR NOT NULL,
+    account       VARCHAR,
+    deal_name     VARCHAR,
+    document_type VARCHAR NOT NULL,
+    title         VARCHAR,
+    url           VARCHAR,
+    source        VARCHAR,
+    retrieved_at  TIMESTAMP NOT NULL,
+    search_status VARCHAR,
+    error         VARCHAR
+);
+CREATE INDEX IF NOT EXISTS deal_documents_deal_id_idx ON deal_documents (deal_id);
+CREATE INDEX IF NOT EXISTS deal_documents_type_idx ON deal_documents (document_type)
 """
 
 _ALL_TABLES = [
@@ -281,6 +296,7 @@ _ALL_TABLES = [
     "extraction_failures",
     "signal_status_log",
     "feedback",
+    "deal_documents",
 ]
 
 

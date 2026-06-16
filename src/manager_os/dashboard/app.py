@@ -362,6 +362,19 @@ with tabs[2]:
                 m2.metric("Open signals", c["open_signal_count"])
                 m3.metric("Open risks", c.get("open_risk_count", 0))
 
+                # Active deals / opportunity numbers
+                client_deals = c.get("deals", [])
+                if client_deals:
+                    st.markdown("**Active opportunities:**")
+                    import pandas as _pd
+                    df_deals = _pd.DataFrame([{
+                        "Opp #": d.get("deal_id") or "—",
+                        "Deal": d.get("deal_name", ""),
+                        "Stage": d.get("stage", ""),
+                        "Close": str(d.get("close_date", "")) if d.get("close_date") else "—",
+                    } for d in client_deals])
+                    st.dataframe(df_deals, use_container_width=True, hide_index=True)
+
                 client_sigs = get_signals_for_client(conn, c["name"])
                 if client_sigs:
                     st.markdown("**Active signals:**")
@@ -421,15 +434,34 @@ with tabs[3]:
                 c1.metric("Close date", str(d.close_date) if d.close_date else "—")
                 c2.metric("SOW", d.sow_status or "—")
                 c3.metric("LOE", d.loe_status or "—")
-                c4.metric("Staffing", d.staffing_feasibility or "—")
+                feasibility_label = d.staffing_feasibility or "—"
+                c4.metric(
+                    f"Staffing ({d.staffing_feasibility_source})",
+                    feasibility_label,
+                )
 
                 if d.blockers:
                     st.warning(f"🚧 {d.blockers}")
                 if d.next_action:
                     st.info(f"Next action: {d.next_action}")
-                meta_cols = st.columns(2)
+
+                meta_cols = st.columns(3)
                 meta_cols[0].caption(f"Account: {d.account}")
-                meta_cols[1].caption(f"Owner: {d.technical_owner}")
+                meta_cols[1].caption(f"Opp #: {d.deal_id or '—'}")
+                meta_cols[2].caption(f"Owner: {d.technical_owner}")
+
+                # Document links
+                doc_cols = st.columns(2)
+                with doc_cols[0]:
+                    if d.sow_url:
+                        st.markdown(f"📄 [INT SOW]({d.sow_url})" + (f" — {d.sow_title}" if d.sow_title else ""))
+                    else:
+                        st.caption("📄 INT SOW: not found — run `workspace-fetch-deal-docs`")
+                with doc_cols[1]:
+                    if d.deal_sheet_url:
+                        st.markdown(f"📊 [Deal Sheet]({d.deal_sheet_url})" + (f" — {d.deal_sheet_title}" if d.deal_sheet_title else ""))
+                    else:
+                        st.caption("📊 Deal Sheet: not found — run `workspace-fetch-deal-docs`")
 
 # ------------------------------------------------------------------
 # Tab 5 — Forecast
@@ -513,25 +545,31 @@ with tabs[4]:
 
         st.divider()
 
-        # Summary buckets
+        # Summary buckets — iterate only the long-label keys (with date ranges)
         st.subheader("Staffing Summary")
-        for label in ("2w", "30d", "60d"):
-            bucket = forecast_summary.get(label, {})
+        # Short-key aliases are also present; skip them to avoid duplicate expanders
+        long_label_items = {
+            k: v for k, v in forecast_summary.items() if " (" in k
+        }
+        for label, bucket in long_label_items.items():
             over = bucket.get("overallocated", [])
-            under = bucket.get("underallocated", [])
+            full = bucket.get("fully_utilized", [])
             avail = bucket.get("available", [])
+            is_first = label.startswith("2w")
 
-            with st.expander(f"**{label} window**  •  🔴 {len(over)} over  •  🟡 {len(under)} under  •  🟢 {len(avail)} OK",
-                             expanded=(label == "2w")):
+            with st.expander(
+                f"**{label}**  •  🔴 {len(over)} over  •  🟢 {len(full)} full  •  🟡 {len(avail)} avail",
+                expanded=is_first,
+            ):
                 cols = st.columns(3)
                 with cols[0]:
                     st.markdown("**🔴 Overallocated (>100%)**")
                     st.markdown("\n".join(f"- {p}" for p in over) or "*None*")
                 with cols[1]:
-                    st.markdown("**🟡 Underallocated (<100%)**")
-                    st.markdown("\n".join(f"- {p}" for p in under) or "*None*")
+                    st.markdown("**🟢 Fully Utilized (=100%)**")
+                    st.markdown("\n".join(f"- {p}" for p in full) or "*None*")
                 with cols[2]:
-                    st.markdown("**🟢 Available (≈100%)**")
+                    st.markdown("**🟡 Available (<100%)**")
                     st.markdown("\n".join(f"- {p}" for p in avail) or "*None*")
 
         st.divider()
@@ -580,9 +618,16 @@ with tabs[5]:
     else:
         st.subheader(f"Meetings on {selected_date}")
 
-        meeting_titles = [f"{m['start_time'] or '?:??'} — {m['title']}" for m in today_meetings]
-        selected_idx = st.selectbox("Select meeting", options=list(range(len(today_meetings))),
-                                    format_func=lambda i: meeting_titles[i])
+        # Build deduplicated display labels (time + title)
+        meeting_titles = [
+            f"{m.get('start_time') or '?:??'} — {m.get('title', '(untitled)')}"
+            for m in today_meetings
+        ]
+        selected_idx = st.selectbox(
+            "Select meeting",
+            options=list(range(len(today_meetings))),
+            format_func=lambda i: meeting_titles[i],
+        )
 
         chosen = today_meetings[selected_idx]
 
@@ -605,12 +650,16 @@ with tabs[5]:
                     generate_meeting_prep,
                     enrich_meeting_prep_with_llm,
                 )
+                from manager_os.build.dashboard_data import meeting_dict_to_record
 
                 settings = get_settings()
                 resolver = EntityResolver(
                     load_people(settings), load_clients(settings), load_deal_aliases(settings)
                 )
-                prep = generate_meeting_prep(chosen, conn, resolver)
+                # Convert dict → MeetingRecord so generate_meeting_prep gets the
+                # object it expects (linked_entities, attendees, etc. as attributes).
+                meeting_record = meeting_dict_to_record(chosen)
+                prep = generate_meeting_prep(meeting_record, conn, resolver)
                 if use_llm:
                     prep = enrich_meeting_prep_with_llm(prep, conn)
                 st.cache_data.clear()

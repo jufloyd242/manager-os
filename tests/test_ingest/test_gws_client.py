@@ -73,10 +73,12 @@ def test_parse_gws_datetime_invalid_returns_none() -> None:
 def test_calendar_ingests_meetings(conn) -> None:
     snap = _FIXTURE_DIR / "calendar" / "2026-06-13.json"
     result = _ingest_calendar_file(snap, conn, force=False)
-    # 3 events in fixture; all have valid start dates
-    assert result.ingested == 3
+    # 3 events in fixture; 1 has no attendees (solo timebox) and is skipped
+    assert result.ingested == 2
+    assert result.skipped == 1
+    assert result.skip_reasons.get("no_external_attendees", 0) == 1
     count = conn.execute("SELECT COUNT(*) FROM meetings").fetchone()[0]
-    assert count == 3
+    assert count == 2
 
 
 def test_calendar_meeting_has_correct_title(conn) -> None:
@@ -119,15 +121,18 @@ def test_calendar_idempotent(conn) -> None:
     snap = _FIXTURE_DIR / "calendar" / "2026-06-13.json"
     _ingest_calendar_file(snap, conn, force=False)
     result2 = _ingest_calendar_file(snap, conn, force=False)
-    assert result2.skipped == 3
+    # 1 skipped because no attendees, 2 skipped because already_exists
     assert result2.ingested == 0
+    total_skipped = result2.skipped
+    assert total_skipped == 3
 
 
 def test_calendar_force_re_ingests(conn) -> None:
     snap = _FIXTURE_DIR / "calendar" / "2026-06-13.json"
     _ingest_calendar_file(snap, conn, force=False)
     result2 = _ingest_calendar_file(snap, conn, force=True)
-    assert result2.ingested == 3
+    # 2 events re-ingested (1 has no attendees and is always skipped)
+    assert result2.ingested == 2
 
 
 def test_calendar_missing_file_returns_failed(conn, tmp_path: Path) -> None:

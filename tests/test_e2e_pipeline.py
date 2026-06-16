@@ -90,7 +90,8 @@ def test_e2e_ingest_raw_documents(seeded_conn) -> None:
 
 def test_e2e_ingest_meetings_from_calendar(seeded_conn) -> None:
     count = seeded_conn.execute("SELECT COUNT(*) FROM meetings").fetchone()[0]
-    assert count == 3  # 3 events in fixture
+    # 3 events in fixture; 1 has no attendees (solo timebox) and is correctly skipped
+    assert count == 2
 
 
 def test_e2e_ingest_notes(seeded_conn) -> None:

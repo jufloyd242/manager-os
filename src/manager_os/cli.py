@@ -34,6 +34,8 @@ _SAFE_SKIP_REASONS: frozenset[str] = frozenset({
     "tier_context",
     "tier_excluded",
     "junk_note_type",
+    # Calendar events with no external attendees (solo timeblocks) — intentional
+    "no_external_attendees",
 })
 
 
@@ -3969,6 +3971,195 @@ def llm_doctor(
                 console.print(f"  Error: {result.smoke_test_error}")
 
     console.print()
+
+
+# ---------------------------------------------------------------------------
+# manager-os workspace-fetch-deal-docs
+# ---------------------------------------------------------------------------
+
+@app.command("workspace-fetch-deal-docs")
+def workspace_fetch_deal_docs(
+    target_date: Optional[str] = typer.Option(None, "--date", help="Date label for snapshot (YYYY-MM-DD)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without contacting Google Drive."),
+    deal_id: Optional[str] = typer.Option(None, "--deal-id", help="Fetch docs for a single deal ID."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Max deals to fetch docs for."),
+    timeout: int = typer.Option(60, "--timeout", help="Timeout in seconds per Gemini CLI call."),
+    print_prompt: bool = typer.Option(False, "--print-prompt", help="Print the prompt that would be sent."),
+    force: bool = typer.Option(False, "--force", help="Re-fetch even if results already exist."),
+) -> None:
+    """Retrieve INT SOW and Deal Sheet links from Google Drive for each deal.
+
+    Searches Google Drive via Gemini CLI (read-only) for documents matching
+    each deal's opportunity number and stores results in the deal_documents table.
+    """
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.ingest.drive_deal_docs import (
+        build_drive_search_prompt,
+        fetch_deal_docs,
+    )
+    from rich import box as rich_box
+    from rich.panel import Panel
+
+    settings = get_settings()
+    run_date = date.fromisoformat(target_date) if target_date else date.today()
+
+    console.print(Panel.fit(
+        "[bold]Manager OS — Workspace: Fetch Deal Docs[/bold]",
+        box=rich_box.ROUNDED,
+        border_style="cyan",
+    ))
+    console.print(f"  [dim]Date:[/dim]     {run_date}")
+    console.print(f"  [dim]Deal ID:[/dim]  {deal_id or '(all active deals)'}")
+    console.print(f"  [dim]Limit:[/dim]    {limit or 'none'}")
+    console.print(f"  [dim]Timeout:[/dim]  {timeout}s")
+    if dry_run:
+        console.print("  [yellow bold]DRY RUN — no CLI calls will be made[/yellow bold]")
+    console.print()
+
+    if print_prompt:
+        # Print a sample prompt for inspection
+        sample_prompt = build_drive_search_prompt(
+            deal_id=deal_id or "<OPP-NUMBER>",
+            deal_name="<Deal Name>",
+            account="<Account>",
+        )
+        console.print("[bold]Sample prompt:[/bold]")
+        console.print(sample_prompt)
+        console.print()
+        if dry_run:
+            return
+
+    conn = get_connection(settings.db_path)
+    snapshot_dir = settings.gws_snapshot_dir
+
+    result = fetch_deal_docs(
+        conn,
+        snapshot_dir=snapshot_dir,
+        target_date=run_date,
+        deal_id_filter=deal_id,
+        limit=limit,
+        bin_path=settings.gemini_cli_bin,
+        model=settings.gemini_cli_model,
+        timeout=timeout,
+        yolo=settings.gemini_cli_yolo,
+        workdir=settings.gemini_cli_workdir or "",
+        dry_run=dry_run,
+        force=force,
+    )
+
+    # Print results table
+    tbl = Table(
+        title=f"Deal docs — {run_date}{'  (dry run)' if dry_run else ''}",
+        show_header=True,
+        box=rich_box.SIMPLE,
+    )
+    tbl.add_column("Deal ID", style="cyan")
+    tbl.add_column("Type", style="dim")
+    tbl.add_column("Status")
+    tbl.add_column("Title")
+    tbl.add_column("URL")
+
+    for r in result.results:
+        status_str = (
+            "[green]found[/green]" if r.search_status == "found"
+            else ("[yellow]not found[/yellow]" if r.search_status == "not_found"
+                  else f"[red]{r.search_status}[/red]")
+        )
+        tbl.add_row(
+            r.deal_id[:20],
+            r.document_type,
+            status_str,
+            r.title[:40] if r.title else "—",
+            r.url[:50] if r.url else "—",
+        )
+
+    console.print(tbl)
+    console.print(f"[dim]Fetched: {result.fetched}  Skipped: {result.skipped}  Failed: {result.failed}[/dim]")
+
+    if result.errors:
+        for err in result.errors[:5]:
+            console.print(f"[yellow]⚠ {err}[/yellow]")
+
+
+# ---------------------------------------------------------------------------
+# manager-os people-audit
+# ---------------------------------------------------------------------------
+
+@app.command("people-audit")
+def people_audit(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show full alias map."),
+) -> None:
+    """Audit people config: canonical names, aliases, untracked, unconfigured.
+
+    Reports:
+    - Configured tracked people
+    - People with track=false (excluded from dashboard)
+    - Alias map (alias → canonical)
+    - Duplicate candidates (names in DB that resolve to different canonical names)
+    - Unconfigured names seen in notes/forecast/calendar but not in people.yaml
+    """
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.people_normalization import run_people_audit
+    from rich import box as rich_box
+    from rich.panel import Panel
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+
+    audit = run_people_audit(conn, settings)
+
+    console.print(Panel.fit(
+        "[bold]Manager OS — People Audit[/bold]",
+        box=rich_box.ROUNDED,
+        border_style="cyan",
+    ))
+    console.print()
+
+    # Tracked
+    console.print(f"[bold]✅ Tracked people ({len(audit.tracked)}):[/bold]")
+    for name in audit.tracked:
+        console.print(f"  • {name}")
+    console.print()
+
+    # Untracked
+    if audit.untracked:
+        console.print(f"[bold]⏸  Untracked (track=false) ({len(audit.untracked)}):[/bold]")
+        for name in audit.untracked:
+            console.print(f"  • {name}")
+        console.print()
+
+    # Duplicate candidates
+    if audit.duplicate_candidates:
+        console.print(f"[bold]🔄 Duplicate candidates ({len(audit.duplicate_candidates)}):[/bold]")
+        for raw, canonical in sorted(audit.duplicate_candidates):
+            console.print(f"  '{raw}' → '{canonical}'")
+        console.print()
+    else:
+        console.print("[dim]✓ No duplicate candidates found.[/dim]")
+        console.print()
+
+    # Unconfigured
+    if audit.unconfigured_in_db:
+        console.print(f"[bold][yellow]⚠ Unconfigured names in DB ({len(audit.unconfigured_in_db)}):[/yellow][/bold]")
+        for name in audit.unconfigured_in_db:
+            console.print(f"  [yellow]• {name}[/yellow]")
+        console.print("[dim]  These names appear in notes/forecast/signals but are not in people.yaml.[/dim]")
+        console.print()
+    else:
+        console.print("[dim]✓ All DB people names are configured.[/dim]")
+        console.print()
+
+    # Alias map
+    if verbose and audit.alias_map:
+        console.print(f"[bold]Alias map ({len(audit.alias_map)} aliases):[/bold]")
+        tbl = Table(show_header=True, box=rich_box.SIMPLE, show_edge=False)
+        tbl.add_column("Alias", style="dim")
+        tbl.add_column("→ Canonical")
+        for alias, canonical in sorted(audit.alias_map.items()):
+            tbl.add_row(alias, canonical)
+        console.print(tbl)
 
 
 if __name__ == "__main__":

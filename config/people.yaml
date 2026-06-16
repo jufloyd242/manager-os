@@ -1,57 +1,79 @@
 # Team members / people
-# Fields: name (canonical), aliases (list of strings for entity resolution), role, level
+# Fields:
+#   name     — canonical display name (required)
+#   aliases  — list of alternate names/spellings to resolve to this canonical name
+#   role     — job title
+#   level    — career level (e.g. L4, L5)
+#   track    — true (default) = include in dashboard and people-health tracking
+#              false = do not show in operational dashboard (historical data kept)
+#
+# Rules:
+#   - All aliases resolve to the canonical name.
+#   - track: false hides the person from the People tab and people-health signals.
+#   - People not listed here will appear as "unconfigured" in people-audit.
 
 - name: "Alok Gupta"
   aliases: ["Alok", "alok", "Alok Gupta"]
   role: "Staff AI Engineer"
   level: "L5"
+  track: true
 
 - name: "Kevin Tuuri"
   aliases: ["Kevin", "kevin", "Kevin Tuuri"]
   role: "Senior AI Engineer"
   level: "L4"
+  track: true
 
 - name: "Rajeshwar Satyaditya"
   aliases: ["Satya", "satya", "Rajeshwar Satyaditya", "Rajeshwar"]
   role: "Senior AI Engineer"
   level: "L4"
+  track: true
 
 - name: "Chris Presley"
   aliases: ["Chris", "chris"]
   role: "Director"
   level: ""
+  track: true
 
 - name: "George Kalisse"
   aliases: ["George", "george", "George Kalisse"]
   role: "Senior AI Engineer"
   level: "L4"
+  track: true
 
 - name: "Krishna Padmanaban"
   aliases: ["Krishna", "krishna", "Krishna Padmanaban"]
   role: "Senior AI Engineer"
   level: "L4"
+  track: true
 
 - name: "Prabha Arivalagan"
   aliases: ["Prabha", "prabha", "Prabha Arivalagan"]
   role: "Senior AI Engineer"
   level: "L4"
+  track: true
 
 - name: "Taylor Stacey"
-  aliases: ["Taylor", "taylor", "Taylor Stacey"]
+  aliases: ["Taylor", "taylor", "Taylor Stacey", "T. Stacey"]
   role: "Staff AI Engineer"
   level: "L5"
+  track: true
 
 - name: "Zheng Yang"
   aliases: ["Zheng", "zheng", "Zheng Yang"]
   role: "Senior AI Engineer"
   level: "L4"
+  track: true
 
 - name: "Jason Brancazio"
   aliases: ["Jason", "jason", "Jason Brancazio"]
   role: "Staff ML Engineer"
   level: "L5"
+  track: true
 
 - name: "Luis Chinchilla Garcia"
   aliases: ["Luis", "luis", "Luis Chinchilla Garcia"]
   role: "Senior ML Engineer"
   level: "L4"
+  track: true

@@ -15,6 +15,7 @@ from manager_os.schemas import (
     DashboardDealRow,
     DashboardForecastRow,
     DashboardPeopleRow,
+    MeetingRecord,
     Signal,
 )
 
@@ -189,6 +190,18 @@ def update_action_item(
 
 
 def get_meetings_for_date(conn, target_date: date) -> list[dict]:
+    """Return meetings for *target_date* as plain dicts (stable public contract).
+
+    Each dict has keys:
+        id, meeting_date, start_time, title, attendees (list[str]),
+        linked_entities (list[dict]), source, external_id, updated_at
+
+    Meetings with no attendees (solo timeblocks) are excluded.
+    Duplicates are collapsed by (external_id) or (title + start_time + date)
+    keeping the richest record — one with attendees > external_id > linked_entities.
+    """
+    from manager_os.schemas import MeetingRecord  # local import avoids circularity
+
     rows = conn.execute(
         """
         SELECT id, meeting_date, start_time, title, attendees,
@@ -198,13 +211,18 @@ def get_meetings_for_date(conn, target_date: date) -> list[dict]:
         """,
         [target_date],
     ).fetchall()
-    results = []
+
+    parsed: list[dict] = []
     for r in rows:
         attendees_raw = r[4]
-        attendees = json.loads(attendees_raw) if isinstance(attendees_raw, str) else (attendees_raw or [])
+        attendees: list[str] = json.loads(attendees_raw) if isinstance(attendees_raw, str) else (attendees_raw or [])
         linked_raw = r[5]
-        linked = json.loads(linked_raw) if isinstance(linked_raw, str) else (linked_raw or [])
-        results.append({
+        linked: list[dict] = json.loads(linked_raw) if isinstance(linked_raw, str) else (linked_raw or [])
+        # Skip solo / no-attendee events
+        if not attendees:
+            logger.debug("Skipping no-attendee meeting: %s on %s", r[3], r[1])
+            continue
+        parsed.append({
             "id": r[0],
             "meeting_date": r[1],
             "start_time": r[2] or "",
@@ -215,7 +233,49 @@ def get_meetings_for_date(conn, target_date: date) -> list[dict]:
             "external_id": r[7] or "",
             "updated_at": r[8],
         })
-    return results
+
+    # --- Deduplicate ---
+    # Key: external_id if present, else (normalised_title, start_time, date)
+    def _dedup_key(m: dict) -> str:
+        if m.get("external_id"):
+            return f"ext:{m['external_id']}"
+        norm_title = (m["title"] or "").lower().strip()
+        return f"ts:{norm_title}|{m['start_time']}|{m['meeting_date']}"
+
+    def _richness(m: dict) -> tuple:
+        """Higher tuple → richer record; used for max() selection."""
+        return (
+            1 if m["attendees"] else 0,
+            1 if m.get("external_id") else 0,
+            len(m.get("linked_entities") or []),
+            1 if m.get("source") else 0,
+        )
+
+    seen: dict[str, dict] = {}
+    for m in parsed:
+        key = _dedup_key(m)
+        if key not in seen or _richness(m) > _richness(seen[key]):
+            seen[key] = m
+
+    return list(seen.values())
+
+
+def meeting_dict_to_record(m: dict):
+    """Convert a meeting dict (from get_meetings_for_date) to a MeetingRecord.
+
+    Safe to call even when linked_entities or attendees are missing/None.
+    """
+    from manager_os.schemas import MeetingRecord
+    return MeetingRecord(
+        id=m["id"],
+        meeting_date=m["meeting_date"],
+        start_time=m.get("start_time") or "",
+        title=m.get("title") or "",
+        attendees=m.get("attendees") or [],
+        linked_entities=m.get("linked_entities") or [],
+        source=m.get("source") or "",
+        external_id=m.get("external_id") or "",
+    )
 
 
 def update_signal_status(
@@ -272,10 +332,27 @@ def get_signal_status_history(conn, signal_id: str) -> list[dict]:
 # ------------------------------------------------------------------
 
 
-def get_people_rows(conn, as_of: date | None = None) -> list[DashboardPeopleRow]:
-    """Return one row per person from config, enriched with signal/note data."""
+def get_people_rows(conn, as_of: date | None = None, settings=None) -> list[DashboardPeopleRow]:
+    """Return one row per tracked person, canonicalized and enriched with signal/note data.
+
+    People with ``track: false`` in people.yaml are excluded from the result.
+    Aliases are canonicalized before display.
+    """
     if as_of is None:
         as_of = date.today()
+
+    # Build normalizer for alias resolution and track filtering
+    try:
+        from manager_os.build.people_normalization import PeopleNormalizer
+        normalizer = PeopleNormalizer.from_config(settings)
+    except Exception:
+        normalizer = None
+
+    def _canon(name: str) -> str:
+        return normalizer.canonicalize(name) if normalizer else name
+
+    def _is_tracked(name: str) -> bool:
+        return normalizer.is_tracked(name) if normalizer else True
 
     # All known people from the people table; also collect names from notes
     people_rows = conn.execute(
@@ -283,56 +360,85 @@ def get_people_rows(conn, as_of: date | None = None) -> list[DashboardPeopleRow]
         "last_1on1_date, morale_signal, growth_topic, blockers FROM people"
     ).fetchall()
 
-    # Build a map of name → row for people in the DB table
+    # Build a map of canonical_name → row for people in the DB table
     people_map: dict[str, dict] = {}
     for r in people_rows:
-        people_map[r[0]] = {
-            "name": r[0], "role": r[1] or "", "current_client": r[2] or "",
-            "allocation_pct": r[3] or 0.0, "next_availability_date": r[4],
-            "last_1on1_date": r[5], "morale_signal": r[6] or "green",
-            "growth_topic": r[7] or "", "blockers": r[8] or "",
-        }
+        canon = _canon(r[0])
+        if not _is_tracked(canon):
+            continue
+        if canon not in people_map:
+            people_map[canon] = {
+                "name": canon, "role": r[1] or "", "current_client": r[2] or "",
+                "allocation_pct": r[3] or 0.0, "next_availability_date": r[4],
+                "last_1on1_date": r[5], "morale_signal": r[6] or "green",
+                "growth_topic": r[7] or "", "blockers": r[8] or "",
+            }
 
-    # Pull all unique person names from notes (1on1 notes)
+    # Pull all unique person names from notes (1on1 notes), canonicalize
     note_people = conn.execute(
         "SELECT DISTINCT entity_name FROM notes WHERE note_type = '1on1' AND entity_name != ''"
     ).fetchall()
     for (name,) in note_people:
-        if name and name not in people_map:
-            people_map[name] = {
-                "name": name, "role": "", "current_client": "", "allocation_pct": 0.0,
+        if not name:
+            continue
+        canon = _canon(name)
+        if not _is_tracked(canon):
+            continue
+        if canon not in people_map:
+            people_map[canon] = {
+                "name": canon, "role": "", "current_client": "", "allocation_pct": 0.0,
                 "next_availability_date": None, "last_1on1_date": None,
                 "morale_signal": "green", "growth_topic": "", "blockers": "",
             }
 
-    # Also pull people from signals
+    # Also pull people from signals, canonicalize
     sig_people = conn.execute(
         "SELECT DISTINCT entity_name FROM signals WHERE entity_type = 'person' AND entity_name != ''"
     ).fetchall()
     for (name,) in sig_people:
-        if name and name not in people_map:
-            people_map[name] = {
-                "name": name, "role": "", "current_client": "", "allocation_pct": 0.0,
+        if not name:
+            continue
+        canon = _canon(name)
+        if not _is_tracked(canon):
+            continue
+        if canon not in people_map:
+            people_map[canon] = {
+                "name": canon, "role": "", "current_client": "", "allocation_pct": 0.0,
                 "next_availability_date": None, "last_1on1_date": None,
                 "morale_signal": "green", "growth_topic": "", "blockers": "",
             }
 
-    # Last 1:1 date per person from notes
-    last_1on1 = conn.execute(
-        "SELECT entity_name, MAX(note_date) FROM notes WHERE note_type = '1on1' GROUP BY entity_name"
+    # Last 1:1 date per person from notes — canonicalize names for grouping
+    last_1on1_raw = conn.execute(
+        "SELECT entity_name, note_date FROM notes WHERE note_type = '1on1' ORDER BY note_date DESC"
     ).fetchall()
-    last_1on1_map = {r[0]: r[1] for r in last_1on1 if r[0]}
+    last_1on1_map: dict[str, Any] = {}
+    for r in last_1on1_raw:
+        if not r[0]:
+            continue
+        canon = _canon(r[0])
+        if canon not in last_1on1_map:  # keep most recent
+            last_1on1_map[canon] = r[1]
 
-    # Open signals per person
-    sig_rows = conn.execute(
-        "SELECT entity_name, COUNT(*), "
-        "MIN(CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END) "
-        "FROM signals WHERE entity_type = 'person' AND status = 'open' GROUP BY entity_name"
+    # Open signals per person — canonicalize names
+    sig_rows_raw = conn.execute(
+        "SELECT entity_name, severity FROM signals WHERE entity_type = 'person' AND status = 'open'"
     ).fetchall()
-    sig_map: dict[str, tuple[int, str | None]] = {}
     _rank_to_sev = {0: "critical", 1: "high", 2: "medium", 3: "low"}
-    for r in sig_rows:
-        sig_map[r[0]] = (r[1], _rank_to_sev.get(r[2]))
+    _sev_to_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    sig_map_counts: dict[str, int] = {}
+    sig_map_min_rank: dict[str, int] = {}
+    for r in sig_rows_raw:
+        if not r[0]:
+            continue
+        canon = _canon(r[0])
+        sig_map_counts[canon] = sig_map_counts.get(canon, 0) + 1
+        rank = _sev_to_rank.get(r[1], 4)
+        sig_map_min_rank[canon] = min(sig_map_min_rank.get(canon, 99), rank)
+    sig_map: dict[str, tuple[int, str | None]] = {
+        name: (sig_map_counts[name], _rank_to_sev.get(sig_map_min_rank[name]))
+        for name in sig_map_counts
+    }
 
     # Current-week allocation per person.
     # Use the NEAREST forecast week on or after as_of (not a sum across weeks).
@@ -360,7 +466,11 @@ def get_people_rows(conn, as_of: date | None = None) -> list[DashboardPeopleRow]
             """,
             [nearest_week],
         ).fetchall()
-        fc_map = {r[0]: float(r[1] or 0.0) for r in fc_rows if r[0]}
+        for r in fc_rows:
+            if r[0]:
+                canon = _canon(r[0])
+                # Sum within the same canonical person (e.g. multiple alias rows)
+                fc_map[canon] = fc_map.get(canon, 0.0) + float(r[1] or 0.0)
 
     result = []
     for name, p in sorted(people_map.items()):
@@ -545,6 +655,24 @@ def get_client_rows(conn, as_of: date | None = None) -> list[dict]:
 
     _rank_to_sev = {0: "critical", 1: "high", 2: "medium", 3: "low"}
 
+    # Active deals per client (account) — for opportunity number display
+    deal_opp_rows = conn.execute(
+        "SELECT account, deal_id, deal_name, stage, close_date "
+        "FROM deals WHERE deal_name != '' ORDER BY account, close_date NULLS LAST"
+    ).fetchall()
+    client_deals: dict[str, list[dict]] = {}
+    for r in deal_opp_rows:
+        acct = r[0] or ""
+        if acct and acct in client_names:
+            if acct not in client_deals:
+                client_deals[acct] = []
+            client_deals[acct].append({
+                "deal_id": r[1] or "",
+                "deal_name": r[2] or "",
+                "stage": r[3] or "",
+                "close_date": r[4],
+            })
+
     result = []
     for name in sorted(client_names):
         rank = client_min_rank.get(name, 99)
@@ -565,6 +693,7 @@ def get_client_rows(conn, as_of: date | None = None) -> list[dict]:
             "open_risk_count": client_risk_count.get(name, 0),
             "last_update_date": last_date,
             "highest_severity": _rank_to_sev.get(rank),
+            "deals": client_deals.get(name, []),
         })
 
     # Sort: red first, then yellow, then green
@@ -586,14 +715,42 @@ def get_signals_for_client(conn, client_name: str) -> list[Signal]:
 # ------------------------------------------------------------------
 
 
+def get_deal_documents(conn, deal_id: str) -> dict[str, dict]:
+    """Return SOW and Deal Sheet metadata for a deal from deal_documents table.
+
+    Returns a dict keyed by document_type ('int_sow', 'deal_sheet'), each containing
+    title, url, search_status.  Missing document types return empty dicts.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT document_type, title, url, search_status
+            FROM deal_documents
+            WHERE deal_id = ?
+              AND search_status = 'found'
+            ORDER BY retrieved_at DESC
+            """,
+            [deal_id],
+        ).fetchall()
+    except Exception:
+        return {}
+
+    docs: dict[str, dict] = {}
+    for doc_type, title, url, status in rows:
+        if doc_type not in docs:  # keep most recent per type
+            docs[doc_type] = {"title": title or "", "url": url or "", "status": status or ""}
+    return docs
+
+
 def get_deal_rows(conn, as_of: date | None = None) -> list[DashboardDealRow]:
-    """Return all deals enriched with signal counts."""
+    """Return all deals enriched with signal counts, document links, and feasibility provenance."""
     if as_of is None:
         as_of = date.today()
 
     rows = conn.execute(
         "SELECT id, account, deal_name, stage, close_date, technical_owner, "
-        "ae_name, loe_status, sow_status, staffing_feasibility, blockers, next_action "
+        "ae_name, loe_status, sow_status, staffing_feasibility, blockers, next_action, "
+        "COALESCE(deal_id, '') "
         "FROM deals ORDER BY close_date NULLS LAST"
     ).fetchall()
 
@@ -608,7 +765,7 @@ def get_deal_rows(conn, as_of: date | None = None) -> list[DashboardDealRow]:
 
     result = []
     for row in rows:
-        _, account, deal_name, stage, close_date, tech_owner, ae, loe, sow, feasibility, blockers, next_action = row
+        db_id, account, deal_name, stage, close_date, tech_owner, ae, loe, sow, feasibility, blockers, next_action, deal_id_val = row
         if close_date:
             try:
                 cd = close_date if isinstance(close_date, date) else date.fromisoformat(str(close_date))
@@ -622,9 +779,23 @@ def get_deal_rows(conn, as_of: date | None = None) -> list[DashboardDealRow]:
 
         open_count, highest_sev = sig_map.get(deal_name, (0, None))
 
+        # Determine staffing feasibility provenance
+        if feasibility:
+            feasibility_source = "deals_csv"
+        else:
+            feasibility_source = "unknown"
+            feasibility = "feasible"
+
+        # Look up document links
+        effective_deal_id = deal_id_val or db_id
+        docs = get_deal_documents(conn, effective_deal_id)
+        sow_doc = docs.get("int_sow", {})
+        ds_doc = docs.get("deal_sheet", {})
+
         result.append(DashboardDealRow(
             account=account,
             deal_name=deal_name,
+            deal_id=effective_deal_id,
             stage=stage or "",
             close_date=cd,
             days_to_close=days_to_close,
@@ -632,11 +803,16 @@ def get_deal_rows(conn, as_of: date | None = None) -> list[DashboardDealRow]:
             ae_name=ae or "",
             loe_status=loe or "",
             sow_status=sow or "",
-            staffing_feasibility=feasibility or "feasible",  # type: ignore[arg-type]
+            staffing_feasibility=feasibility,  # type: ignore[arg-type]
+            staffing_feasibility_source=feasibility_source,
             blockers=blockers or "",
             next_action=next_action or "",
             open_signal_count=open_count,
             highest_severity=highest_sev,  # type: ignore[arg-type]
+            sow_title=sow_doc.get("title", ""),
+            sow_url=sow_doc.get("url", ""),
+            deal_sheet_title=ds_doc.get("title", ""),
+            deal_sheet_url=ds_doc.get("url", ""),
         ))
     return result
 
@@ -701,23 +877,28 @@ def get_forecast_summary(conn, as_of: date | None = None) -> dict:
     """Return grouped forecast stats for the 3 time buckets.
 
     Classification is per person-week, then summarized by person:
-    - overallocated: person has any week > 100.01%
-    - underallocated: person has any week < 99.99%
-    - available: person has all weeks between 99.99% and 100.01%
+    - overallocated:    person has ANY week > 100.01%
+    - fully_utilized:   all of person's weeks are within [99.99, 100.01]
+    - available:        person has ANY week < 99.99% and NO overallocated week
+
+    Window labels include explicit date ranges, e.g. "2w (2026-06-16 → 2026-06-30)".
     """
     from datetime import timedelta
     if as_of is None:
         as_of = date.today()
 
     all_rows = get_forecast_rows(conn, as_of=as_of)
-    buckets = {
+    raw_buckets = {
         "2w": as_of + timedelta(days=14),
         "30d": as_of + timedelta(days=30),
         "60d": as_of + timedelta(days=60),
     }
 
     summary: dict[str, dict] = {}
-    for label, end_date in buckets.items():
+    for short_label, end_date in raw_buckets.items():
+        # Build display label with real date range
+        label = f"{short_label} ({as_of.isoformat()} → {end_date.isoformat()})"
+
         in_window = [r for r in all_rows if as_of <= r.week_start <= end_date]
 
         # Per-person-week classification; aggregate into per-person status sets
@@ -726,18 +907,23 @@ def get_forecast_summary(conn, as_of: date | None = None) -> dict:
             name = r.person_name
             if name not in person_statuses:
                 person_statuses[name] = set()
-            if r.is_overallocated:
+            if r.is_overallocated:           # > 100.01
                 person_statuses[name].add("over")
-            elif r.is_underallocated:
-                person_statuses[name].add("under")
-            else:
+            elif not r.is_underallocated:    # 99.99 <= x <= 100.01
                 person_statuses[name].add("ok")
+            else:                            # < 99.99
+                person_statuses[name].add("under")
 
         overallocated = sorted(p for p, s in person_statuses.items() if "over" in s)
-        underallocated = sorted(p for p, s in person_statuses.items() if "under" in s)
-        available = sorted(
+        # Fully utilized: no over, no under weeks (all "ok")
+        fully_utilized = sorted(
             p for p, s in person_statuses.items()
             if "over" not in s and "under" not in s
+        )
+        # Available: no over, but has at least one under week
+        available = sorted(
+            p for p, s in person_statuses.items()
+            if "over" not in s and "under" in s
         )
 
         # Roll-offs: last confirmed week for any person within window
@@ -748,12 +934,20 @@ def get_forecast_summary(conn, as_of: date | None = None) -> dict:
             [as_of, end_date],
         ).fetchall()
 
-        summary[label] = {
+        bucket_data = {
             "overallocated": overallocated,
-            "underallocated": underallocated,
+            "fully_utilized": fully_utilized,
             "available": available,
             "rolloffs": [(r[0], r[1]) for r in rolloffs],
+            # Legacy key (backward compat): "underallocated" = same as "available"
+            "underallocated": available,
+            "start_date": as_of.isoformat(),
+            "end_date": end_date.isoformat(),
         }
+        # Full label (with dates) is the primary key
+        summary[label] = bucket_data
+        # Short-key alias for backward compat (e.g. summary["2w"])
+        summary[short_label] = bucket_data
     return summary
 
 

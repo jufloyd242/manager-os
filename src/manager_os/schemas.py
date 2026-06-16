@@ -83,6 +83,7 @@ class PersonConfig(BaseModel):
     aliases: list[str] = []
     role: str = ""
     level: str = ""
+    track: bool = True  # False = hide from dashboard / people-health tracking
 
 
 class ClientConfig(BaseModel):
@@ -340,6 +341,7 @@ class DashboardDealRow(BaseModel):
 
     account: str
     deal_name: str
+    deal_id: str = ""
     stage: str = ""
     close_date: date | None = None
     days_to_close: int | None = None
@@ -348,10 +350,16 @@ class DashboardDealRow(BaseModel):
     loe_status: str = ""
     sow_status: str = ""
     staffing_feasibility: StaffingFeasibilityType = "feasible"
+    staffing_feasibility_source: str = "deals_csv"  # 'deals_csv' | 'computed' | 'unknown'
     blockers: str = ""
     next_action: str = ""
     open_signal_count: int = 0
     highest_severity: SeverityType | None = None
+    # Document links (from deal_documents table / Google Drive)
+    sow_title: str = ""
+    sow_url: str = ""
+    deal_sheet_title: str = ""
+    deal_sheet_url: str = ""
 
 
 class DashboardForecastRow(BaseModel):

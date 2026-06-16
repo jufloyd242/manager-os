@@ -132,11 +132,26 @@ def _ingest_calendar_file(path: Path, conn, force: bool) -> IngestResult:
         if start_dt:
             start_time = start_dt.strftime("%H:%M")
 
+        raw_attendees = event.get("attendees") or []
         attendees = [
             a.get("displayName") or a.get("email", "")
-            for a in event.get("attendees", [])
+            for a in raw_attendees
             if isinstance(a, dict)
         ]
+
+        # Skip solo/no-attendee events (personal timeblocks).
+        # "self" attendees appear with self=True; external attendees don't.
+        has_external = any(
+            isinstance(a, dict) and not a.get("self", False)
+            for a in raw_attendees
+        )
+        if not has_external:
+            result.skipped += 1
+            result.skip_reasons["no_external_attendees"] = (
+                result.skip_reasons.get("no_external_attendees", 0) + 1
+            )
+            logger.debug("Skipping solo/no-attendee event: %s on %s", title, meeting_date)
+            continue
 
         row_id = content_hash(f"gws:calendar::{ext_id or title}::{meeting_date}")
         exists = conn.execute("SELECT id FROM meetings WHERE id = ?", [row_id]).fetchone()
