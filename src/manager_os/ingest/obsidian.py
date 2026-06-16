@@ -196,6 +196,43 @@ def _strip_frontmatter_block(raw_text: str) -> str:
     return "\n".join(lines[1:]).strip()
 
 
+def _sanitize_frontmatter_yaml(raw_text: str) -> str:
+    """Best-effort repair of common YAML frontmatter mistakes.
+
+    Obsidian users often write titles, clients, or types containing colons
+    or slashes without quoting the scalar value, e.g.::
+
+        title: Decision Log: Giles Access Revocation
+        type: Pre-sales positioning / Approach alignment
+
+    PyYAML rejects those lines (``mapping values are not allowed in this
+    context``). This helper quotes bare scalar values that contain ``:`` or
+    ``/`` so ``frontmatter.loads`` can parse the block. It leaves already
+    quoted values, lists, and inline mappings untouched.
+    """
+    lines = raw_text.splitlines()
+    out: list[str] = []
+    in_frontmatter = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "---":
+            in_frontmatter = not in_frontmatter
+            out.append(line)
+            continue
+        if in_frontmatter and ":" in line:
+            key, _sep, val = line.partition(":")
+            val_stripped = val.strip()
+            if (
+                val_stripped
+                and not val_stripped.startswith(('"', "'", "["))
+                and not val_stripped.endswith(('"', "'"))
+                and (":" in val_stripped or "/" in val_stripped)
+            ):
+                line = f'{key}: "{val_stripped}"'
+        out.append(line)
+    return "\n".join(out)
+
+
 def _build_metadata(
     fm: dict,
     tags: list[str],
@@ -242,7 +279,8 @@ def _ingest_file(
         )
         return
 
-    # Parse frontmatter — tolerate malformed YAML by falling back to body-only
+    # Parse frontmatter — tolerate malformed YAML by sanitizing common mistakes
+    # (unquoted colons/slashes in scalar values) and falling back to body-only.
     fm: dict = {}
     body: str = ""
     frontmatter_warning: str | None = None
@@ -251,11 +289,17 @@ def _ingest_file(
         fm = dict(post.metadata)
         body = post.content.strip()
     except Exception as exc:
-        frontmatter_warning = f"frontmatter parse error in {md_file}: {exc}"
-        logger.warning("%s", frontmatter_warning)
-        # Preserve the raw text as body; strip any leading "---" delimiter block
-        # so extraction doesn't choke on raw YAML syntax
-        body = _strip_frontmatter_block(raw_text)
+        sanitized = _sanitize_frontmatter_yaml(raw_text)
+        try:
+            post = frontmatter.loads(sanitized)
+            fm = dict(post.metadata)
+            body = post.content.strip()
+        except Exception:
+            frontmatter_warning = f"frontmatter parse error in {md_file}: {exc}"
+            logger.warning("%s", frontmatter_warning)
+            # Preserve the raw text as body; strip any leading "---" delimiter block
+            # so extraction doesn't choke on raw YAML syntax
+            body = _strip_frontmatter_block(raw_text)
 
     # Build title from frontmatter or filename
     title = str(fm.get("title", md_file.stem.replace("_", " ").replace("-", " ")))
