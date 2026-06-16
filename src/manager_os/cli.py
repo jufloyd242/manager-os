@@ -30,6 +30,10 @@ _SAFE_SKIP_REASONS: frozenset[str] = frozenset({
     "signal_already_exists",
     "action_item_already_exists",
     "decision_already_exists",
+    # Source tier skips — notes that are not signal tier are intentionally skipped
+    "tier_context",
+    "tier_excluded",
+    "junk_note_type",
 })
 
 
@@ -3148,6 +3152,206 @@ def scope_preview(
 
 
 # ---------------------------------------------------------------------------
+# workspace-doctor
+# ---------------------------------------------------------------------------
+
+@app.command("workspace-doctor")
+def workspace_doctor_cmd() -> None:
+    """Diagnose workspace retrieval configuration."""
+    from manager_os.ingest.workspace_gemini import workspace_doctor
+    from rich import box as rich_box
+    from rich.panel import Panel
+    from rich.table import Table
+
+    console.print("[dim]Checking workspace retrieval configuration…[/dim]")
+    result = workspace_doctor()
+
+    console.print()
+    console.print(Panel.fit(
+        "[bold]Manager OS — Workspace Doctor[/bold]",
+        box=rich_box.ROUNDED,
+        border_style="cyan",
+    ))
+
+    tbl = Table(show_header=False, box=None, padding=(0, 2))
+    tbl.add_column("Setting", style="dim")
+    tbl.add_column("Value")
+    tbl.add_row("Gemini CLI available", "[green]yes[/green]" if result.gemini_available else "[red]no[/red]")
+    tbl.add_row("YOLO configured", f"[green]{result.yolo_configured}[/green]")
+    tbl.add_row("Retrieval enabled", f"[green]{result.retrieval_enabled}[/green]")
+    tbl.add_row("Forecast retrieval", f"[green]{result.forecast_enabled}[/green]")
+    tbl.add_row("Calendar retrieval", f"[green]{result.calendar_enabled}[/green]")
+    tbl.add_row("Activity retrieval", f"[green]{result.activity_enabled}[/green]")
+    console.print(tbl)
+
+    if result.errors:
+        console.print()
+        console.print("[yellow]Issues:[/yellow]")
+        for e in result.errors:
+            console.print(f"  [yellow]⚠ {e}[/yellow]")
+
+    console.print()
+
+
+# ---------------------------------------------------------------------------
+# workspace-fetch commands
+# ---------------------------------------------------------------------------
+
+def _default_output_dir() -> str | None:
+    return None  # uses data/raw/workspace_snapshots/<subdir>/
+
+
+def _do_workspace_fetch(
+    command_name: str,
+    retrieve_fn,
+    target_date: date,
+    dry_run: bool,
+    print_prompt: bool,
+    no_yolo: bool,
+    timeout: int,
+    output_dir: str | None,
+    **kwargs,
+) -> None:
+    """Run a workspace retrieval command and display results."""
+    from rich import box as rich_box
+    from rich.panel import Panel
+
+    use_yolo = not no_yolo
+
+    if dry_run:
+        console.print(f"[dim]Dry run — will not contact Google Workspace[/dim]")
+
+    result = retrieve_fn(
+        target_date=target_date,
+        use_yolo=use_yolo,
+        timeout=timeout,
+        dry_run=dry_run,
+        output_dir=output_dir or _default_output_dir(),
+        **kwargs,
+    )
+
+    if print_prompt or (dry_run and result.json_text):
+        console.print()
+        console.print(Panel.fit(
+            "[bold]Prompt sent to Gemini[/bold]",
+            box=rich_box.ROUNDED,
+            border_style="yellow",
+        ))
+        console.print(result.json_text[:2000])
+        console.print()
+
+    if dry_run:
+        console.print(f"[yellow bold]⚠ Dry run — nothing was retrieved or written.[/yellow bold]")
+        return
+
+    if not result.ok:
+        console.print(f"[red]Retrieval failed: {result.error}[/red]")
+        return
+
+    console.print(f"[green]✓ Retrieved {len(result.items)} item(s)[/green]")
+    if result.source_title:
+        console.print(f"  Source: {result.source_title}")
+    if result.written_to:
+        console.print(f"  Snapshot: {result.written_to}")
+    console.print()
+
+
+@app.command("workspace-fetch-forecast")
+def workspace_fetch_forecast(
+    target_date: Optional[str] = typer.Option(None, "--date"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print prompt without running."),
+    print_prompt: bool = typer.Option(False, "--print-prompt", help="Show the Gemini prompt."),
+    no_yolo: bool = typer.Option(False, "--no-yolo", help="Disable YOLO mode."),
+    timeout: int = typer.Option(180, "--timeout", help="Timeout in seconds."),
+    output_dir: Optional[str] = typer.Option(None, "--output-dir"),
+) -> None:
+    """Retrieve latest staffing forecast from Google Workspace."""
+    from manager_os.ingest.workspace_gemini import retrieve_forecast
+
+    run_date = date.fromisoformat(target_date) if target_date else date.today()
+    _do_workspace_fetch("forecast", retrieve_forecast, run_date, dry_run, print_prompt, no_yolo, timeout, output_dir)
+
+
+@app.command("workspace-fetch-calendar")
+def workspace_fetch_calendar(
+    target_date: Optional[str] = typer.Option(None, "--date"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print prompt without running."),
+    print_prompt: bool = typer.Option(False, "--print-prompt", help="Show the Gemini prompt."),
+    no_yolo: bool = typer.Option(False, "--no-yolo", help="Disable YOLO mode."),
+    timeout: int = typer.Option(180, "--timeout", help="Timeout in seconds."),
+    output_dir: Optional[str] = typer.Option(None, "--output-dir"),
+    lookback: Optional[int] = typer.Option(None, "--lookback", help="Override lookback days."),
+    lookahead: Optional[int] = typer.Option(None, "--lookahead", help="Override lookahead days."),
+) -> None:
+    """Retrieve calendar events from Google Workspace."""
+    from manager_os.ingest.workspace_gemini import retrieve_calendar
+
+    run_date = date.fromisoformat(target_date) if target_date else date.today()
+    _do_workspace_fetch(
+        "calendar", retrieve_calendar, run_date, dry_run, print_prompt, no_yolo, timeout, output_dir,
+        lookback_days=lookback, lookahead_days=lookahead,
+    )
+
+
+@app.command("workspace-fetch-activity")
+def workspace_fetch_activity(
+    target_date: Optional[str] = typer.Option(None, "--date"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print prompt without running."),
+    print_prompt: bool = typer.Option(False, "--print-prompt", help="Show the Gemini prompt."),
+    no_yolo: bool = typer.Option(False, "--no-yolo", help="Disable YOLO mode."),
+    timeout: int = typer.Option(180, "--timeout", help="Timeout in seconds."),
+    output_dir: Optional[str] = typer.Option(None, "--output-dir"),
+    lookback: Optional[int] = typer.Option(None, "--lookback", help="Override lookback days."),
+) -> None:
+    """Retrieve recent workspace activity from Google Workspace."""
+    from manager_os.ingest.workspace_gemini import retrieve_activity
+
+    run_date = date.fromisoformat(target_date) if target_date else date.today()
+    _do_workspace_fetch(
+        "activity", retrieve_activity, run_date, dry_run, print_prompt, no_yolo, timeout, output_dir,
+        lookback_days=lookback,
+    )
+
+
+@app.command("workspace-fetch-all")
+def workspace_fetch_all(
+    target_date: Optional[str] = typer.Option(None, "--date"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print prompts without running."),
+    print_prompt: bool = typer.Option(False, "--print-prompt", help="Show the Gemini prompts."),
+    no_yolo: bool = typer.Option(False, "--no-yolo", help="Disable YOLO mode."),
+    timeout: int = typer.Option(180, "--timeout", help="Timeout in seconds per source."),
+    output_dir: Optional[str] = typer.Option(None, "--output-dir"),
+) -> None:
+    """Retrieve all workspace sources (forecast, calendar, activity)."""
+    from manager_os.ingest.workspace_gemini import (
+        retrieve_forecast,
+        retrieve_calendar,
+        retrieve_activity,
+    )
+
+    run_date = date.fromisoformat(target_date) if target_date else date.today()
+    use_yolo = not no_yolo
+
+    if dry_run:
+        console.print("[dim]Dry run — will not contact Google Workspace[/dim]")
+
+    console.print("[bold]Forecast:[/bold]")
+    _do_workspace_fetch("forecast", retrieve_forecast, run_date, dry_run, print_prompt, no_yolo, timeout, output_dir)
+
+    console.print("[bold]Calendar:[/bold]")
+    _do_workspace_fetch(
+        "calendar", retrieve_calendar, run_date, dry_run, print_prompt, no_yolo, timeout, output_dir,
+    )
+
+    console.print("[bold]Activity:[/bold]")
+    _do_workspace_fetch(
+        "activity", retrieve_activity, run_date, dry_run, print_prompt, no_yolo, timeout, output_dir,
+    )
+
+    console.print("[green]All sources processed.[/green]")
+
+
+# ---------------------------------------------------------------------------
 # llm-doctor
 # ---------------------------------------------------------------------------
 
@@ -3180,8 +3384,11 @@ def llm_doctor(
     tbl.add_row("Binary exists", f"[green]yes[/green]" if result.gemini_bin_exists else "[red]no[/red]")
     tbl.add_row("Binary executable", f"[green]yes[/green]" if result.gemini_bin_executable else "[red]no[/red]")
     tbl.add_row("Configured model", result.configured_model)
+    tbl.add_row("Base args", result.base_args or "(none)")
+    tbl.add_row("YOLO mode", f"[green]enabled[/green] ({result.yolo_args})" if result.yolo_enabled else "[dim]disabled[/dim]")
     tbl.add_row("Timeout (seconds)", str(result.timeout))
     tbl.add_row("Working directory", result.workdir or "(cwd)")
+    tbl.add_row("Workspace retrieval", f"[green]enabled[/green]" if result.workspace_retrieval_enabled else "[dim]disabled[/dim]")
     console.print(tbl)
 
     if smoke_test:

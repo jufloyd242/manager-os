@@ -3,6 +3,7 @@ type: client
 entity: Acme Corp
 date: 2026-06-10
 tags: [client, acme, status, risk]
+manager_os: active
 ---
 
 # Acme Corp — Client Status Update — 2026-06-10

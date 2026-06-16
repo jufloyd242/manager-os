@@ -3,6 +3,7 @@ type: 1on1
 entity: Alice Chen
 date: 2026-05-28
 tags: [1on1, people, alice]
+manager_os: active
 ---
 
 # 1:1 with Alice Chen — 2026-05-28

@@ -13,7 +13,7 @@ Precedence (highest to lowest):
     3. exclude_paths (wins over everything except frontmatter inclusion)
     4. signal_paths
     5. context_paths
-    6. Default: signal
+    6. Default: context
 """
 
 from __future__ import annotations
@@ -265,11 +265,10 @@ def classify_source(
             matched_rule=f"context_paths: {_first_match(rel, config.context_paths)}",
         )
 
-    # ── 6. Default: signal ─────────────────────────────
+    # ── 6. Default: context ─────────────────────────────
     return ScopeResult(
-        source_tier="signal",
-        scope_reason="default — no matching rule",
-        is_active=True,
+        source_tier="context",
+        scope_reason="default — no matching rule, treated as context",
         matched_rule="default",
     )
 

@@ -21,6 +21,10 @@ data/raw/*
 data/processed/
 data/demo/
 
+# ── Workspace / GWS snapshots ──────────────────────────────────────────────
+data/raw/workspace_snapshots/
+data/raw/gws_snapshots/
+
 # ── Generated output ──────────────────────────────────────────────────────
 output/
 

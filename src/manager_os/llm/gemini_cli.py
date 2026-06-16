@@ -42,6 +42,9 @@ GEMINI_CLI_BIN = _env("MANAGER_OS_GEMINI_CLI_BIN", "gemini")
 GEMINI_CLI_MODEL = _env("MANAGER_OS_GEMINI_CLI_MODEL", "")
 GEMINI_CLI_TIMEOUT = int(_env("MANAGER_OS_GEMINI_CLI_TIMEOUT_SECONDS", "120"))
 GEMINI_CLI_WORKDIR = _env("MANAGER_OS_GEMINI_CLI_WORKDIR", "")
+GEMINI_CLI_ARGS = _env("MANAGER_OS_GEMINI_CLI_ARGS", "")
+GEMINI_CLI_YOLO = _env("MANAGER_OS_GEMINI_CLI_YOLO", "false").lower() in ("true", "yes", "1")
+GEMINI_CLI_YOLO_ARGS = _env("MANAGER_OS_GEMINI_CLI_YOLO_ARGS", "-y")
 LLM_MAX_CANDIDATES = int(_env("MANAGER_OS_LLM_MAX_CANDIDATES", "25"))
 LLM_MAX_CHARS_PER_NOTE = int(_env("MANAGER_OS_LLM_MAX_CHARS_PER_NOTE", "6000"))
 LLM_ENABLED = _env("MANAGER_OS_LLM_ENABLED", "true").lower() not in ("0", "false", "no", "off")
@@ -54,9 +57,13 @@ class DoctorResult:
     gemini_bin_exists: bool
     gemini_bin_executable: bool
     configured_model: str
+    base_args: str
+    yolo_enabled: bool
+    yolo_args: str
     timeout: int
     workdir: str
     llm_enabled: bool
+    workspace_retrieval_enabled: bool = False
     smoke_test_passed: bool | None = None
     smoke_test_error: str = ""
     smoke_test_output: str = ""
@@ -95,6 +102,7 @@ def run_doctor(smoke_test: bool = True, timeout: int = 60) -> DoctorResult:
     executable = os.access(gemini_bin, os.X_OK) if exists else False
 
     workdir = GEMINI_CLI_WORKDIR or os.getcwd()
+    ws_retrieval = _env("MANAGER_OS_WORKSPACE_RETRIEVAL_ENABLED", "false").lower() in ("true", "yes", "1")
 
     result = DoctorResult(
         provider=LLM_PROVIDER,
@@ -102,9 +110,13 @@ def run_doctor(smoke_test: bool = True, timeout: int = 60) -> DoctorResult:
         gemini_bin_exists=exists,
         gemini_bin_executable=executable,
         configured_model=GEMINI_CLI_MODEL or "(default)",
+        base_args=GEMINI_CLI_ARGS,
+        yolo_enabled=GEMINI_CLI_YOLO,
+        yolo_args=GEMINI_CLI_YOLO_ARGS,
         timeout=GEMINI_CLI_TIMEOUT,
         workdir=workdir,
         llm_enabled=LLM_ENABLED,
+        workspace_retrieval_enabled=ws_retrieval,
     )
 
     if not executable:
@@ -139,16 +151,21 @@ def _run_gemini(
     system_prompt: str,
     user_prompt: str,
     timeout: int = 120,
+    extra_args: list[str] | None = None,
 ) -> str:
-    """Invoke Gemini CLI via subprocess (no shell=True).
-
-    Prompts are passed via stdin to avoid shell escaping issues.
-    """
+    """Invoke Gemini CLI via subprocess (no shell=True)."""
     cmd = [GEMINI_CLI_BIN]
     if GEMINI_CLI_MODEL:
         cmd.extend(["--model", GEMINI_CLI_MODEL])
 
-    # Build the full prompt.  Gemini CLI accepts -p/--prompt for headless mode.
+    # Extra base CLI args
+    if GEMINI_CLI_ARGS:
+        cmd.extend(GEMINI_CLI_ARGS.split())
+
+    if extra_args:
+        cmd.extend(extra_args)
+
+    # Build the full prompt.
     full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
 
     proc = subprocess.run(
@@ -157,7 +174,6 @@ def _run_gemini(
         text=True,
         timeout=timeout,
         cwd=GEMINI_CLI_WORKDIR or None,
-        # No shell=True — safe parameter passing
     )
 
     if proc.returncode != 0:

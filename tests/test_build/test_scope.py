@@ -102,9 +102,9 @@ class TestClassifySource:
         r = classify_source("team/me/my_note.md", frontmatter={"manager_os": "active"})
         assert r.source_tier == "signal"
 
-    def test_default_unknown_path_is_signal(self) -> None:
+    def test_default_unknown_path_is_context(self) -> None:
         r = classify_source("some/random/path.md")
-        assert r.source_tier == "signal"
+        assert r.source_tier == "context", f"Expected context, got {r.source_tier}"
 
 
 # ─────────────────────────────────────────────────────

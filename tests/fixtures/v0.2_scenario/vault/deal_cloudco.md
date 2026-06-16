@@ -3,6 +3,7 @@ type: deal
 entity: CloudCo
 date: 2026-06-12
 tags: [deal, cloudco, sow, loe]
+manager_os: active
 ---
 
 # CloudCo — Deal Note — 2026-06-12

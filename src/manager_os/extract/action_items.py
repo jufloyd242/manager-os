@@ -239,12 +239,21 @@ def extract_action_items(note: NoteRecord, conn, force: bool = False) -> Extract
 def extract_action_items_from_all_notes(
     conn, run_date: date | None = None, force: bool = False
 ) -> ExtractionResult:
-    """Run action item extraction across all notes in the DB."""
+    """Run action item extraction across all notes in the DB.
+
+    Only signal-tier notes produce standalone action items.
+    Context and excluded notes are skipped.
+    """
     from manager_os.schemas import NoteRecord
 
     rows = conn.execute(
-        "SELECT id, raw_document_id, note_date, note_type, entity_type, "
-        "entity_name, title, body, tags, created_at FROM notes"
+        """
+        SELECT n.id, n.raw_document_id, n.note_date, n.note_type, n.entity_type,
+               n.entity_name, n.title, n.body, n.tags, n.created_at,
+               rd.metadata
+        FROM notes n
+        LEFT JOIN raw_documents rd ON rd.id = n.raw_document_id
+        """
     ).fetchall()
 
     combined = ExtractionResult()
@@ -257,6 +266,17 @@ def extract_action_items_from_all_notes(
                 combined.skip_reasons.get("junk_note_type", 0) + 1
             )
             continue
+
+        # Check source tier from raw_documents.metadata
+        metadata_raw = row[10] if len(row) > 10 else None
+        tier = _resolve_note_tier(metadata_raw)
+        if tier != "signal":
+            combined.skipped += 1
+            combined.skip_reasons[f"tier_{tier}"] = (
+                combined.skip_reasons.get(f"tier_{tier}", 0) + 1
+            )
+            continue
+
         note = NoteRecord(
             id=row[0],
             raw_document_id=row[1],
@@ -277,3 +297,19 @@ def extract_action_items_from_all_notes(
             combined.skip_reasons[reason] = combined.skip_reasons.get(reason, 0) + count
 
     return combined
+
+
+def _resolve_note_tier(metadata_raw: str | None) -> str:
+    """Resolve source tier from raw_documents.metadata JSON."""
+    if not metadata_raw:
+        # No metadata: note was inserted directly (test fixture or pre-scope ingest).
+        # Default to signal so backward-compatible tests continue to work.
+        return "signal"
+    try:
+        meta = json.loads(metadata_raw) if isinstance(metadata_raw, str) else metadata_raw
+        tier = meta.get("source_tier", "")
+        if tier in ("signal", "context", "excluded"):
+            return tier
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        pass
+    return "context"

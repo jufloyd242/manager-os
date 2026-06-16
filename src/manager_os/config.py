@@ -46,8 +46,23 @@ class Settings(BaseSettings):
     gemini_cli_model: str = "gemini-2.0-flash"
     gemini_cli_timeout_seconds: int = 120
     gemini_cli_workdir: str = ""
+    gemini_cli_args: str = ""
+    gemini_cli_yolo: bool = False
+    gemini_cli_yolo_args: str = "-y"
     llm_max_candidates: int = 25
     llm_max_chars_per_note: int = 6000
+
+    # Workspace retrieval
+    workspace_retrieval_enabled: bool = False
+    workspace_retrieval_provider: str = "gemini_cli"
+    workspace_retrieval_yolo: bool = True
+    retrieve_forecast_with_gemini: bool = True
+    retrieve_calendar_with_gemini: bool = True
+    retrieve_workspace_activity_with_gemini: bool = True
+    forecast_query: str = ""
+    calendar_lookahead_days: int = 2
+    calendar_lookback_days: int = 1
+    workspace_activity_lookback_days: int = 1
 
 
 def get_settings() -> Settings:

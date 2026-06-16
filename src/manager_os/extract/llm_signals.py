@@ -55,11 +55,16 @@ Return ONLY a JSON array (no markdown, no explanation). Each element must have:
 
 Rules:
 - Use ONLY the provided source text. Do NOT invent people, clients, or deals.
-- Cite specific evidence in why_it_matters (e.g. "Alice said on 6/12 that..."
-  or "Note from engagement-status.md shows Review Protocol Gap").
-- Omit weak/speculative items. If no clear signal, return [].
+- Cite specific evidence in why_it_matters.
+- Omit weak/speculative items. Prefer returning [] over guessing.
+- Return [] when no current manager action, risk, or decision exists.
+- Ignore reference material, process documentation, training content, and
+  historical notes. These are not actionable.
 - Mark old/historical items as "stale_item" with severity="low".
 - Do NOT calculate allocation %, capacity %, close-date math, or financials.
+- Do NOT infer weakly. Every item needs direct evidence from the note text.
+- Only extract items the manager (Justin) should care about as a manager.
+- Be conservative: fewer, higher-quality items are better than many speculative ones.
 """
 
 
@@ -197,12 +202,9 @@ def _select_llm_candidates(
         where_clauses.append("n.note_date >= ?")
         params.append(cutoff.isoformat())
 
-    order_limit = ""
-    if max_candidates is not None:
-        order_limit = "ORDER BY CASE WHEN n.entity_name IS NOT NULL AND n.entity_name != '' THEN 0 ELSE 1 END, n.note_date DESC LIMIT ?"
-        params.append(max_candidates)
-    else:
-        order_limit = "ORDER BY CASE WHEN n.entity_name IS NOT NULL AND n.entity_name != '' THEN 0 ELSE 1 END, n.note_date DESC"
+    # Fetch a generous pool, filter tiers in Python, then cap
+    # This ensures context/excluded notes don't consume the candidate limit.
+    fetch_limit = 500 if max_candidates is None or max_candidates > 500 else max_candidates * 3
 
     query = f"""
         SELECT n.id, n.note_date, n.entity_name, n.entity_type, n.body,
@@ -210,8 +212,11 @@ def _select_llm_candidates(
         FROM notes n
         LEFT JOIN raw_documents rd ON rd.id = n.raw_document_id
         WHERE {' AND '.join(where_clauses)}
-        {order_limit}
+        ORDER BY CASE WHEN n.entity_name IS NOT NULL AND n.entity_name != '' THEN 0 ELSE 1 END,
+                 n.note_date DESC
+        LIMIT ?
     """
+    params.append(fetch_limit)
 
     rows = conn.execute(query, params).fetchall()
 
@@ -253,6 +258,11 @@ def _select_llm_candidates(
             "body": body,
             "source_path": source_path or "",
         })
+
+    # Cap candidates AFTER tier filtering so excluded/context notes
+    # do not consume the limit.
+    if max_candidates is not None and len(candidates) > max_candidates:
+        candidates = candidates[:max_candidates]
 
     return candidates, excluded_cnt, context_cnt, empty_cnt
 

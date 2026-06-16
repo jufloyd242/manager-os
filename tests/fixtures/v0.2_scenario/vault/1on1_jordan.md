@@ -3,6 +3,7 @@ type: 1on1
 entity: Jordan Lee
 date: 2026-05-30
 tags: [1on1, people, jordan]
+manager_os: active
 ---
 
 # 1:1 with Jordan Lee — 2026-05-30

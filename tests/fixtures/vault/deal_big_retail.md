@@ -3,6 +3,7 @@ type: deal
 entity: Big Retail Co
 date: 2026-06-12
 tags: [deal, big-retail, sow, loe]
+manager_os: active
 ---
 
 # Big Retail Co — Deal Note — 2026-06-12

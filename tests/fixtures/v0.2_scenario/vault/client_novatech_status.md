@@ -3,6 +3,7 @@ type: client
 entity: NovaTech Inc
 date: 2026-06-10
 tags: [client, novatech, status, risk]
+manager_os: active
 ---
 
 # NovaTech Inc — Client Status Update — 2026-06-10

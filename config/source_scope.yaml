@@ -10,11 +10,13 @@
 #   3. exclude_paths (wins over everything except frontmatter inclusion)
 #   4. signal_paths
 #   5. context_paths
-#   6. Everything else defaults to "signal" when not explicitly excluded
+#   6. Everything else defaults to "context" — unknown notes do NOT
+#      produce operational items
 
 # ───────────────────────────────────────────────────────────────
 # Signal paths — notes that may create operational items
 # (signals, action items, decisions, waiting-on, brief/dashboard)
+# Keep narrow and current.
 # ───────────────────────────────────────────────────────────────
 signal_paths:
   - "team/directs/*.md"
@@ -37,14 +39,12 @@ signal_paths:
 context_paths:
   - "team/other/*.md"
   - "clients/**/*.md"
-  - "Client meeting flow/**/*.md"
-  - "SADA/**/*.md"
   - "day-to-day/**/*.md"
-  - "onboarding/**/*.md"
-  - "mentorships/**/*.md"
 
 # ───────────────────────────────────────────────────────────────
-# Excluded paths — never ingested (or ingested but never operational)
+# Excluded paths — never create operational items.
+# Training, hiring, quotes, docs, scripts, drafts, system files,
+# template/general notes, and process docs.
 # ───────────────────────────────────────────────────────────────
 exclude_paths:
   - "training/**"
@@ -53,9 +53,15 @@ exclude_paths:
   - "docs/**"
   - "scripts/**"
   - "drafts/**"
+  - "archive/**"
+  - "_manager-os/**"
+  - ".obsidian/**"
+  - ".git/**"
   - "imports/README.md"
   - "GEMINI.md"
   - "CLAUDE.md"
+  - "AGENTS.md"
+  - "README.md"
   - "temp_*.md"
   - "**/_TEMPLATE.md"
   - "**/general.md"
@@ -63,10 +69,10 @@ exclude_paths:
   - "day-to-day/general.md"
   - "deals/deal_scraper.md"
   - "deals/Deal Sheet Scraper v2.0.md"
-  - "_manager-os/**"
-  - "archive/**"
-  - ".obsidian/**"
-  - ".git/**"
+  - "Client meeting flow/**"
+  - "SADA/**"
+  - "onboarding/**"
+  - "mentorships/**"
 
 # ───────────────────────────────────────────────────────────────
 # Age threshold — notes older than this are marked stale
