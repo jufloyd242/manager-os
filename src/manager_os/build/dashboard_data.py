@@ -698,7 +698,13 @@ def get_forecast_rows(conn, as_of: date | None = None) -> list[DashboardForecast
 
 
 def get_forecast_summary(conn, as_of: date | None = None) -> dict:
-    """Return grouped forecast stats for the 3 time buckets."""
+    """Return grouped forecast stats for the 3 time buckets.
+
+    Classification is per person-week, then summarized by person:
+    - overallocated: person has any week > 100.01%
+    - underallocated: person has any week < 99.99%
+    - available: person has all weeks between 99.99% and 100.01%
+    """
     from datetime import timedelta
     if as_of is None:
         as_of = date.today()
@@ -713,14 +719,26 @@ def get_forecast_summary(conn, as_of: date | None = None) -> dict:
     summary: dict[str, dict] = {}
     for label, end_date in buckets.items():
         in_window = [r for r in all_rows if as_of <= r.week_start <= end_date]
-        # Per-person aggregate within window
-        person_alloc: dict[str, float] = {}
-        for r in in_window:
-            person_alloc[r.person_name] = person_alloc.get(r.person_name, 0.0) + r.allocation_pct
 
-        overallocated = [p for p, a in person_alloc.items() if a > 100]
-        underallocated = [p for p, a in person_alloc.items() if a < 50]
-        available = [p for p, a in person_alloc.items() if 50 <= a <= 100]
+        # Per-person-week classification; aggregate into per-person status sets
+        person_statuses: dict[str, set[str]] = {}
+        for r in in_window:
+            name = r.person_name
+            if name not in person_statuses:
+                person_statuses[name] = set()
+            if r.is_overallocated:
+                person_statuses[name].add("over")
+            elif r.is_underallocated:
+                person_statuses[name].add("under")
+            else:
+                person_statuses[name].add("ok")
+
+        overallocated = sorted(p for p, s in person_statuses.items() if "over" in s)
+        underallocated = sorted(p for p, s in person_statuses.items() if "under" in s)
+        available = sorted(
+            p for p, s in person_statuses.items()
+            if "over" not in s and "under" not in s
+        )
 
         # Roll-offs: last confirmed week for any person within window
         rolloffs = conn.execute(

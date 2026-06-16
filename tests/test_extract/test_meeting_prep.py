@@ -173,6 +173,30 @@ def test_meeting_prep_idempotent(conn, resolver) -> None:
     assert count == 1
 
 
+def test_stored_prep_lookup_by_meeting_id(conn, resolver) -> None:
+    """Dashboard stored-prep lookup: query by meeting_id dict key.
+
+    Verifies the pattern used in dashboard app.py line ~624:
+      conn.execute("SELECT content, generated_at FROM meeting_prep WHERE meeting_id = ?", [chosen["id"]])
+    """
+    meeting = _make_meeting(title="QBR Prep", attendees=["Alice Chen"])
+    generate_meeting_prep(meeting, conn, resolver)
+
+    # Simulate dashboard lookup — meeting dict from get_meetings_for_date
+    meeting_dict = {"id": meeting.id, "title": meeting.title,
+                    "meeting_date": meeting.meeting_date, "start_time": meeting.start_time,
+                    "attendees": meeting.attendees}
+
+    prep_row = conn.execute(
+        "SELECT content, generated_at FROM meeting_prep WHERE meeting_id = ?",
+        [meeting_dict["id"]],
+    ).fetchone()
+
+    assert prep_row is not None, "Stored prep must be found by meeting_dict['id']"
+    assert "QBR Prep" in prep_row[0]
+    assert "Alice Chen" in prep_row[0]
+
+
 # ------------------------------------------------------------------
 # File output
 # ------------------------------------------------------------------

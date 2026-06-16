@@ -528,10 +528,10 @@ with tabs[4]:
                     st.markdown("**🔴 Overallocated (>100%)**")
                     st.markdown("\n".join(f"- {p}" for p in over) or "*None*")
                 with cols[1]:
-                    st.markdown("**🟡 Underallocated (<50%)**")
+                    st.markdown("**🟡 Underallocated (<100%)**")
                     st.markdown("\n".join(f"- {p}" for p in under) or "*None*")
                 with cols[2]:
-                    st.markdown("**🟢 Available (50–100%)**")
+                    st.markdown("**🟢 Available (≈100%)**")
                     st.markdown("\n".join(f"- {p}" for p in avail) or "*None*")
 
         st.divider()
@@ -621,7 +621,7 @@ with tabs[5]:
         # Show stored prep if available
         prep_row = conn.execute(
             "SELECT content, generated_at FROM meeting_prep WHERE meeting_id = ?",
-            [chosen.id]
+            [chosen["id"]]
         ).fetchone()
         if prep_row:
             st.caption(f"Generated at: {prep_row[1]}")
