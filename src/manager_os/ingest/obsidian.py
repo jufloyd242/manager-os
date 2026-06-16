@@ -3,6 +3,9 @@
 Recursively walks an Obsidian vault directory, parses each .md file
 (YAML frontmatter + body), computes a content hash for deduplication,
 and writes RawDocument + NoteRecord rows to DuckDB.
+
+Source tier metadata (signal/context/excluded) is captured in
+raw_documents.metadata JSON using ``manager_os.scope.classify_source``.
 """
 
 from __future__ import annotations
@@ -167,7 +170,7 @@ def ingest_vault(vault_path: str, conn, force: bool = False) -> IngestResult:
             continue
 
         try:
-            _ingest_file(md_file, conn, force, result)
+            _ingest_file(md_file, conn, force, result, vault)
         except Exception as exc:
             logger.warning("Failed to ingest %s: %s", md_file, exc)
             result.failed += 1
@@ -193,11 +196,77 @@ def _strip_frontmatter_block(raw_text: str) -> str:
     return "\n".join(lines[1:]).strip()
 
 
+def _sanitize_frontmatter_yaml(raw_text: str) -> str:
+    """Best-effort repair of common YAML frontmatter mistakes.
+
+    Obsidian users often write titles, clients, or types containing colons
+    or slashes without quoting the scalar value, e.g.::
+
+        title: Decision Log: Giles Access Revocation
+        type: Pre-sales positioning / Approach alignment
+
+    PyYAML rejects those lines (``mapping values are not allowed in this
+    context``). This helper quotes bare scalar values that contain ``:`` or
+    ``/`` so ``frontmatter.loads`` can parse the block. It leaves already
+    quoted values, lists, and inline mappings untouched.
+    """
+    lines = raw_text.splitlines()
+    out: list[str] = []
+    in_frontmatter = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "---":
+            in_frontmatter = not in_frontmatter
+            out.append(line)
+            continue
+        if in_frontmatter and ":" in line:
+            key, _sep, val = line.partition(":")
+            val_stripped = val.strip()
+            if (
+                val_stripped
+                and not val_stripped.startswith(('"', "'", "["))
+                and not val_stripped.endswith(('"', "'"))
+                and (":" in val_stripped or "/" in val_stripped)
+            ):
+                line = f'{key}: "{val_stripped}"'
+        out.append(line)
+    return "\n".join(out)
+
+
+def _build_metadata(
+    fm: dict,
+    tags: list[str],
+    source_path: str,
+    vault_root: str,
+    mtime: datetime,
+) -> dict[str, str]:
+    """Enrich raw_document metadata with source tier classification."""
+    base = {k: str(v) for k, v in fm.items() if k not in ("tags",)}
+    try:
+        from manager_os.scope import classify_source, load_source_scope
+
+        config = load_source_scope()
+        result = classify_source(
+            source_path=source_path,
+            vault_root=vault_root,
+            frontmatter=fm,
+            tags=tags,
+            modified_time=mtime,
+            config=config,
+        )
+        base.update(result.as_metadata())
+    except Exception as exc:
+        logger.debug("scope classification skipped for %s: %s", source_path, exc)
+        base["source_tier"] = "signal"  # safe default
+    return base
+
+
 def _ingest_file(
     md_file: Path,
     conn,
     force: bool,
     result: IngestResult,
+    vault_root: Path,
 ) -> None:
     raw_text = md_file.read_text(encoding="utf-8", errors="replace")
     c_hash = content_hash(raw_text)
@@ -210,7 +279,8 @@ def _ingest_file(
         )
         return
 
-    # Parse frontmatter — tolerate malformed YAML by falling back to body-only
+    # Parse frontmatter — tolerate malformed YAML by sanitizing common mistakes
+    # (unquoted colons/slashes in scalar values) and falling back to body-only.
     fm: dict = {}
     body: str = ""
     frontmatter_warning: str | None = None
@@ -219,11 +289,17 @@ def _ingest_file(
         fm = dict(post.metadata)
         body = post.content.strip()
     except Exception as exc:
-        frontmatter_warning = f"frontmatter parse error in {md_file}: {exc}"
-        logger.warning("%s", frontmatter_warning)
-        # Preserve the raw text as body; strip any leading "---" delimiter block
-        # so extraction doesn't choke on raw YAML syntax
-        body = _strip_frontmatter_block(raw_text)
+        sanitized = _sanitize_frontmatter_yaml(raw_text)
+        try:
+            post = frontmatter.loads(sanitized)
+            fm = dict(post.metadata)
+            body = post.content.strip()
+        except Exception:
+            frontmatter_warning = f"frontmatter parse error in {md_file}: {exc}"
+            logger.warning("%s", frontmatter_warning)
+            # Preserve the raw text as body; strip any leading "---" delimiter block
+            # so extraction doesn't choke on raw YAML syntax
+            body = _strip_frontmatter_block(raw_text)
 
     # Build title from frontmatter or filename
     title = str(fm.get("title", md_file.stem.replace("_", " ").replace("-", " ")))
@@ -252,7 +328,7 @@ def _ingest_file(
         file_modified_at=mtime,
         content_hash=c_hash,
         content=raw_text,
-        metadata={k: str(v) for k, v in fm.items() if k not in ("tags",)},
+        metadata=_build_metadata(fm, tags, source_path, str(vault_root), mtime),
     )
 
     note = NoteRecord(

@@ -1,0 +1,117 @@
+# Manager OS — Source Scope Configuration
+#
+# Controls which Obsidian vault notes are classified as signal-tier
+# (generates operational items), context-tier (enrichment only), or
+# excluded (never creates operational items).
+#
+# Precedence (highest to lowest):
+#   1. Frontmatter ``manager_os:`` / ``status:`` / ``active:`` overrides
+#   2. Tag-based overrides
+#   3. exclude_paths (wins over everything except frontmatter inclusion)
+#   4. signal_paths
+#   5. context_paths
+#   6. Everything else defaults to "signal" when not explicitly excluded
+
+# ───────────────────────────────────────────────────────────────
+# Signal paths — notes that may create operational items
+# (signals, action items, decisions, waiting-on, brief/dashboard)
+# ───────────────────────────────────────────────────────────────
+signal_paths:
+  - "team/directs/*.md"
+  - "team/my manager/*.md"
+  - "team/me/*.md"
+  - "clients/**/engagement-status.md"
+  - "meetings/2026-*.md"
+  - "meetings/Team Sync - 2026-*.md"
+  - "manager/resource-risk-flags-*.md"
+  - "manager/PTO.md"
+  - "manager/Goals.md"
+  - "manager/feedback.md"
+  - "manager/decision-log-*.md"
+  - "manager/DE-AI-resource-strategy.md"
+
+# ───────────────────────────────────────────────────────────────
+# Context paths — notes that provide enrichment/background only
+# (no standalone operational items)
+# ───────────────────────────────────────────────────────────────
+context_paths:
+  - "team/other/*.md"
+  - "clients/**/*.md"
+  - "Client meeting flow/**/*.md"
+  - "SADA/**/*.md"
+  - "day-to-day/**/*.md"
+  - "onboarding/**/*.md"
+  - "mentorships/**/*.md"
+
+# ───────────────────────────────────────────────────────────────
+# Excluded paths — never ingested (or ingested but never operational)
+# ───────────────────────────────────────────────────────────────
+exclude_paths:
+  - "training/**"
+  - "quotes/**"
+  - "hiring/**"
+  - "docs/**"
+  - "scripts/**"
+  - "drafts/**"
+  - "imports/README.md"
+  - "GEMINI.md"
+  - "CLAUDE.md"
+  - "temp_*.md"
+  - "**/_TEMPLATE.md"
+  - "**/general.md"
+  - "manager/general.md"
+  - "day-to-day/general.md"
+  - "deals/deal_scraper.md"
+  - "deals/Deal Sheet Scraper v2.0.md"
+  - "_manager-os/**"
+  - "archive/**"
+  - ".obsidian/**"
+  - ".git/**"
+
+# ───────────────────────────────────────────────────────────────
+# Age threshold — notes older than this are marked stale
+# ───────────────────────────────────────────────────────────────
+max_note_age_days: 120
+
+# ───────────────────────────────────────────────────────────────
+# Frontmatter overrides — always include as signal
+# ───────────────────────────────────────────────────────────────
+always_include_frontmatter:
+  manager_os:
+    - "true"
+    - "active"
+  status:
+    - "active"
+  active:
+    - "true"
+
+# ───────────────────────────────────────────────────────────────
+# Frontmatter overrides — always exclude from operational items
+# ───────────────────────────────────────────────────────────────
+always_exclude_frontmatter:
+  manager_os:
+    - "false"
+    - "ignore"
+  status:
+    - "archived"
+    - "historical"
+    - "reference"
+  active:
+    - "false"
+
+# ───────────────────────────────────────────────────────────────
+# Tag-based overrides — always include
+# ───────────────────────────────────────────────────────────────
+always_include_tags:
+  - "manager-os-active"
+  - "active"
+  - "current"
+
+# ───────────────────────────────────────────────────────────────
+# Tag-based overrides — always exclude
+# ───────────────────────────────────────────────────────────────
+always_exclude_tags:
+  - "manager-os-ignore"
+  - "archive"
+  - "historical"
+  - "reference"

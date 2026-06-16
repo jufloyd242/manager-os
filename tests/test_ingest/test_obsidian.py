@@ -108,15 +108,26 @@ def test_ingest_handles_malformed_frontmatter(tmp_path: Path, conn) -> None:
 # ===========================================================================
 
 # YAML strings that python-frontmatter / pyyaml cannot parse:
+# This one is now repaired by _sanitize_frontmatter_yaml (unquoted colon).
 _MAPPING_VALUES_NOT_ALLOWED = "---\nkey: value: extra\n---\n\nBody text here."
+# This one is genuinely unrepairable (unhashable mapping key).
 _UNHASHABLE_KEY = "---\n{nested: key}: value\n---\n\nBody text here."
+# Real-world-style unquoted colon in a title/client/type value.
+_UNQUOTED_COLON_TITLE = (
+    "---\n"
+    "title: Decision Log: Giles Access Revocation\n"
+    "date: 2026-06-05\n"
+    "tags: [decision, legal, risk, giles]\n"
+    "---\n\n"
+    "# Body\n"
+)
 
 
 class TestMalformedFrontmatter:
     def test_malformed_note_is_ingested_not_failed(self, tmp_path: Path, conn) -> None:
         vault = tmp_path / "vault"
         vault.mkdir()
-        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        (vault / "bad.md").write_text(_UNHASHABLE_KEY)
         result = ingest_vault(str(vault), conn)
         assert result.failed == 0
         assert result.ingested + result.ingested_with_warnings == 1
@@ -126,14 +137,14 @@ class TestMalformedFrontmatter:
     ) -> None:
         vault = tmp_path / "vault"
         vault.mkdir()
-        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        (vault / "bad.md").write_text(_UNHASHABLE_KEY)
         result = ingest_vault(str(vault), conn)
         assert result.ingested_with_warnings >= 1
 
     def test_malformed_note_body_is_preserved(self, tmp_path: Path, conn) -> None:
         vault = tmp_path / "vault"
         vault.mkdir()
-        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        (vault / "bad.md").write_text(_UNHASHABLE_KEY)
         ingest_vault(str(vault), conn)
         rows = conn.execute("SELECT body FROM notes").fetchall()
         assert len(rows) == 1
@@ -143,7 +154,7 @@ class TestMalformedFrontmatter:
     def test_malformed_note_raw_doc_stored(self, tmp_path: Path, conn) -> None:
         vault = tmp_path / "vault"
         vault.mkdir()
-        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        (vault / "bad.md").write_text(_UNHASHABLE_KEY)
         ingest_vault(str(vault), conn)
         count = conn.execute("SELECT COUNT(*) FROM raw_documents").fetchone()[0]
         assert count == 1
@@ -151,7 +162,7 @@ class TestMalformedFrontmatter:
     def test_parse_error_recorded_as_warning(self, tmp_path: Path, conn) -> None:
         vault = tmp_path / "vault"
         vault.mkdir()
-        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        (vault / "bad.md").write_text(_UNHASHABLE_KEY)
         result = ingest_vault(str(vault), conn)
         assert len(result.warnings) >= 1
         assert "bad.md" in result.warnings[0] or "frontmatter" in result.warnings[0].lower()
@@ -168,7 +179,7 @@ class TestMalformedFrontmatter:
         vault = tmp_path / "vault"
         vault.mkdir()
         (vault / "good.md").write_text("---\ntype: team\n---\n\n# Good")
-        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        (vault / "bad.md").write_text(_UNHASHABLE_KEY)
         result = ingest_vault(str(vault), conn)
         assert result.failed == 0
         total = result.ingested + result.ingested_with_warnings
@@ -180,10 +191,53 @@ class TestMalformedFrontmatter:
         """ingested should only count clean files; ingested_with_warnings covers bad ones."""
         vault = tmp_path / "vault"
         vault.mkdir()
-        (vault / "bad.md").write_text(_MAPPING_VALUES_NOT_ALLOWED)
+        (vault / "bad.md").write_text(_UNHASHABLE_KEY)
         result = ingest_vault(str(vault), conn)
         # ingested should be 0 (bad file went to warnings bucket)
         assert result.ingested == 0
+
+    def test_unquoted_colon_title_is_repaired(self, tmp_path: Path, conn) -> None:
+        """Real-world frontmatter with unquoted colons should parse cleanly."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "decision.md").write_text(_UNQUOTED_COLON_TITLE)
+        result = ingest_vault(str(vault), conn)
+        assert result.failed == 0
+        assert result.ingested == 1
+        assert result.ingested_with_warnings == 0
+        rows = conn.execute(
+            "SELECT title, note_date, tags FROM notes WHERE title = ?",
+            ["Decision Log: Giles Access Revocation"],
+        ).fetchall()
+        assert len(rows) == 1
+        assert str(rows[0][1]) == "2026-06-05"
+        assert "decision" in rows[0][2]
+
+    def test_unquoted_slash_type_is_repaired(self, tmp_path: Path, conn) -> None:
+        """Real-world frontmatter with unquoted slashes should parse cleanly."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        meetings = vault / "meetings"
+        meetings.mkdir()
+        text = (
+            "---\n"
+            "date: 2026-05-11\n"
+            "client: Molecule AI (internal codename: GSL AI)\n"
+            "type: Pre-sales positioning / Approach alignment\n"
+            "---\n\n"
+            "# Meeting\n"
+        )
+        (meetings / "meeting.md").write_text(text)
+        result = ingest_vault(str(vault), conn)
+        assert result.failed == 0
+        assert result.ingested == 1
+        assert result.ingested_with_warnings == 0
+        rows = conn.execute(
+            "SELECT entity_name, note_type FROM notes WHERE entity_name = ?",
+            ["Molecule AI (internal codename: GSL AI)"],
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][1] == "meeting"
 
 
 # ===========================================================================
