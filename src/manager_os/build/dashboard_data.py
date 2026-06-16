@@ -190,14 +190,32 @@ def update_action_item(
 
 def get_meetings_for_date(conn, target_date: date) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, start_time, title, attendees FROM meetings WHERE meeting_date = ? ORDER BY start_time NULLS LAST",
+        """
+        SELECT id, meeting_date, start_time, title, attendees,
+               linked_entities, source, external_id, updated_at
+        FROM meetings WHERE meeting_date = ?
+        ORDER BY start_time NULLS LAST
+        """,
         [target_date],
     ).fetchall()
-    return [
-        {"id": r[0], "start_time": r[1], "title": r[2],
-         "attendees": json.loads(r[3]) if r[3] else []}
-        for r in rows
-    ]
+    results = []
+    for r in rows:
+        attendees_raw = r[4]
+        attendees = json.loads(attendees_raw) if isinstance(attendees_raw, str) else (attendees_raw or [])
+        linked_raw = r[5]
+        linked = json.loads(linked_raw) if isinstance(linked_raw, str) else (linked_raw or [])
+        results.append({
+            "id": r[0],
+            "meeting_date": r[1],
+            "start_time": r[2] or "",
+            "title": r[3] or "",
+            "attendees": attendees,
+            "linked_entities": linked,
+            "source": r[6] or "",
+            "external_id": r[7] or "",
+            "updated_at": r[8],
+        })
+    return results
 
 
 def update_signal_status(
@@ -673,8 +691,8 @@ def get_forecast_rows(conn, as_of: date | None = None) -> list[DashboardForecast
             project=project or "",
             allocation_pct=round(alloc_pct, 1),
             forecast_type=fc_type or "confirmed",  # type: ignore[arg-type]
-            is_overallocated=alloc_pct > 100,
-            is_underallocated=alloc_pct < 50,
+            is_overallocated=alloc_pct > 100.01,
+            is_underallocated=alloc_pct < 99.99,
         ))
     return result
 

@@ -616,9 +616,11 @@ def generate_daily_brief(
         direct_fb = {}
         source_fb = {}
 
-    # Rank globally with feedback, deduplicate, then apply low-priority filter
+    # Rank globally with feedback, then deduplicate domain-aware, then apply low-priority filter
+    from manager_os.build.dedupe import dedupe_signals
+
     ranked_signals = _rank_signals(all_signals, target_date, direct_fb, source_fb)
-    deduped_signals, suppressed_count = _deduplicate_signals(ranked_signals)
+    deduped_signals, suppressed_count, dedup_debug = dedupe_signals(ranked_signals, today=target_date)
     visible_signals = (
         [s for s in deduped_signals if s.severity != "low"]
         if not include_low_priority
@@ -626,6 +628,9 @@ def generate_daily_brief(
     )
 
     signal_ids = [s.id for s in all_signals]
+    # Include dedup info in the brief metadata for footer
+    _dedup_count = suppressed_count
+    _dedup_debug = dedup_debug
 
     # Follow-ups Justin owes (manager action items), ranked by due date
     manager_ais = [ai for ai in all_action_items if ai.assigned_to in ("manager", "Manager")]

@@ -184,9 +184,10 @@ def _seed_signal_ext(
     source_path: str = "",
     due_date: date | None = None,
     status: str = "open",
+    counter: int = 0,
 ) -> str:
     """Seed a signal with full control over ranking-relevant fields."""
-    sig_id = content_hash(f"ext::{entity_name}::{severity}::{summary}::{source_path}")
+    sig_id = content_hash(f"ext::{entity_name}::{severity}::{summary}::{source_path}::{counter}")
     conn.execute(
         """
         INSERT INTO signals
@@ -430,18 +431,20 @@ class TestBriefOutputCounts:
 
 class TestDeduplication:
     def test_dedup_same_source_same_type_keeps_one(self, conn) -> None:
-        """Multiple signals from the same source note + signal_type -> only 1 shown."""
+        """Multiple signals from the same source with same entity and type -> only 1 shown."""
         for i in range(3):
             _seed_signal_ext(
-                conn, f"Corp{i}",
+                conn, "Acme Corp",  # same entity for all three
                 source_path="/vault/notes/noisy_note.md",
                 signal_type="risk",
-                summary=f"Dup signal {i}",
+                summary="Acme data pipeline delayed",  # same underlying risk
                 severity="high",
+                counter=i,
             )
         brief = generate_daily_brief(conn, target_date=date.today())
-        shown = sum(1 for i in range(3) if f"Dup signal {i}" in brief.content)
-        assert shown == 1
+        # With domain-aware dedupe, all three have same key -> only 1 should be in the deduped set.
+        # The dedupe count is tracked internally.
+        assert brief.shown_signals == 1, f"Expected 1 shown signal, got {brief.shown_signals}"
 
     def test_dedup_different_sources_all_shown(self, conn) -> None:
         for i in range(3):

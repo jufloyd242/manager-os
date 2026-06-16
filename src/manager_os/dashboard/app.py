@@ -580,7 +580,7 @@ with tabs[5]:
     else:
         st.subheader(f"Meetings on {selected_date}")
 
-        meeting_titles = [f"{m.start_time or '?:??'} — {m.title}" for m in today_meetings]
+        meeting_titles = [f"{m['start_time'] or '?:??'} — {m['title']}" for m in today_meetings]
         selected_idx = st.selectbox("Select meeting", options=list(range(len(today_meetings))),
                                     format_func=lambda i: meeting_titles[i])
 
@@ -588,9 +588,9 @@ with tabs[5]:
 
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.markdown(f"### {chosen.title}")
-            if chosen.attendees:
-                st.caption("Attendees: " + ", ".join(chosen.attendees))
+            st.markdown(f"### {chosen['title']}")
+            if chosen.get("attendees"):
+                st.caption("Attendees: " + ", ".join(chosen["attendees"]))
 
         with col2:
             use_llm = st.checkbox("🤖 Enrich with LLM", value=False,
