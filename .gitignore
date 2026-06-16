@@ -31,3 +31,12 @@ output/
 # ── DuckDB files ──────────────────────────────────────────────────────────
 *.duckdb
 *.duckdb.wal
+
+# ── Ad-hoc workspace scripts and GWS API param files ──────────────────────
+fetch_forecast.py
+calendar_list_params.json
+gmail_search_params.json
+drive_search_params.json
+
+# ── Generated JSON output artifacts ───────────────────────────────────────
+output_signals.json
