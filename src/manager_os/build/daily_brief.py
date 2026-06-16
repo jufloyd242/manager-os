@@ -199,17 +199,57 @@ def _load_signals(conn, target_date: date) -> list[Signal]:
     signals = []
     for row in rows:
         try:
-            signals.append(Signal(
+            s = Signal(
                 id=row[0], signal_date=row[1], source=row[2], source_path=row[3] or "",
                 entity_type=row[4], entity_name=row[5], signal_type=row[6],
                 severity=row[7], summary=row[8], why_it_matters=row[9] or "",
                 requires_manager_attention=bool(row[10]), owner=row[11] or "",
                 due_date=row[12], confidence=float(row[13]), status=row[14],
                 created_at=row[15], updated_at=row[16],
-            ))
+            )
+            # Safety net: skip signals whose source_path belongs to excluded/context
+            # notes (tier filtering should handle this at extraction time, but
+            # tier guard here protects against stale/legacy signals).
+            if _is_noisy_source_path(s.source_path):
+                continue
+            signals.append(s)
         except Exception as exc:
             logger.warning("Skipping malformed signal row: %s", exc)
     return signals
+
+
+def _is_noisy_source_path(source_path: str) -> bool:
+    """Return True if the source_path is from known excluded/context categories."""
+    if not source_path:
+        return False
+    sp = source_path.lower()
+    noisy_substrings = [
+        "/training/",
+        "/hiring/",
+        "/quotes/",
+        "/docs/",
+        "/scripts/",
+        "/drafts/",
+        "/archive/",
+        "_manager-os/",
+        ".obsidian/",
+        "gemini.md",
+        "claude.md",
+        "agents.md",
+        "readme.md",
+        "_template.md",
+        "general.md",
+        "mentorships/",
+        "onboarding/",
+        "client meeting flow/",
+        "/sada/",
+        "/templates/",
+        "/imports/",
+        "/day-to-day/general.md",
+        "/manager/general.md",
+        "/deals/deal_scraper.md",
+    ]
+    return any(sub in sp for sub in noisy_substrings)
 
 
 def _load_action_items(conn) -> list[ActionItem]:
