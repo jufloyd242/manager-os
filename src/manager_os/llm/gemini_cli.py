@@ -147,30 +147,17 @@ def _run_gemini(
     if GEMINI_CLI_MODEL:
         cmd.extend(["--model", GEMINI_CLI_MODEL])
 
-    # Write prompt to a temp file to avoid shell/quoting issues
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    ) as tmp:
-        tmp.write(system_prompt)
-        tmp.write("\n\n---\n\n")
-        tmp.write(user_prompt)
-        tmp.flush()
-        prompt_path = tmp.name
+    # Build the full prompt.  Gemini CLI accepts -p/--prompt for headless mode.
+    full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
 
-    try:
-        proc = subprocess.run(
-            cmd + ["--prompt-file", prompt_path],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=GEMINI_CLI_WORKDIR or None,
-            # No shell=True — safe parameter passing
-        )
-    finally:
-        try:
-            os.unlink(prompt_path)
-        except OSError:
-            pass
+    proc = subprocess.run(
+        cmd + ["--prompt", full_prompt],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=GEMINI_CLI_WORKDIR or None,
+        # No shell=True — safe parameter passing
+    )
 
     if proc.returncode != 0:
         stderr = proc.stderr.strip()

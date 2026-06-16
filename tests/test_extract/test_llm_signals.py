@@ -1,13 +1,13 @@
 """Tests for LLM signal extraction (Issue #20).
 
-Uses a mock OpenAI client — no real API calls are made.
+Uses a mock Gemini CLI provider — no real API calls are made.
 """
 
 from __future__ import annotations
 
 import json
 from datetime import date
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -29,8 +29,8 @@ def conn():
 # ------------------------------------------------------------------
 
 
-def test_parse_valid_response() -> None:
-    raw = json.dumps([{
+def _valid_signal(**overrides) -> dict:
+    return {
         "entity_type": "person",
         "entity_name": "Alice Chen",
         "signal_type": "risk",
@@ -39,83 +39,43 @@ def test_parse_valid_response() -> None:
         "why_it_matters": "May affect delivery quality.",
         "requires_manager_attention": True,
         "confidence": 0.9,
-    }])
+        **overrides,
+    }
+
+
+def test_parse_valid_response() -> None:
+    raw = json.dumps([_valid_signal()])
     result = _parse_llm_response(raw)
     assert len(result) == 1
     assert result[0]["entity_name"] == "Alice Chen"
 
 
 def test_parse_filters_invalid_entity_type() -> None:
-    raw = json.dumps([{
-        "entity_type": "organization",  # invalid
-        "entity_name": "Acme",
-        "signal_type": "risk",
-        "severity": "high",
-        "summary": "Something is wrong.",
-        "why_it_matters": "",
-        "requires_manager_attention": False,
-        "confidence": 0.8,
-    }])
+    raw = json.dumps([_valid_signal(entity_type="organization")])
     result = _parse_llm_response(raw)
     assert result == []
 
 
 def test_parse_filters_invalid_signal_type() -> None:
-    raw = json.dumps([{
-        "entity_type": "client",
-        "entity_name": "Acme",
-        "signal_type": "unknown_type",  # invalid
-        "severity": "high",
-        "summary": "Something.",
-        "why_it_matters": "",
-        "requires_manager_attention": False,
-        "confidence": 0.8,
-    }])
+    raw = json.dumps([_valid_signal(signal_type="unknown_type")])
     result = _parse_llm_response(raw)
     assert result == []
 
 
 def test_parse_filters_invalid_severity() -> None:
-    raw = json.dumps([{
-        "entity_type": "client",
-        "entity_name": "Acme",
-        "signal_type": "risk",
-        "severity": "urgent",  # invalid
-        "summary": "Something.",
-        "why_it_matters": "",
-        "requires_manager_attention": False,
-        "confidence": 0.8,
-    }])
+    raw = json.dumps([_valid_signal(severity="urgent")])
     result = _parse_llm_response(raw)
     assert result == []
 
 
 def test_parse_filters_empty_summary() -> None:
-    raw = json.dumps([{
-        "entity_type": "person",
-        "entity_name": "Alice",
-        "signal_type": "risk",
-        "severity": "medium",
-        "summary": "",  # empty
-        "why_it_matters": "",
-        "requires_manager_attention": False,
-        "confidence": 0.8,
-    }])
+    raw = json.dumps([_valid_signal(summary="")])
     result = _parse_llm_response(raw)
     assert result == []
 
 
 def test_parse_clamps_confidence() -> None:
-    raw = json.dumps([{
-        "entity_type": "person",
-        "entity_name": "Alice",
-        "signal_type": "risk",
-        "severity": "medium",
-        "summary": "Valid signal here.",
-        "why_it_matters": "",
-        "requires_manager_attention": False,
-        "confidence": 9999.0,  # out of range
-    }])
+    raw = json.dumps([_valid_signal(confidence=9999.0)])
     result = _parse_llm_response(raw)
     assert result[0]["confidence"] == 1.0
 
@@ -125,14 +85,17 @@ def test_parse_empty_array() -> None:
 
 
 def test_parse_with_json_wrapped_in_markdown() -> None:
-    raw = "```json\n[{\"entity_type\":\"person\",\"entity_name\":\"Alice\",\"signal_type\":\"risk\",\"severity\":\"high\",\"summary\":\"At risk.\",\"why_it_matters\":\"\",\"requires_manager_attention\":false,\"confidence\":0.8}]\n```"
-    # The parser should find the array even with markdown fencing
+    raw = (
+        "```json\n"
+        + json.dumps([_valid_signal(summary="At risk.")])
+        + "\n```"
+    )
     result = _parse_llm_response(raw)
     assert len(result) == 1
 
 
 def test_parse_bad_json_raises() -> None:
-    with pytest.raises((ValueError, Exception)):
+    with pytest.raises(ValueError):
         _parse_llm_response("not json at all")
 
 
@@ -141,10 +104,12 @@ def test_parse_bad_json_raises() -> None:
 # ------------------------------------------------------------------
 
 
-def test_unavailable_when_no_api_key(conn) -> None:
-    with patch.dict("os.environ", {}, clear=False):
-        import os
-        os.environ.pop("OPENAI_API_KEY", None)
+def test_unavailable_when_llm_disabled(conn) -> None:
+    with patch.dict(
+        "os.environ",
+        {"MANAGER_OS_LLM_ENABLED": "false"},
+        clear=False,
+    ), patch("manager_os.llm.gemini_cli.LLM_ENABLED", False):
         with pytest.raises(LLMExtractionUnavailable):
             run_llm_extraction(conn)
 
@@ -156,6 +121,7 @@ def test_unavailable_when_no_api_key(conn) -> None:
 
 def _seed_note(conn, body: str, entity_name: str = "Alice Chen") -> None:
     import uuid
+
     conn.execute(
         """INSERT INTO notes (id, raw_document_id, note_date, note_type, entity_type,
                               entity_name, title, body, tags, created_at)
@@ -164,32 +130,29 @@ def _seed_note(conn, body: str, entity_name: str = "Alice Chen") -> None:
     )
 
 
-def _make_mock_client(response_json: str):
-    """Build a minimal mock openai client."""
-    mock_choice = MagicMock()
-    mock_choice.message.content = response_json
-    mock_response = MagicMock()
-    mock_response.choices = [mock_choice]
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value = mock_response
-    return mock_client
+def _seed_raw_document(conn, source_path: str = "notes/2024-01-01.md", metadata: dict | None = None) -> None:
+    import uuid
+
+    if metadata is None:
+        metadata = {"source_tier": "signal"}
+    conn.execute(
+        """INSERT INTO raw_documents (id, ingested_at, source_type, source_path,
+                                      content_hash, content, metadata)
+           VALUES (?, CURRENT_TIMESTAMP, 'obsidian', ?, 'hash', '', ?)""",
+        [str(uuid.uuid4()), source_path, json.dumps(metadata)],
+    )
 
 
 def test_run_llm_extraction_writes_signals(conn) -> None:
+    _seed_raw_document(conn)
     _seed_note(conn, "Alice is blocked on Acme data access. Risk of delay on pipeline milestone.")
-    mock_response = json.dumps([{
-        "entity_type": "person",
-        "entity_name": "Alice Chen",
-        "signal_type": "blocker",
-        "severity": "high",
-        "summary": "Alice is blocked on Acme data access.",
-        "why_it_matters": "Risk of delay.",
-        "requires_manager_attention": True,
-        "confidence": 0.9,
-    }])
-    mock_client = _make_mock_client(mock_response)
-    with patch("manager_os.extract.llm_signals._get_openai_client", return_value=mock_client), \
-         patch("manager_os.extract.llm_signals._get_model_name", return_value="gpt-4o-mini"):
+    mock_response = json.dumps([_valid_signal(
+        signal_type="blocker",
+        summary="Alice is blocked on Acme data access.",
+        why_it_matters="Risk of delay.",
+    )])
+    with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
+         patch("manager_os.llm.gemini_cli.generate", return_value=mock_response):
         result = run_llm_extraction(conn)
     assert result.written == 1
     row = conn.execute("SELECT source, signal_type, severity FROM signals").fetchone()
@@ -199,20 +162,16 @@ def test_run_llm_extraction_writes_signals(conn) -> None:
 
 
 def test_run_llm_extraction_idempotent(conn) -> None:
+    _seed_raw_document(conn)
     _seed_note(conn, "Risk on Acme project delivery.")
-    mock_response = json.dumps([{
-        "entity_type": "client",
-        "entity_name": "Acme Corp",
-        "signal_type": "risk",
-        "severity": "high",
-        "summary": "Risk on Acme project delivery.",
-        "why_it_matters": "",
-        "requires_manager_attention": True,
-        "confidence": 0.85,
-    }])
-    mock_client = _make_mock_client(mock_response)
-    with patch("manager_os.extract.llm_signals._get_openai_client", return_value=mock_client), \
-         patch("manager_os.extract.llm_signals._get_model_name", return_value="gpt-4o-mini"):
+    mock_response = json.dumps([_valid_signal(
+        entity_type="client",
+        entity_name="Acme Corp",
+        signal_type="risk",
+        summary="Risk on Acme project delivery.",
+    )])
+    with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
+         patch("manager_os.llm.gemini_cli.generate", return_value=mock_response):
         run_llm_extraction(conn)
         result2 = run_llm_extraction(conn)
     assert result2.skipped >= 1
@@ -221,19 +180,19 @@ def test_run_llm_extraction_idempotent(conn) -> None:
 
 
 def test_run_llm_extraction_empty_response(conn) -> None:
+    _seed_raw_document(conn)
     _seed_note(conn, "All good today, no issues noted.")
-    mock_client = _make_mock_client("[]")
-    with patch("manager_os.extract.llm_signals._get_openai_client", return_value=mock_client), \
-         patch("manager_os.extract.llm_signals._get_model_name", return_value="gpt-4o-mini"):
+    with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
+         patch("manager_os.llm.gemini_cli.generate", return_value="[]"):
         result = run_llm_extraction(conn)
     assert result.written == 0
 
 
 def test_run_llm_extraction_logs_failure_on_bad_response(conn) -> None:
+    _seed_raw_document(conn)
     _seed_note(conn, "Something is wrong with this client.")
-    mock_client = _make_mock_client("This is not JSON at all !!!")
-    with patch("manager_os.extract.llm_signals._get_openai_client", return_value=mock_client), \
-         patch("manager_os.extract.llm_signals._get_model_name", return_value="gpt-4o-mini"):
+    with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
+         patch("manager_os.llm.gemini_cli.generate", return_value="This is not JSON at all !!!"):
         result = run_llm_extraction(conn)
     assert result.failed == 1
     fail_count = conn.execute(
@@ -243,9 +202,8 @@ def test_run_llm_extraction_logs_failure_on_bad_response(conn) -> None:
 
 
 def test_run_llm_extraction_empty_db(conn) -> None:
-    mock_client = _make_mock_client("[]")
-    with patch("manager_os.extract.llm_signals._get_openai_client", return_value=mock_client), \
-         patch("manager_os.extract.llm_signals._get_model_name", return_value="gpt-4o-mini"):
+    with patch("manager_os.llm.gemini_cli.is_gemini_available", return_value=True), \
+         patch("manager_os.llm.gemini_cli.generate", return_value="[]"):
         result = run_llm_extraction(conn)
     assert result.written == 0
     assert result.failed == 0
