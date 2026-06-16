@@ -7,11 +7,11 @@
 ## Recent Commits
 
 ```
+7548be0 Add brief signal tier guard and workspace retrieval tests
+68966a8 Reduce Manager OS noise for usable morning brief
 f3ce83f Add extract progress and Gemini LLM controls
 b09c5e1 Merge pull request #1 from jufloyd242/feat/source-scope-preview
 3dbe0a2 Repair common YAML frontmatter mistakes during Obsidian ingest
-62bfbc8 Fix Gemini CLI invocation and rewrite LLM tests for Gemini CLI
-179082a Add source scope and Gemini CLI LLM extraction
 ```
 
 ## What Changed
@@ -47,9 +47,20 @@ b09c5e1 Merge pull request #1 from jufloyd242/feat/source-scope-preview
 
 - Updated prompt to be more conservative: "Prefer returning [] over guessing", "Ignore reference material, process documentation, training content", "Only extract items Justin should care about as a manager".
 
-### Brief/Dashboard Suppression (Phase 8-9 — Inherited)
+### Brief/Dashboard Suppression (Phase 8-9)
 
-- Existing noise filters (`_NOISY_SOURCE_SUBSTRINGS`, `_NOISY_TITLE_LOWER`, `_ACTIONABLE_RISK_TERMS`) combined with scope-tier filtering should exclude training, hiring, quotes, templates, GEMINI, CLAUDE, README, AGENTS, general.md, etc. from operational views.
+- Added `_is_noisy_source_path()` safety net in `daily_brief.py` _load_signals — filters out any signals whose source_path matches known excluded/context patterns (training, hiring, quotes, docs, scripts, drafts, system files, templates, general notes). This catches any legacy signals created before tier filtering was wired in.
+- Dashboard `get_today_signals()` inherits same protection at extraction level — tier filtering prevents non-signal notes from creating dashboard items.
+
+### Feedback/Action Loop (Phase 10)
+
+All verified working:
+- `manager-os action list` / `complete` / `stale` / `dismiss` / `snooze` / `reopen`
+- `manager-os feedback list` / `mark` / `summary`
+- `manager-os signal-feedback`
+- `_SAFE_SKIP_REASONS` includes `tier_context`, `tier_excluded`, `junk_note_type`
+- Brief already filters out noisy/stale/wrong/dismissed feedback ratings
+- Action items already filter out completed/stale/dismissed/snoozed-future items
 
 ### Workspace Retrieval Module (Phase X)
 
@@ -58,6 +69,7 @@ b09c5e1 Merge pull request #1 from jufloyd242/feat/source-scope-preview
 - All prompts include strict read-only instructions.
 - Retrieved data stored in `data/raw/workspace_snapshots/<subdir>/` (gitignored).
 - Dry-run prints prompt without calling Gemini.
+- 17 tests covering doctor, build_cmd, parse_retrieval_json, dry-run, ok results, no-mutate, gitignore.
 
 ### Config/Hardening
 
@@ -69,12 +81,13 @@ b09c5e1 Merge pull request #1 from jufloyd242/feat/source-scope-preview
 
 ## Tests
 
-**Result**: 1020 passed, 10 failed (all 10 are pre-existing — `test_cli_demo_reset.py` and `test_cli_profile_*.py`).
+**Result**: 1037 passed, 10 failed (all 10 are pre-existing — `test_cli_demo_reset.py` and `test_cli_profile_*.py`).
 
 Changes:
 - `tests/test_build/test_scope.py`: Renamed `test_default_unknown_path_is_signal` → `test_default_unknown_path_is_context`
 - `tests/fixtures/vault/*.md` and `tests/fixtures/v0.2_scenario/vault/*.md`: Added `manager_os: active` frontmatter
 - `tests/test_skip_reasons.py`: `tier_context` and `tier_excluded` now recognized as safe skip reasons
+- `tests/test_ingest/test_workspace_gemini.py` (new): 17 tests for workspace retrieval module (doctor, build_cmd, parse_retrieval_json, dry-run, ok results, no-mutate, gitignore)
 
 ## Commands That Ran
 
