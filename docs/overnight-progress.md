@@ -114,9 +114,13 @@ manager-os extract --help               → all LLM flags present
 ## Next Commands for Justin
 
 ```bash
-# Run fresh morning flow
-git pull
-source .venv/bin/activate
+# Single-command daily flow (recommended)
+manager-os daily
+manager-os daily --open-dashboard
+manager-os daily --rules-only
+manager-os daily --dry-run  # preview without writing
+
+# Manual fallback (individual commands)
 manager-os readiness
 manager-os profile-forecast
 manager-os profile-deals
@@ -132,6 +136,65 @@ manager-os extract --mode rules --verbose
 # Test workspace retrieval (if configured)
 manager-os workspace-doctor
 manager-os workspace fetch-forecast --dry-run --print-prompt
+
+# Troubleshooting
+manager-os workspace-doctor
+manager-os llm-doctor --no-smoke-test
+manager-os scope-preview
+manager-os extract --mode both --llm-limit 5 --verbose
+```
+
+---
+
+## Daily Morning Flow
+
+The `manager-os daily` command runs the complete morning workflow in one step:
+
+```bash
+# Basic: ingest, extract (both), brief
+manager-os daily
+
+# With dashboard launch
+manager-os daily --open-dashboard
+
+# Rules-only (no LLM)
+manager-os daily --rules-only
+
+# Dry run preview (no writes)
+manager-os daily --dry-run
+
+# Skip workspace fetch
+manager-os daily --no-workspace
+
+# Full control
+manager-os daily --llm-limit 10 --max-items 15 --verbose
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--date YYYY-MM-DD` | today | Date to run for |
+| `--dry-run` | off | Preview without writing to DB or retrieving workspace |
+| `--no-workspace` | off | Skip workspace retrieval entirely |
+| `--rules-only` | off | Use rules-only extraction (no LLM) |
+| `--llm-limit INT` | 25 | Maximum notes to send to the LLM |
+| `--llm-timeout-seconds INT` | 120 | Per-note LLM timeout |
+| `--max-items INT` | 20 | Maximum items per section in the brief |
+| `--open-dashboard` | off | Launch dashboard after brief generation |
+| `--skip-brief` | off | Skip brief generation |
+| `--skip-extract` | off | Skip signal extraction |
+| `--skip-ingest` | off | Skip all ingest steps |
+| `--force-ingest` | off | Re-ingest files even if content hash unchanged |
+| `--verbose` / `-v` | off | Show detailed skip/warning information |
+
+### Troubleshooting
+
+```bash
+manager-os workspace-doctor       # Diagnose workspace retrieval
+manager-os llm-doctor --no-smoke-test  # Diagnose LLM provider
+manager-os scope-preview          # Preview note tier classification
+manager-os extract --mode both --llm-limit 5 --verbose  # Minimal LLM test
 ```
 
 ## Final Morning Commands (from requirements)

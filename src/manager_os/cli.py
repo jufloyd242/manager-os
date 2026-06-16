@@ -984,6 +984,451 @@ def dashboard() -> None:
 
 
 # ---------------------------------------------------------------------------
+# manager-os daily (morning workflow)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def daily(
+    target_date: Optional[str] = typer.Option(None, "--date", help="Date (YYYY-MM-DD). Defaults to today."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing to DB or retrieving workspace."),
+    no_workspace: bool = typer.Option(False, "--no-workspace", help="Skip workspace retrieval entirely."),
+    rules_only: bool = typer.Option(False, "--rules-only", help="Use rules-only extraction (no LLM)."),
+    llm_limit: int = typer.Option(25, "--llm-limit", help="Maximum notes to send to the LLM."),
+    llm_timeout_seconds: int = typer.Option(120, "--llm-timeout-seconds", help="Per-note LLM timeout in seconds."),
+    max_items: int = typer.Option(20, "--max-items", help="Maximum items per section in the brief."),
+    open_dashboard: bool = typer.Option(False, "--open-dashboard", help="Launch dashboard after brief generation."),
+    skip_brief: bool = typer.Option(False, "--skip-brief", help="Skip brief generation."),
+    skip_extract: bool = typer.Option(False, "--skip-extract", help="Skip signal extraction."),
+    skip_ingest: bool = typer.Option(False, "--skip-ingest", help="Skip all ingest steps."),
+    force_ingest: bool = typer.Option(False, "--force-ingest", help="Re-ingest files even if content hash unchanged."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed skip/warning information."),
+) -> None:
+    """Run the complete morning Manager OS workflow.
+
+    Equivalent to running ingest, extract, brief, and optionally
+    dashboard in sequence with sensible defaults.
+    """
+    from datetime import date as _date
+    from rich import box as rich_box
+    from rich.panel import Panel
+    from manager_os.config import get_settings, load_source_priority
+    from manager_os.db import get_connection, seed_from_config
+    from manager_os.ingest.obsidian import ingest_vault
+    from manager_os.ingest.forecast import ingest_forecast
+    from manager_os.ingest.deals import ingest_deals
+    from manager_os.ingest.workspace_summary import ingest_summary
+
+    run_date = _date.fromisoformat(target_date) if target_date else _date.today()
+    settings = get_settings()
+    extract_mode = "rules" if rules_only else "both"
+
+    # Track warnings across phases for the closing summary
+    extraction_warnings: list[str] = []
+    brief_path: str | None = None
+
+    # ------------------------------------------------------------------
+    # Header
+    # ------------------------------------------------------------------
+    console.print()
+    console.print(Panel.fit(
+        "[bold]Manager OS — Daily Morning Flow[/bold]",
+        box=rich_box.ROUNDED,
+        border_style="cyan",
+    ))
+    console.print(f"  [dim]Date:[/dim]          {run_date}")
+    console.print(f"  [dim]DB:[/dim]            {settings.db_path}")
+    console.print(f"  [dim]Vault:[/dim]         {settings.vault_path or '(not set)'}")
+    console.print(f"  [dim]Extract mode:[/dim]  {extract_mode}")
+    console.print(f"  [dim]LLM limit:[/dim]     {llm_limit}")
+    console.print(f"  [dim]Max brief items:[/dim] {max_items}")
+    console.print(f"  [dim]Workspace:[/dim]     {'disabled' if no_workspace else 'enabled'}")
+    console.print(f"  [dim]Dashboard:[/dim]     {'yes' if open_dashboard else 'no'}")
+    if dry_run:
+        console.print(f"  [yellow bold]DRY RUN — nothing will be written.[/yellow bold]")
+    console.print()
+
+    # ------------------------------------------------------------------
+    # Phase 1: Workspace fetch
+    # ------------------------------------------------------------------
+    workspace_results: dict[str, bool] = {}
+    workspace_snapshots_found: bool = False
+
+    if not no_workspace and not dry_run:
+        try:
+            import os as _os
+            ws_enabled = (
+                _os.environ.get("MANAGER_OS_WORKSPACE_RETRIEVAL_ENABLED", "false").lower()
+                in ("true", "yes", "1")
+            )
+        except Exception:
+            ws_enabled = False
+
+        if ws_enabled:
+            console.print("[bold]Phase 1: Workspace fetch[/bold]")
+            from manager_os.ingest.workspace_gemini import (
+                retrieve_forecast,
+                retrieve_calendar,
+                retrieve_activity,
+            )
+
+            sources = [
+                ("forecast", retrieve_forecast),
+                ("calendar", retrieve_calendar),
+                ("activity", retrieve_activity),
+            ]
+            failures = 0
+            for src_label, fn in sources:
+                try:
+                    console.print(f"[dim]  → Fetching {src_label}…[/dim]")
+                    r = fn(target_date=run_date, use_yolo=True, timeout=300)
+                    if r.ok:
+                        console.print(f"[green]  ✓ {src_label}: {len(r.items)} item(s) → {r.written_to}[/green]")
+                        workspace_results[src_label] = True
+                    else:
+                        console.print(f"[yellow]  ⚠ {src_label}: {r.error}[/yellow]")
+                        workspace_results[src_label] = False
+                        failures += 1
+                except Exception as exc:
+                    console.print(f"[yellow]  ⚠ {src_label}: {exc}[/yellow]")
+                    workspace_results[src_label] = False
+                    failures += 1
+
+            total_sources = len(sources)
+            if failures == total_sources:
+                console.print("[red]All workspace sources failed.[/red]")
+            elif failures > 0:
+                console.print(f"[yellow]{failures}/{total_sources} workspace source(s) failed (non-fatal).[/yellow]")
+            else:
+                console.print("[green]All workspace sources retrieved.[/green]")
+
+            # Check if snapshots exist on disk (even if some fetches failed)
+            from manager_os.ingest.workspace_snapshot import _snapshot_exists
+            workspace_snapshots_found = any(
+                _snapshot_exists(subdir, run_date)
+                for subdir in ("forecast", "calendar", "activity")
+            )
+            console.print()
+        else:
+            console.print(
+                "[dim]Workspace retrieval disabled. Set "
+                "MANAGER_OS_WORKSPACE_RETRIEVAL_ENABLED=true to enable.[/dim]"
+            )
+    elif not no_workspace and dry_run:
+        console.print("[yellow bold]Phase 1: Workspace fetch — Skipped (dry run)[/yellow bold]")
+        console.print()
+    else:
+        console.print("[dim]Phase 1: Workspace fetch — Skipped (--no-workspace)[/dim]")
+        console.print()
+
+    # ------------------------------------------------------------------
+    # Phase 2: Ingest
+    # ------------------------------------------------------------------
+    if skip_ingest:
+        console.print("[dim]Phase 2: Ingest — Skipped (--skip-ingest)[/dim]")
+        console.print()
+    elif dry_run:
+        console.print("[yellow bold]Phase 2: Ingest — Dry-run preview[/yellow bold]")
+        _do_dry_run_ingest("all", run_date, settings)
+    else:
+        console.print("[bold]Phase 2: Ingest[/bold]")
+
+        try:
+            sp = load_source_priority(settings)
+        except Exception:
+            sp = None
+
+        conn = get_connection(settings.db_path)
+
+        # Seed from config
+        try:
+            seeded = seed_from_config(conn, settings)
+            if seeded["people"] or seeded["clients"]:
+                console.print(
+                    f"[dim]Seeded from config: {seeded['people']} people, "
+                    f"{seeded['clients']} clients[/dim]"
+                )
+        except Exception:
+            pass
+
+        table = Table(title=f"Ingest — {run_date}", show_header=True)
+        table.add_column("Source", style="cyan")
+        table.add_column("Ingested", justify="right", style="green")
+        table.add_column("Warn", justify="right", style="yellow")
+        table.add_column("Skipped", justify="right", style="dim")
+        table.add_column("Failed", justify="right", style="red")
+
+        had_error = False
+        _source_results: list[tuple[str, object]] = []
+
+        # Obsidian
+        if settings.vault_path:
+            try:
+                r = ingest_vault(settings.vault_path, conn, force=force_ingest)
+                table.add_row("obsidian", str(r.ingested), str(r.ingested_with_warnings),
+                               str(r.skipped), str(r.failed))
+                _source_results.append(("obsidian", r))
+                if r.ingested_with_warnings:
+                    for w in r.warnings[:10]:
+                        console.print(f"  [yellow]⚠ frontmatter:[/yellow] {w}")
+                if r.failed:
+                    had_error = True
+            except FileNotFoundError as exc:
+                console.print(f"[red]Vault not found: {exc}[/red]")
+                had_error = True
+        else:
+            console.print("[red]MANAGER_OS_VAULT_PATH is not set.[/red]")
+
+        # Forecast CSV
+        try:
+            r = ingest_forecast(settings.forecast_csv, conn, source_priority=sp, force=force_ingest)
+            table.add_row("forecast", str(r.ingested), "0", str(r.skipped), str(r.failed))
+            _source_results.append(("forecast", r))
+            if r.failed:
+                had_error = True
+        except (FileNotFoundError, RuntimeError) as exc:
+            console.print(f"[red]Forecast CSV error: {exc}[/red]")
+            had_error = True
+
+        # Deals CSV
+        try:
+            r = ingest_deals(settings.deals_csv, conn, source_priority=sp, force=force_ingest)
+            table.add_row("deals", str(r.ingested), "0", str(r.skipped), str(r.failed))
+            _source_results.append(("deals", r))
+            if r.failed:
+                had_error = True
+        except (FileNotFoundError, RuntimeError) as exc:
+            console.print(f"[red]Deals CSV error: {exc}[/red]")
+            had_error = True
+
+        # Workspace summaries
+        r = ingest_summary(settings.workspace_summary_dir, run_date, conn, force=force_ingest)
+        table.add_row("summary", str(r.ingested), "0", str(r.skipped), str(r.failed))
+        _source_results.append(("summary", r))
+
+        # GWS snapshots
+        from manager_os.ingest.gws_client import ingest_gws_snapshots
+        r = ingest_gws_snapshots(settings.gws_snapshot_dir, conn,
+                                 target_date=run_date, force=force_ingest)
+        table.add_row("gws", str(r.ingested), "0", str(r.skipped), str(r.failed))
+        _source_results.append(("gws", r))
+        if r.failed:
+            had_error = True
+
+        # Workspace snapshots (if any exist)
+        if workspace_snapshots_found or workspace_results:
+            try:
+                r = _do_workspace_ingest(conn, settings, run_date, force=force_ingest, fetch=False)
+                table.add_row("workspace", str(r.ingested), "0", str(r.skipped), str(r.failed))
+                _source_results.append(("workspace", r))
+                if r.errors:
+                    for err in r.errors[:10]:
+                        console.print(f"  [yellow]⚠ workspace:[/yellow] {err}")
+                if r.failed:
+                    had_error = True
+            except Exception as exc:
+                console.print(f"[yellow]Workspace ingest skipped: {exc}[/yellow]")
+
+        console.print(table)
+        _print_skip_info(_source_results, verbose)
+        if had_error:
+            console.print("[yellow]Some ingest sources had errors (non-fatal).[/yellow]")
+        console.print()
+
+        conn.close()
+
+    # ------------------------------------------------------------------
+    # Phase 3: Extract
+    # ------------------------------------------------------------------
+    if skip_extract:
+        console.print("[dim]Phase 3: Extract — Skipped (--skip-extract)[/dim]")
+        console.print()
+    elif dry_run:
+        console.print("[yellow bold]Phase 3: Extract — Dry-run preview[/yellow bold]")
+        _do_dry_run_extract(settings, run_date, extract_mode,
+                           llm_limit=llm_limit)
+    else:
+        console.print("[bold]Phase 3: Extract[/bold]")
+        import time as _time
+        import os as _os
+
+        conn = get_connection(settings.db_path)
+
+        doc_count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+        if doc_count == 0:
+            console.print("[red]No notes found. Run ingest first.[/red]")
+            conn.close()
+            raise typer.Exit(1)
+
+        console.print(f"[dim]Extracting from {doc_count} note(s) — {run_date}[/dim]")
+
+        table = Table(title=f"Extraction — {run_date}", show_header=True)
+        table.add_column("Step", style="cyan")
+        table.add_column("Written", justify="right", style="green")
+        table.add_column("Skipped", justify="right", style="yellow")
+        table.add_column("Failed", justify="right", style="red")
+
+        _step_results: list[tuple[str, object]] = []
+        extraction_warnings: list[str] = []
+
+        # Rule extraction
+        from manager_os.extract.signals import run_rule_extraction
+        stage_start = _time.monotonic()
+        console.print("[dim]  → Running rule-based signal extraction…[/dim]")
+        rule_result = run_rule_extraction(conn, run_date=run_date)
+        console.print(
+            f"[dim]  ← Rules complete in {_time.monotonic() - stage_start:.2f}s "
+            f"(written={rule_result.written}, skipped={rule_result.skipped}, "
+            f"failed={rule_result.failed})[/dim]"
+        )
+        table.add_row("signals (rules)", str(rule_result.written),
+                       str(rule_result.skipped), str(rule_result.failed))
+        _step_results.append(("signals (rules)", rule_result))
+
+        # LLM extraction (if mode is both)
+        if extract_mode == "both":
+            from manager_os.extract.llm_signals import run_llm_extraction, LLMExtractionUnavailable
+            try:
+                def _progress_cb(event: str, payload: dict) -> None:
+                    if event == "stage_start":
+                        console.print(f"[dim]  → {payload.get('message', payload.get('stage'))}[/dim]")
+                    elif event == "candidate_start":
+                        idx = payload.get("index", 0)
+                        total = payload.get("total", 0)
+                        path = payload.get("source_path", "")
+                        console.print(f"[dim]    [{idx}/{total}] LLM candidate: {path}[/dim]")
+                    elif event == "stage_end" and payload.get("stage") == "llm_extraction":
+                        elapsed = payload.get("elapsed_seconds", 0.0)
+                        console.print(
+                            f"[dim]  ← LLM extraction complete in {elapsed:.2f}s "
+                            f"(written={payload.get('written')}, skipped={payload.get('skipped')}, "
+                            f"failed={payload.get('failed')})[/dim]"
+                        )
+
+                effective_limit = llm_limit if llm_limit > 0 else None
+                llm_result = run_llm_extraction(
+                    conn, run_date=run_date, max_candidates=effective_limit,
+                    timeout_seconds=llm_timeout_seconds,
+                    progress_callback=_progress_cb,
+                )
+                table.add_row("signals (llm)", str(llm_result.written),
+                               str(llm_result.skipped), str(llm_result.failed))
+                _step_results.append(("signals (llm)", llm_result))
+            except LLMExtractionUnavailable as exc:
+                console.print(f"[yellow]LLM extraction skipped: {exc}[/yellow]")
+                extraction_warnings.append(f"LLM: {exc}")
+
+        # Action items
+        from manager_os.extract.action_items import extract_action_items_from_all_notes
+        ai_result = extract_action_items_from_all_notes(conn)
+        table.add_row("action items", str(ai_result.written),
+                       str(ai_result.skipped), str(ai_result.failed))
+        _step_results.append(("action items", ai_result))
+
+        # Decisions
+        from manager_os.extract.decisions import extract_decisions_from_all_notes
+        dec_result = extract_decisions_from_all_notes(conn)
+        table.add_row("decisions", str(dec_result.written),
+                       str(dec_result.skipped), str(dec_result.failed))
+        _step_results.append(("decisions", dec_result))
+
+        console.print(table)
+        _print_skip_info(_step_results, verbose)
+        if extraction_warnings:
+            for w in extraction_warnings:
+                console.print(f"[yellow]  ⚠ {w}[/yellow]")
+        console.print()
+
+        conn.close()
+
+    # ------------------------------------------------------------------
+    # Phase 4: Brief
+    # ------------------------------------------------------------------
+    brief_path: str | None = None
+    if skip_brief:
+        console.print("[dim]Phase 4: Brief — Skipped (--skip-brief)[/dim]")
+        console.print()
+    elif dry_run:
+        console.print("[yellow bold]Phase 4: Brief — Skipped (dry run)[/yellow bold]")
+        console.print()
+    else:
+        console.print("[bold]Phase 4: Brief[/bold]")
+        from manager_os.db import get_connection as _get_conn
+        from manager_os.build.daily_brief import generate_daily_brief, write_brief_to_file
+
+        conn = _get_conn(settings.db_path)
+        b = generate_daily_brief(conn, target_date=run_date, max_items=max_items)
+        out_path = write_brief_to_file(b)
+        brief_path = str(out_path)
+        console.print(f"[green]Brief written to:[/green] {out_path}")
+        total = len(b.signal_ids)
+        shown = b.shown_signals
+        if shown >= total:
+            console.print(f"  Showing all {total} open signal(s).")
+        else:
+            console.print(f"  Showing {shown} of {total} open signals.")
+        console.print()
+        conn.close()
+
+    # ------------------------------------------------------------------
+    # Phase 5: Dashboard (optional)
+    # ------------------------------------------------------------------
+    if open_dashboard and not dry_run:
+        console.print("[bold]Phase 5: Dashboard[/bold]")
+        import subprocess
+        app_path = Path(__file__).parent / "dashboard" / "app.py"
+        console.print(f"[green]Launching dashboard:[/green] {app_path}")
+        subprocess.run(["streamlit", "run", str(app_path)], check=False)
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
+    console.print()
+    console.print(Panel.fit(
+        "[bold]Daily Flow Complete[/bold]",
+        box=rich_box.ROUNDED,
+        border_style="green",
+    ))
+    summary_lines: list[str] = []
+
+    # Workspace
+    if not no_workspace and not dry_run and workspace_results:
+        ws_ok = sum(1 for v in workspace_results.values() if v)
+        ws_total = len(workspace_results)
+        summary_lines.append(f"Workspace: {ws_ok}/{ws_total} source(s) retrieved")
+    elif no_workspace:
+        summary_lines.append("Workspace: skipped (--no-workspace)")
+    elif dry_run:
+        summary_lines.append("Workspace: skipped (dry run)")
+
+    if not skip_ingest:
+        summary_lines.append("Ingest: complete")
+    else:
+        summary_lines.append("Ingest: skipped")
+
+    if not skip_extract:
+        summary_lines.append(f"Extract: {extract_mode} mode")
+    else:
+        summary_lines.append("Extract: skipped")
+
+    if brief_path:
+        summary_lines.append(f"Brief: {brief_path}")
+    elif skip_brief:
+        summary_lines.append("Brief: skipped")
+    elif dry_run:
+        summary_lines.append("Brief: would be generated")
+
+    if extraction_warnings:
+        summary_lines.append(f"Warnings: {'; '.join(extraction_warnings)}")
+    if dry_run:
+        summary_lines.append("[yellow]DRY RUN — no data was written.[/yellow]")
+
+    for line in summary_lines:
+        console.print(f"  • {line}")
+    console.print()
+
+
+# ---------------------------------------------------------------------------
 # manager-os meeting-prep (stub — implemented in Issue #18)
 # ---------------------------------------------------------------------------
 
