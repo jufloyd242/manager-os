@@ -320,33 +320,60 @@ def retrieve_calendar(
 
 
 # ------------------------------------------------------------------
-# 3. Workspace activity retrieval
+# 3. Workspace activity retrieval (Google Chat summary)
 # ------------------------------------------------------------------
 
 ACTIVITY_PROMPT_TEMPLATE = """\
-Summarize recent Google Workspace activity relevant to management for the last
-{lookback_days} day(s) from {target_date}.
+You are operating in read-only mode.
+Do not send, edit, delete, or modify any Chat messages or Google Workspace data.
 
-{read_only}
+Open this Google Chat space/app URL:
+{chat_url}
 
-Focus on:
-- Files/docs updated by or shared with me
-- Comments or mentions requiring attention
-- Calendar changes
-- Docs/sheets related to clients, deals, team, staffing
-- Anything requiring manager attention
+This space contains daily summarized workspace activity and action items.
+
+For target date {target_date}, retrieve the daily activity summary and action items.
+If an exact date is not available, retrieve the most recent summary within {lookback_days} day(s).
 
 Return strict JSON only with:
-  ok: boolean
-  source: "google_workspace_gemini"
-  retrieved_at: ISO timestamp
-  summary: string (concise markdown summary, max 1000 chars)
-  items: array of objects with:
-    - type: string ("doc_updated", "comment", "mention", "calendar_change", "other")
-    - title: string
-    - source_url: string (if available)
-    - description: string (max 300 chars)
-    - requires_attention: boolean
+{{
+  "ok": true,
+  "source": "google_chat_activity_summary",
+  "source_url": "{chat_url}",
+  "retrieved_at": "...",
+  "summary_date": "YYYY-MM-DD",
+  "summary": "concise summary",
+  "items": [
+    {{
+      "type": "action_item|mention|doc_update|calendar_change|deal_update|staffing_update|other",
+      "title": "...",
+      "description": "...",
+      "source_url": "...",
+      "requires_attention": true,
+      "assigned_to": "manager|person name|unknown",
+      "due_date": "YYYY-MM-DD|null",
+      "entity_type": "person|client|deal|team|workspace|unknown",
+      "entity_name": "...",
+      "confidence": 0.0-1.0
+    }}
+  ],
+  "action_items": [
+    {{
+      "description": "...",
+      "assigned_to": "manager|person name|unknown",
+      "due_date": "YYYY-MM-DD|null",
+      "source_url": "...",
+      "entity_type": "...",
+      "entity_name": "...",
+      "confidence": 0.0-1.0
+    }}
+  ]
+}}
+
+If the Chat source cannot be read, return:
+{{"ok": false, "source": "google_chat_activity_summary", "error": "..."}}
+
+Do not guess.
 """
 
 
@@ -357,12 +384,24 @@ def retrieve_activity(
     dry_run: bool = False,
     output_dir: str | None = None,
     lookback_days: int | None = None,
+    chat_url: str | None = None,
 ) -> RetrievalResult:
-    """Retrieve recent workspace activity from Google Workspace via Gemini CLI."""
+    """Retrieve workspace activity summary from configured Google Chat space via Gemini CLI."""
+    from manager_os.config import get_settings
+    settings = get_settings()
+    url = chat_url or settings.workspace_activity_chat_url
+    days = lookback_days or settings.workspace_activity_lookback_days
+
+    if not url:
+        result = RetrievalResult(dry_run=dry_run)
+        result.ok = False
+        result.error = "MANAGER_OS_WORKSPACE_ACTIVITY_CHAT_URL is not configured."
+        return result
+
     prompt = ACTIVITY_PROMPT_TEMPLATE.format(
         target_date=target_date.isoformat(),
-        lookback_days=lookback_days or ACTIVITY_LOOKBACK_DAYS,
-        read_only=_READ_ONLY_PREFIX,
+        lookback_days=days,
+        chat_url=url,
     )
 
     result = RetrievalResult(dry_run=dry_run)
@@ -380,6 +419,13 @@ def retrieve_activity(
         result.items = data.get("items", [])
         result.json_text = raw
         if result.ok:
+            # Enrich snapshot metadata for better tracking
+            data["source"] = "google_chat_activity_summary"
+            data["source_url"] = url
+            data["action_items_count"] = len(data.get("action_items", []))
+            data["requires_attention_count"] = sum(
+                1 for i in data.get("items", []) if i.get("requires_attention")
+            )
             path = _write_snapshot(data, "activity", target_date, output_dir)
             result.written_to = path
     except Exception as exc:

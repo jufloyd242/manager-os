@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     calendar_lookahead_days: int = 2
     calendar_lookback_days: int = 1
     workspace_activity_lookback_days: int = 1
+    workspace_activity_source: str = "google_chat_space"
+    workspace_activity_chat_url: str = "https://chat.google.com/u/0/app/chat/AAQA61WgdSs"
 
 
 def get_settings() -> Settings:

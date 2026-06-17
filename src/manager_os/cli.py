@@ -3852,6 +3852,19 @@ def _do_workspace_fetch(
         console.print(f"  Source: {result.source_title}")
     if result.written_to:
         console.print(f"  Snapshot: {result.written_to}")
+    
+    # Phase 3: Show better snapshot metadata for activity
+    if command_name == "activity" and result.ok:
+        try:
+            import json
+            with open(result.written_to, 'r') as f:
+                data = json.load(f)
+            ai_count = data.get("action_items_count", len(data.get("action_items", [])))
+            attn_count = data.get("requires_attention_count", 0)
+            console.print(f"  Action items: {ai_count} (Requires attention: {attn_count})")
+        except Exception:
+            pass
+            
     console.print()
 
 
@@ -3905,14 +3918,15 @@ def workspace_fetch_activity(
     timeout: int = typer.Option(180, "--timeout", help="Timeout in seconds."),
     output_dir: Optional[str] = typer.Option(None, "--output-dir"),
     lookback: Optional[int] = typer.Option(None, "--lookback", help="Override lookback days."),
+    chat_url: Optional[str] = typer.Option(None, "--chat-url", help="Override the configured Google Chat URL."),
 ) -> None:
-    """Retrieve recent workspace activity from Google Workspace."""
+    """Retrieve workspace activity summary from configured Google Chat space."""
     from manager_os.ingest.workspace_gemini import retrieve_activity
 
     run_date = date.fromisoformat(target_date) if target_date else date.today()
     _do_workspace_fetch(
         "activity", retrieve_activity, run_date, dry_run, print_prompt, no_yolo, timeout, output_dir,
-        lookback_days=lookback,
+        lookback_days=lookback, chat_url=chat_url,
     )
 
 

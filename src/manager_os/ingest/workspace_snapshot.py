@@ -350,4 +350,76 @@ def ingest_workspace_activity_snapshot(
         logger.warning("Failed to write activity note: %s", exc)
         result.failed += 1
 
+    # Phase 4: Ingest Chat activity as first-class action items
+    action_items = data.get("action_items", [])
+    attention_items = [i for i in items if i.get("requires_attention")]
+
+    # Combine and dedupe
+    seen_actions: set[str] = set()
+    for ai in action_items:
+        desc = str(ai.get("description", "")).strip()
+        if not desc:
+            continue
+        dedup_key = content_hash(f"workspace_activity::{target_date.isoformat()}::{ai.get('source_url', '')}::{desc}")
+        if dedup_key in seen_actions:
+            continue
+        seen_actions.add(dedup_key)
+
+        assigned_to = str(ai.get("assigned_to", "manager")).strip() or "manager"
+        due_date = ai.get("due_date")
+        entity_type = str(ai.get("entity_type", "workspace")).strip() or "workspace"
+        entity_name = str(ai.get("entity_name", "")).strip()
+        source_url = str(ai.get("source_url", ""))
+
+        try:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO action_items
+                    (id, signal_id, source_note_id, assigned_to, description,
+                     due_date, status, created_at, updated_at, source_url)
+                VALUES (?, NULL, ?, ?, ?, ?, 'open', ?, ?, ?)
+                """,
+                [
+                    dedup_key, note_id, assigned_to, desc,
+                    due_date, now, now, source_url,
+                ],
+            )
+            result.ingested += 1
+        except Exception as exc:
+            logger.warning("Failed to write workspace action item: %s", exc)
+            result.failed += 1
+
+    for ai in attention_items:
+        desc = str(ai.get("description", "")).strip()
+        if not desc:
+            continue
+        dedup_key = content_hash(f"workspace_activity::{target_date.isoformat()}::{ai.get('source_url', '')}::{desc}")
+        if dedup_key in seen_actions:
+            continue
+        seen_actions.add(dedup_key)
+
+        assigned_to = str(ai.get("assigned_to", "manager")).strip() or "manager"
+        due_date = ai.get("due_date")
+        entity_type = str(ai.get("entity_type", "workspace")).strip() or "workspace"
+        entity_name = str(ai.get("entity_name", "")).strip()
+        source_url = str(ai.get("source_url", ""))
+
+        try:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO action_items
+                    (id, signal_id, source_note_id, assigned_to, description,
+                     due_date, status, created_at, updated_at, source_url)
+                VALUES (?, NULL, ?, ?, ?, ?, 'open', ?, ?, ?)
+                """,
+                [
+                    dedup_key, note_id, assigned_to, desc,
+                    due_date, now, now, source_url,
+                ],
+            )
+            result.ingested += 1
+        except Exception as exc:
+            logger.warning("Failed to write workspace attention action item: %s", exc)
+            result.failed += 1
+
     return result
