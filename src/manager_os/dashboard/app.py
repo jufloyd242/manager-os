@@ -72,7 +72,7 @@ with st.sidebar:
 # Tabs
 # ------------------------------------------------------------------
 
-tabs = st.tabs(["Today", "People", "Clients", "Deals", "Forecast", "Meeting Prep"])
+tabs = st.tabs(["Today", "People", "Clients", "Deals", "Projects", "Forecast", "Meeting Prep"])
 
 # ------------------------------------------------------------------
 # Tab 1 — Today
@@ -464,10 +464,164 @@ with tabs[3]:
                         st.caption("📊 Deal Sheet: not found — run `workspace-fetch-deal-docs`")
 
 # ------------------------------------------------------------------
-# Tab 5 — Forecast
+# Tab 5 — Projects (Sheet-backed project index)
 # ------------------------------------------------------------------
 
 with tabs[4]:
+    from manager_os.build.project_index import search_projects
+    
+    st.header("📚 Project Index")
+    st.caption("Source: NetSuite Closed-Won Opportunities Sheet")
+    
+    # Check if project index is stale
+    try:
+        import json
+        from pathlib import Path
+        from datetime import datetime, timedelta
+        
+        settings = get_settings()
+        meta_path = f"{settings.project_index_local_csv}.meta.json"
+        
+        if Path(meta_path).exists():
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            
+            retrieved_at_str = meta.get("retrieved_at", "")
+            if retrieved_at_str:
+                retrieved_at_str = retrieved_at_str.replace("Z", "+00:00")
+                retrieved_at = datetime.fromisoformat(retrieved_at_str)
+                if retrieved_at.tzinfo is None:
+                    retrieved_at = retrieved_at.replace(tzinfo=datetime.now().astimezone().tzinfo)
+                
+                now = datetime.now(retrieved_at.tzinfo)
+                stale_hours = settings.project_index_stale_after_hours
+                age_hours = (now - retrieved_at).total_seconds() / 3600
+                
+                if age_hours > stale_hours:
+                    st.warning(f"⚠️ Project index is stale (last updated {age_hours:.1f}h ago). Run `manager-os project-index-fetch --force` to refresh.")
+                else:
+                    st.success(f"✓ Project index is fresh (updated {age_hours:.1f}h ago)")
+        else:
+            st.warning("⚠️ Project index metadata not found. Run `manager-os project-index-fetch` to initialize.")
+    except Exception as e:
+        st.warning(f"Could not check project index status: {e}")
+    
+    # Search and filter controls
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        search_query = st.text_input("Search projects", placeholder="Search by name, summary, or keywords...")
+    with col2:
+        project_type_filter = st.selectbox(
+            "Filter by type",
+            options=["", "ADK", "GenAI", "CES", "ML", "Search", "Media Rec", "Retail Rec", "DocAI"],
+            index=0
+        )
+    with col3:
+        industry_filter = st.text_input("Filter by industry", placeholder="e.g., Retail, Finance")
+    
+    # Additional filters
+    col4, col5, col6 = st.columns(3)
+    with col4:
+        sales_rep_filter = st.text_input("Filter by sales rep", placeholder="e.g., Charlie Lisk")
+    with col5:
+        year_filter = st.number_input("Filter by year", min_value=2020, max_value=2030, value=0, step=1)
+        year_filter = year_filter if year_filter > 0 else None
+    with col6:
+        opp_number_filter = st.text_input("Filter by OppID", placeholder="e.g., OPP032106")
+    
+    # Execute search
+    if st.button("🔍 Search", type="primary"):
+        results = search_projects(
+            conn,
+            query=search_query,
+            project_type=project_type_filter if project_type_filter else None,
+            industry=industry_filter if industry_filter else None,
+            sales_rep=sales_rep_filter if sales_rep_filter else None,
+            year=year_filter,
+            opportunity_number=opp_number_filter if opp_number_filter else None,
+            limit=100
+        )
+        
+        st.session_state["project_search_results"] = results
+    
+    # Display results
+    results = st.session_state.get("project_search_results", [])
+    
+    if not results:
+        st.info("No projects found. Try adjusting your search criteria or run `manager-os index-projects` to populate the index.")
+    else:
+        st.success(f"Found {len(results)} project(s)")
+        
+        for project in results:
+            with st.expander(f"**{project['project_name']}** — {project['client']} ({project['opportunity_number']})"):
+                # Header info
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Close Date", project.get('close_date', 'N/A'))
+                with col2:
+                    services_amt = project.get('services_amount')
+                    if services_amt:
+                        st.metric("Services Amount", f"${services_amt:,.0f}")
+                    else:
+                        st.metric("Services Amount", "N/A")
+                with col3:
+                    st.metric("Type", project.get('project_type', 'N/A'))
+                with col4:
+                    st.metric("Industry", project.get('industry', 'N/A'))
+                
+                # Details
+                st.markdown(f"**Sales Rep:** {project.get('sales_rep', 'N/A')}")
+                if project.get('services_delivery_team'):
+                    st.markdown(f"**Delivery Team:** {project['services_delivery_team']}")
+                if project.get('solution_pillar'):
+                    st.markdown(f"**Solution Pillar:** {project['solution_pillar']}")
+                
+                # Description
+                if project.get('short_description'):
+                    st.markdown(f"**Short Description:** {project['short_description']}")
+                
+                if project.get('summary'):
+                    st.markdown("**Summary:**")
+                    st.markdown(project['summary'])
+                    if project.get('summary_is_generated'):
+                        st.caption("⚠️ Summary was auto-generated from available fields")
+                
+                # Technologies
+                technologies = project.get('technologies', [])
+                if technologies:
+                    st.markdown("**Technologies:**")
+                    tech_badges = " ".join([f"`{tech}`" for tech in technologies])
+                    st.markdown(tech_badges)
+                
+                # Related documents
+                related_docs = project.get('related_documents', [])
+                if related_docs:
+                    st.markdown("**Related Documents:**")
+                    for doc in related_docs:
+                        doc_type = doc.get('document_type', 'document')
+                        title = doc.get('title', 'Untitled')
+                        url = doc.get('url', '')
+                        confidence = doc.get('confidence', 0)
+                        
+                        if url:
+                            st.markdown(f"- [{doc_type.upper()}]({url}) — {title} (confidence: {confidence:.0%})")
+                        else:
+                            st.markdown(f"- {doc_type.upper()} — {title} (confidence: {confidence:.0%})")
+                else:
+                    st.caption("No related documents found. Run `manager-os project-docs-fetch` to search Google Drive.")
+                
+                # Source links
+                source_urls = project.get('source_urls', [])
+                if source_urls:
+                    st.markdown("**Source Links:**")
+                    for url in source_urls:
+                        st.markdown(f"- {url}")
+
+# ------------------------------------------------------------------
+# Tab 6 — Forecast
+# ------------------------------------------------------------------
+
+with tabs[5]:
     from manager_os.build.dashboard_data import (
         get_forecast_rows,
         get_forecast_summary,
@@ -601,10 +755,10 @@ with tabs[4]:
             st.dataframe(df, use_container_width=True, hide_index=True)
 
 # ------------------------------------------------------------------
-# Tab 6 — Meeting Prep
+# Tab 7 — Meeting Prep
 # ------------------------------------------------------------------
 
-with tabs[5]:
+with tabs[6]:
     from manager_os.build.dashboard_data import get_meetings_for_date
 
     @st.cache_data(ttl=300)

@@ -45,6 +45,7 @@ def _env(db_path: str, *, vault: str = "", home: str = "") -> dict[str, str]:
         "MANAGER_OS_GWS_SNAPSHOT_DIR": str(FIXTURES / "gws_snapshots"),
         "MANAGER_OS_CONFIG_DIR": str(REPO_ROOT / "config"),
         "MANAGER_OS_WORKSPACE_RETRIEVAL_ENABLED": "false",
+        "MANAGER_OS_FORECAST_SOURCE": "local_csv",  # Skip Google Sheets fetch in tests
     }
     if home:
         env_vars["HOME"] = home

@@ -248,6 +248,64 @@ ALTER TABLE deals ADD COLUMN IF NOT EXISTS probability FLOAT;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS services_amount FLOAT;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS last_status_changed_date DATE;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS source_format VARCHAR;
+
+-- Project index schema (NetSuite Closed-Won Opportunities)
+CREATE TABLE IF NOT EXISTS projects (
+    id VARCHAR PRIMARY KEY,
+    project_name VARCHAR,
+    client VARCHAR,
+    opportunity_number VARCHAR,
+    deal_id VARCHAR,
+    status VARCHAR,
+    start_date DATE,
+    end_date DATE,
+    technologies_json JSON,
+    skills_json JSON,
+    team_members_json JSON,
+    summary VARCHAR,
+    outcome VARCHAR,
+    lessons_learned VARCHAR,
+    risks_json JSON,
+    reusable_artifacts_json JSON,
+    source_urls_json JSON,
+    source_note_ids_json JSON,
+    source_doc_ids_json JSON,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    -- NetSuite sheet specific fields
+    source_system VARCHAR,
+    source_sheet_url VARCHAR,
+    source_sheet_gid VARCHAR,
+    year INTEGER,
+    month INTEGER,
+    services_amount FLOAT,
+    close_date DATE,
+    sales_rep VARCHAR,
+    services_delivery_team VARCHAR,
+    solution_pillar VARCHAR,
+    project_type VARCHAR,
+    industry VARCHAR,
+    short_description VARCHAR,
+    source_row INTEGER,
+    summary_is_generated BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS project_documents (
+    id VARCHAR PRIMARY KEY,
+    project_id VARCHAR,
+    opportunity_number VARCHAR,
+    client VARCHAR,
+    project_name VARCHAR,
+    document_type VARCHAR,
+    title VARCHAR,
+    url VARCHAR,
+    source VARCHAR,
+    retrieved_at TIMESTAMP,
+    search_status VARCHAR,
+    confidence FLOAT,
+    why_matched VARCHAR,
+    error VARCHAR
+);
 CREATE TABLE IF NOT EXISTS projects (
     id VARCHAR PRIMARY KEY,
     project_name VARCHAR,

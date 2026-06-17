@@ -2278,34 +2278,348 @@ def profile_forecast() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# manager-os project-index-fetch
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="project-index-fetch")
+def project_index_fetch(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print resolved config without downloading."),
+    force: bool = typer.Option(False, "--force", help="Overwrite the local project index CSV."),
+    print_url: bool = typer.Option(False, "--print-url", help="Print the deterministic CSV export URL and exit."),
+    print_prompt: bool = typer.Option(False, "--print-prompt", help="Print the Gemini CLI prompt and exit."),
+    output: Optional[str] = typer.Option(None, "--output", help="Override the local CSV output path."),
+    sheet_url: Optional[str] = typer.Option(None, "--sheet-url", help="Override the Google Sheet URL."),
+    sheet_id: Optional[str] = typer.Option(None, "--sheet-id", help="Override the Google Sheet ID."),
+    gid: Optional[str] = typer.Option(None, "--gid", help="Override the Google Sheet GID."),
+    timeout: int = typer.Option(180, "--timeout", help="Download timeout in seconds."),
+) -> None:
+    """Fetch the project index CSV from the configured Google Sheet via Gemini CLI.
+
+    Uses deterministic retrieval. No fallbacks allowed.
+    """
+    import subprocess
+    import json
+    import csv
+    import hashlib
+    from datetime import datetime
+    from manager_os.config import get_settings
+
+    settings = get_settings()
+
+    # Resolve config
+    src = getattr(settings, "project_index_source", "google_sheet_gemini")
+    s_id = sheet_id or getattr(settings, "project_index_sheet_id", "")
+    s_gid = gid or getattr(settings, "project_index_sheet_gid", "")
+    s_url = sheet_url or getattr(settings, "project_index_sheet_url", "")
+    local_csv = output or getattr(settings, "project_index_local_csv", "")
+
+    if print_url:
+        export_url = getattr(settings, "project_index_export_url", "")
+        if not export_url and s_id and s_gid:
+            export_url = f"https://docs.google.com/spreadsheets/d/{s_id}/export?format=csv&gid={s_gid}"
+        console.print(f"[bold]Export URL:[/bold] {export_url}")
+        raise typer.Exit(0)
+
+    if dry_run:
+        console.print("[bold]Project Index Fetch — Dry Run[/bold]")
+        console.print(f"  Source:       {src}")
+        console.print(f"  Sheet ID:     {s_id}")
+        console.print(f"  GID:          {s_gid}")
+        console.print(f"  Sheet URL:    {s_url}")
+        console.print(f"  Output Path:  {local_csv}")
+        raise typer.Exit(0)
+
+    if src != "google_sheet_gemini":
+        console.print(f"[red]MANAGER_OS_PROJECT_INDEX_SOURCE must be 'google_sheet_gemini'. Got '{src}'.[/red]")
+        raise typer.Exit(1)
+
+    if not s_id or not s_gid or not s_url:
+        console.print("[red]Missing Sheet ID, GID, or URL. Check MANAGER_OS_PROJECT_INDEX_SHEET_ID, GID, and URL.[/red]")
+        raise typer.Exit(1)
+
+    if not local_csv:
+        console.print("[red]No local CSV path configured (MANAGER_OS_PROJECT_INDEX_LOCAL_CSV).[/red]")
+        raise typer.Exit(1)
+
+    prompt = f"""You are operating in read-only mode.
+Do not create, edit, delete, send, move, or modify anything.
+
+Open this exact Google Sheet:
+{s_url}
+
+Read only the tab with gid:
+{s_gid}
+
+Return the raw tabular data from that tab only.
+
+Do not summarize.
+Do not infer.
+Do not search Drive.
+Do not choose a different spreadsheet.
+Do not transform business semantics.
+Do not omit blank cells.
+
+Return strict JSON only with:
+{{
+  "ok": true,
+  "source": "google_sheet_project_index",
+  "source_url": "{s_url}",
+  "sheet_id": "{s_id}",
+  "gid": "{s_gid}",
+  "retrieved_at": "...",
+  "rows": [
+    ["cell A1", "cell B1", "..."],
+    ["cell A2", "cell B2", "..."]
+  ]
+}}
+
+If you cannot access the sheet, return:
+{{
+  "ok": false,
+  "source": "google_sheet_project_index",
+  "sheet_id": "{s_id}",
+  "gid": "{s_gid}",
+  "error": "..."
+}}"""
+
+    if print_prompt:
+        console.print("[bold]Gemini CLI Prompt:[/bold]")
+        console.print(prompt)
+        raise typer.Exit(0)
+
+    console.print(f"[dim]Retrieving project index via Gemini CLI for Sheet ID: {s_id}, GID: {s_gid}[/dim]")
+    console.print(f"[dim]Saving to:[/dim] {local_csv}")
+
+    try:
+        from manager_os.llm.gemini_cli import GEMINI_CLI_BIN, GEMINI_CLI_MODEL, GEMINI_CLI_ARGS, GEMINI_CLI_TIMEOUT
+        
+        cmd = [GEMINI_CLI_BIN]
+        if GEMINI_CLI_MODEL:
+            cmd.extend(["--model", GEMINI_CLI_MODEL])
+        if GEMINI_CLI_ARGS:
+            cmd.extend(GEMINI_CLI_ARGS.split())
+        cmd.append("-y")
+        
+        effective_timeout = timeout if timeout else GEMINI_CLI_TIMEOUT
+        
+        proc = subprocess.run(
+            cmd + ["--prompt", prompt],
+            capture_output=True,
+            text=True,
+            timeout=effective_timeout,
+        )
+        
+        if proc.returncode != 0:
+            raise RuntimeError(f"Gemini CLI failed: {proc.stderr}")
+            
+        output_text = proc.stdout.strip()
+        if output_text.startswith("```json"):
+            output_text = output_text[7:]
+        if output_text.endswith("```"):
+            output_text = output_text[:-3]
+            
+        result_data = json.loads(output_text)
+        
+        if not result_data.get("ok"):
+            raise RuntimeError(f"Gemini CLI reported failure: {result_data.get('error', 'Unknown error')}")
+            
+        rows = result_data.get("rows", [])
+        if not rows:
+            raise RuntimeError("Gemini CLI returned no rows.")
+            
+        # Write to CSV
+        Path(local_csv).parent.mkdir(parents=True, exist_ok=True)
+        csv_content = ""
+        with open(local_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerows(rows)
+            f.seek(0)
+            csv_content = f.read()
+            
+        content_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
+        retrieved_at = result_data.get("retrieved_at", datetime.utcnow().isoformat())
+        
+        # Write metadata
+        meta_path = f"{local_csv}.meta.json"
+        metadata = {
+            "source": "google_sheet_project_index",
+            "sheet_url": s_url,
+            "sheet_id": s_id,
+            "gid": s_gid,
+            "retrieved_at": retrieved_at,
+            "local_csv_path": local_csv,
+            "row_count": len(rows),
+            "content_hash": content_hash
+        }
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+            
+        console.print(f"[green]✓ Successfully retrieved and saved project index to {local_csv}[/green]")
+        console.print(f"[dim]  Metadata written to: {meta_path}[/dim]")
+        
+    except subprocess.TimeoutExpired:
+        console.print(f"[red]✗ Gemini CLI timed out after {timeout} seconds.[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]✗ Retrieval failed: {e}[/red]")
+        console.print(f"  Sheet ID: {s_id}")
+        console.print(f"  GID: {s_gid}")
+        console.print(f"  Sheet URL: {s_url}")
+        console.print("[yellow]Suggestion: Verify your Google account has access to this sheet and Gemini CLI is configured correctly.[/yellow]")
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# manager-os index-projects
+# ---------------------------------------------------------------------------
+
+
 @app.command(name="index-projects")
 def index_projects(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing."),
-    force: bool = typer.Option(False, "--force", help="Re-index all notes."),
-    limit: int = typer.Option(None, "--limit", help="Limit number of notes to process."),
+    force: bool = typer.Option(False, "--force", help="Re-index all projects."),
+    limit: int = typer.Option(None, "--limit", help="Limit number of projects to process."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output."),
+    skip_fetch: bool = typer.Option(False, "--skip-fetch", help="Skip fetching the project sheet."),
+    skip_drive_enrichment: bool = typer.Option(False, "--skip-drive-enrichment", help="Skip Google Drive document enrichment."),
+    notes_enrichment: bool = typer.Option(False, "--notes-enrichment", help="Enable notes enrichment (not primary source)."),
 ) -> None:
-    """Index projects from notes and deals into the project knowledge base."""
+    """Index projects from the NetSuite Closed-Won Opportunities sheet.
+
+    Primary source is the Google Sheet. Notes are enrichment only.
+    """
     from manager_os.config import get_settings
     from manager_os.db import get_connection
-    from manager_os.build.project_index import extract_projects_from_notes
+    from manager_os.ingest.project_sheet import parse_project_sheet, upsert_projects
+    import json
+    import hashlib
+    from datetime import datetime, timedelta
 
     settings = get_settings()
     conn = get_connection(settings.db_path)
 
     if dry_run:
         console.print("[bold]Index Projects — Dry Run[/bold]")
-        console.print(f"  Force:  {force}")
-        console.print(f"  Limit:  {limit}")
+        console.print(f"  Force:                {force}")
+        console.print(f"  Limit:                {limit}")
+        console.print(f"  Skip Fetch:           {skip_fetch}")
+        console.print(f"  Skip Drive Enrichment: {skip_drive_enrichment}")
+        console.print(f"  Notes Enrichment:     {notes_enrichment}")
         raise typer.Exit(0)
 
-    console.print("[bold]Indexing projects...[/bold]")
-    try:
-        count = extract_projects_from_notes(conn, force=force, limit=limit)
-        console.print(f"[green]✓ Successfully indexed {count} project(s).[/green]")
-    except Exception as e:
-        console.print(f"[red]✗ Indexing failed: {e}[/red]")
+    # Step 1: Fetch project sheet if not skipped
+    local_csv = getattr(settings, "project_index_local_csv", "")
+    if not local_csv:
+        console.print("[red]No local CSV path configured (MANAGER_OS_PROJECT_INDEX_LOCAL_CSV).[/red]")
         raise typer.Exit(1)
+
+    if not skip_fetch:
+        console.print("[bold]Step 1: Fetching project sheet...[/bold]")
+        # Call project-index-fetch logic inline
+        # For now, we'll just check if the file exists and is fresh
+        meta_path = f"{local_csv}.meta.json"
+        if not Path(meta_path).exists():
+            console.print("[red]Project index metadata not found. Run 'manager-os project-index-fetch' first.[/red]")
+            raise typer.Exit(1)
+        
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        
+        # Verify freshness
+        stale_hours = getattr(settings, "project_index_stale_after_hours", 24)
+        retrieved_at_str = meta.get("retrieved_at", "")
+        if retrieved_at_str:
+            retrieved_at_str = retrieved_at_str.replace("Z", "+00:00")
+            try:
+                retrieved_at = datetime.fromisoformat(retrieved_at_str)
+                if retrieved_at.tzinfo is None:
+                    retrieved_at = retrieved_at.replace(tzinfo=datetime.now().astimezone().tzinfo)
+                
+                now = datetime.now(retrieved_at.tzinfo)
+                if (now - retrieved_at) > timedelta(hours=stale_hours):
+                    console.print(f"[red]Project index is stale (retrieved {retrieved_at.isoformat()}, stale after {stale_hours}h).[/red]")
+                    console.print("[red]Run 'manager-os project-index-fetch --force' to refresh.[/red]")
+                    raise typer.Exit(1)
+            except ValueError:
+                console.print(f"[red]Invalid retrieved_at format in metadata: {retrieved_at_str}[/red]")
+                raise typer.Exit(1)
+    else:
+        console.print("[bold]Step 1: Skipping fetch (--skip-fetch)[/bold]")
+
+    # Step 2: Parse and upsert projects
+    console.print("[bold]Step 2: Parsing project sheet...[/bold]")
+    parse_result = parse_project_sheet(local_csv)
+    
+    if parse_result.errors:
+        for error in parse_result.errors:
+            console.print(f"[red]✗ {error}[/red]")
+        raise typer.Exit(1)
+    
+    if parse_result.warnings and verbose:
+        for warning in parse_result.warnings:
+            console.print(f"[yellow]⚠ {warning}[/yellow]")
+    
+    console.print(f"  Parsed {len(parse_result.projects)} projects")
+    console.print(f"  Skipped {parse_result.skipped_rows} rows")
+    
+    if limit:
+        parse_result.projects = parse_result.projects[:limit]
+    
+    inserted, updated = upsert_projects(conn, parse_result.projects, force=force)
+    console.print(f"[green]✓ Inserted {inserted} projects, updated {updated} projects[/green]")
+
+    # Step 3: Drive enrichment (if enabled)
+    if not skip_drive_enrichment and getattr(settings, "project_doc_search_enabled", True):
+        console.print("[bold]Step 3: Enriching with Google Drive documents...[/bold]")
+        from manager_os.ingest.project_drive_docs import search_drive_for_project_docs, upsert_project_documents
+        
+        doc_limit = getattr(settings, "project_doc_search_limit_per_project", 10)
+        total_docs = 0
+        
+        for project in parse_result.projects:
+            if not project.opportunity_number:
+                continue
+            
+            project_id = f"project::{project.opportunity_number}"
+            console.print(f"  Searching Drive for {project.opportunity_number}...")
+            
+            drive_result = search_drive_for_project_docs(
+                opportunity_number=project.opportunity_number,
+                client=project.client,
+                project_name=project.project_name,
+                timeout=120,
+            )
+            
+            if drive_result.errors and verbose:
+                for error in drive_result.errors:
+                    console.print(f"    [red]✗ {error}[/red]")
+            
+            # Set project_id on documents
+            for doc in drive_result.documents:
+                doc.project_id = project_id
+            
+            if drive_result.documents:
+                inserted_docs, updated_docs = upsert_project_documents(conn, drive_result.documents, force=force)
+                total_docs += len(drive_result.documents)
+                if verbose:
+                    console.print(f"    Found {len(drive_result.documents)} documents")
+        
+        console.print(f"[green]✓ Enriched with {total_docs} documents[/green]")
+    else:
+        console.print("[bold]Step 3: Skipping Drive enrichment[/bold]")
+
+    # Step 4: Notes enrichment (if enabled)
+    if notes_enrichment:
+        console.print("[bold]Step 4: Enriching with notes...[/bold]")
+        from manager_os.build.project_index import extract_projects_from_notes
+        notes_count = extract_projects_from_notes(conn, force=force, limit=limit)
+        console.print(f"[green]✓ Enriched with {notes_count} notes[/green]")
+    else:
+        console.print("[bold]Step 4: Skipping notes enrichment[/bold]")
+
+    console.print("[green]✓ Project indexing complete[/green]")
 
 
 # ---------------------------------------------------------------------------
@@ -2317,13 +2631,21 @@ def index_projects(
 def search_projects(
     query: str = typer.Argument("", help="Search query."),
     client: str = typer.Option("", "--client", help="Filter by client."),
-    person: str = typer.Option("", "--person", help="Filter by person."),
+    person: str = typer.Option("", "--person", help="Filter by person (team member)."),
     technology: str = typer.Option("", "--technology", help="Filter by technology."),
+    project_type: str = typer.Option("", "--type", help="Filter by project type (ADK, GenAI, CES, etc.)."),
+    industry: str = typer.Option("", "--industry", help="Filter by industry."),
+    sales_rep: str = typer.Option("", "--sales-rep", help="Filter by sales rep."),
     status: str = typer.Option("", "--status", help="Filter by status."),
+    year: int = typer.Option(None, "--year", help="Filter by year."),
+    close_after: str = typer.Option("", "--close-after", help="Filter by close date (YYYY-MM-DD)."),
+    close_before: str = typer.Option("", "--close-before", help="Filter by close date (YYYY-MM-DD)."),
+    opportunity_number: str = typer.Option("", "--opportunity-number", help="Filter by exact opportunity number."),
+    document_type: str = typer.Option("", "--document-type", help="Filter by related document type."),
     limit: int = typer.Option(20, "--limit", help="Max results."),
     as_json: bool = typer.Option(False, "--json", help="Output as JSON."),
 ) -> None:
-    """Search the project knowledge index."""
+    """Search the project knowledge index (NetSuite Closed-Won Opportunities)."""
     from manager_os.config import get_settings
     from manager_os.db import get_connection
     from manager_os.build.project_index import search_projects
@@ -2337,7 +2659,15 @@ def search_projects(
         client=client,
         person=person,
         technology=technology,
+        project_type=project_type,
+        industry=industry,
+        sales_rep=sales_rep,
         status=status,
+        year=year,
+        close_after=close_after,
+        close_before=close_before,
+        opportunity_number=opportunity_number,
+        document_type=document_type,
         limit=limit,
     )
 
@@ -2350,11 +2680,27 @@ def search_projects(
         else:
             for r in results:
                 console.print(f"\n[bold]{r['project_name']}[/bold] ({r['client']})")
-                console.print(f"  Status: {r['status']} | Opp: {r['opportunity_number']}")
-                if r['technologies']:
-                    console.print(f"  Tech: {', '.join(r['technologies'])}")
-                if r['summary']:
-                    console.print(f"  Summary: {r['summary'][:100]}...")
+                console.print(f"  OppID: {r['opportunity_number']} | Status: {r['status']}")
+                if r.get('close_date'):
+                    console.print(f"  Close Date: {r['close_date']}")
+                if r.get('services_amount'):
+                    console.print(f"  Services Amount: ${r['services_amount']:,.2f}")
+                if r.get('project_type'):
+                    console.print(f"  Type: {r['project_type']}")
+                if r.get('industry'):
+                    console.print(f"  Industry: {r['industry']}")
+                if r.get('sales_rep'):
+                    console.print(f"  Sales Rep: {r['sales_rep']}")
+                if r.get('technologies'):
+                    console.print(f"  Technologies: {', '.join(r['technologies'])}")
+                if r.get('short_description'):
+                    console.print(f"  Short: {r['short_description']}")
+                if r.get('summary'):
+                    console.print(f"  Summary: {r['summary'][:150]}...")
+                if r.get('related_documents'):
+                    console.print(f"  Documents: {len(r['related_documents'])} found")
+                    for doc in r['related_documents'][:3]:
+                        console.print(f"    - {doc['document_type']}: {doc['title']}")
 
 
 # ---------------------------------------------------------------------------

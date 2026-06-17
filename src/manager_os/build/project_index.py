@@ -88,42 +88,151 @@ def search_projects(
     client: str = "",
     person: str = "",
     technology: str = "",
+    project_type: str = "",
+    industry: str = "",
+    sales_rep: str = "",
     status: str = "",
+    year: int | None = None,
+    close_after: str = "",
+    close_before: str = "",
+    opportunity_number: str = "",
+    document_type: str = "",
     limit: int = 20
 ) -> list[dict[str, Any]]:
-    """Search the project index."""
+    """Search the project index with comprehensive filters.
+    
+    Args:
+        conn: DuckDB connection
+        query: Free text search across multiple fields
+        client: Filter by client name
+        person: Filter by team member (in team_members_json)
+        technology: Filter by technology
+        project_type: Filter by project type (ADK, GenAI, CES, etc.)
+        industry: Filter by industry
+        sales_rep: Filter by sales rep
+        status: Filter by status
+        year: Filter by year
+        close_after: Filter by close date (YYYY-MM-DD)
+        close_before: Filter by close date (YYYY-MM-DD)
+        opportunity_number: Filter by exact opportunity number
+        document_type: Filter by related document type
+        limit: Maximum results to return
+        
+    Returns:
+        List of project dictionaries
+    """
     conditions = []
     params = []
     
+    # Free text search across multiple fields
     if query:
-        conditions.append("(project_name LIKE ? OR summary LIKE ? OR lessons_learned LIKE ?)")
-        params.extend([f"%{query}%", f"%{query}%", f"%{query}%"])
+        conditions.append("""(
+            project_name LIKE ? OR 
+            summary LIKE ? OR 
+            short_description LIKE ? OR
+            lessons_learned LIKE ? OR
+            client LIKE ? OR
+            opportunity_number LIKE ?
+        )""")
+        params.extend([f"%{query}%"] * 6)
+    
     if client:
         conditions.append("client LIKE ?")
         params.append(f"%{client}%")
+    
+    if person:
+        conditions.append("team_members_json LIKE ?")
+        params.append(f"%{person}%")
+    
     if technology:
         conditions.append("technologies_json LIKE ?")
         params.append(f"%{technology}%")
+    
+    if project_type:
+        conditions.append("project_type = ?")
+        params.append(project_type)
+    
+    if industry:
+        conditions.append("industry LIKE ?")
+        params.append(f"%{industry}%")
+    
+    if sales_rep:
+        conditions.append("sales_rep LIKE ?")
+        params.append(f"%{sales_rep}%")
+    
     if status:
         conditions.append("status = ?")
         params.append(status)
-        
+    
+    if year is not None:
+        conditions.append("year = ?")
+        params.append(year)
+    
+    if close_after:
+        conditions.append("close_date >= ?")
+        params.append(close_after)
+    
+    if close_before:
+        conditions.append("close_date <= ?")
+        params.append(close_before)
+    
+    if opportunity_number:
+        conditions.append("opportunity_number = ?")
+        params.append(opportunity_number)
+    
+    # Document type filter requires join with project_documents
+    needs_doc_join = bool(document_type)
+    
     where_clause = " AND ".join(conditions) if conditions else "1=1"
     
-    rows = conn.execute(
-        f"""
-        SELECT id, project_name, client, opportunity_number, status,
-               technologies_json, team_members_json, summary, lessons_learned, source_urls_json
-        FROM projects
-        WHERE {where_clause}
-        ORDER BY updated_at DESC
-        LIMIT ?
-        """,
-        params + [limit]
-    ).fetchall()
+    if needs_doc_join:
+        # Join with project_documents to filter by document type
+        query_sql = f"""
+            SELECT DISTINCT p.id, p.project_name, p.client, p.opportunity_number, p.status,
+                   p.technologies_json, p.team_members_json, p.summary, p.lessons_learned, 
+                   p.source_urls_json, p.year, p.month, p.services_amount, p.close_date,
+                   p.sales_rep, p.services_delivery_team, p.solution_pillar, p.project_type,
+                   p.industry, p.short_description, p.source_row, p.summary_is_generated
+            FROM projects p
+            LEFT JOIN project_documents pd ON p.id = pd.project_id
+            WHERE {where_clause}
+            {"AND pd.document_type = ?" if document_type else ""}
+            ORDER BY p.close_date DESC
+            LIMIT ?
+        """
+        if document_type:
+            params.append(document_type)
+        params.append(limit)
+    else:
+        query_sql = f"""
+            SELECT id, project_name, client, opportunity_number, status,
+                   technologies_json, team_members_json, summary, lessons_learned, 
+                   source_urls_json, year, month, services_amount, close_date,
+                   sales_rep, services_delivery_team, solution_pillar, project_type,
+                   industry, short_description, source_row, summary_is_generated
+            FROM projects
+            WHERE {where_clause}
+            ORDER BY close_date DESC
+            LIMIT ?
+        """
+        params.append(limit)
+    
+    rows = conn.execute(query_sql, params).fetchall()
     
     results = []
     for row in rows:
+        # Get related documents for this project
+        project_id = row[0]
+        docs = conn.execute(
+            """
+            SELECT document_type, title, url, confidence, why_matched
+            FROM project_documents
+            WHERE project_id = ?
+            ORDER BY confidence DESC
+            """,
+            [project_id]
+        ).fetchall()
+        
         results.append({
             "id": row[0],
             "project_name": row[1],
@@ -135,6 +244,28 @@ def search_projects(
             "summary": row[7],
             "lessons_learned": row[8],
             "source_urls": json.loads(row[9]) if row[9] else [],
+            "year": row[10],
+            "month": row[11],
+            "services_amount": row[12],
+            "close_date": row[13],
+            "sales_rep": row[14],
+            "services_delivery_team": row[15],
+            "solution_pillar": row[16],
+            "project_type": row[17],
+            "industry": row[18],
+            "short_description": row[19],
+            "source_row": row[20],
+            "summary_is_generated": row[21],
+            "related_documents": [
+                {
+                    "document_type": doc[0],
+                    "title": doc[1],
+                    "url": doc[2],
+                    "confidence": doc[3],
+                    "why_matched": doc[4],
+                }
+                for doc in docs
+            ],
         })
         
     return results
