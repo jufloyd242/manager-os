@@ -3793,6 +3793,23 @@ def workspace_doctor_cmd() -> None:
 
 
 # ---------------------------------------------------------------------------
+# env-audit
+# ---------------------------------------------------------------------------
+
+@app.command("env-audit")
+def env_audit_cmd(
+    fix_local: bool = typer.Option(False, "--fix-local", help="Add missing vars to local .env without overwriting."),
+    example_only: bool = typer.Option(False, "--example-only", help="Only check .env.example, ignore local .env."),
+    as_json: bool = typer.Option(False, "--json", help="Output results as JSON."),
+) -> None:
+    """Audit environment variables against code and .env.example."""
+    from manager_os.env_audit import run_audit
+    
+    result, exit_code = run_audit(fix_local=fix_local, example_only=example_only, as_json=as_json)
+    raise typer.Exit(code=exit_code)
+
+
+# ---------------------------------------------------------------------------
 # workspace-fetch commands
 # ---------------------------------------------------------------------------
 
