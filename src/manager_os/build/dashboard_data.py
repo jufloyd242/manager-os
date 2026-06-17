@@ -969,3 +969,83 @@ def get_signal_counts(conn, statuses: list[str] | None = None) -> dict[str, int]
     for row in rows:
         counts[row[0]] = row[1]
     return counts
+
+
+def get_deals_list(conn) -> list[DashboardDealRow]:
+    """Return a list of deals for the dashboard."""
+    rows = conn.execute(
+        """
+        SELECT id, account, deal_name, stage, close_date, technical_owner,
+               ae_name, requested_roles, loe_status, sow_status,
+               staffing_feasibility, blockers, next_action, updated_at,
+               deal_id, next_steps, delivery_comment, forecast_category,
+               probability, services_amount, last_status_changed_date, source_format
+        FROM deals
+        ORDER BY close_date DESC
+        """
+    ).fetchall()
+    
+    deals = []
+    for row in rows:
+        try:
+            deal = DashboardDealRow(
+                id=row[0] or "",
+                account=row[1] or "",
+                deal_name=row[2] or "",
+                stage=row[3] or "",
+                close_date=row[4],
+                technical_owner=row[5] or "",
+                ae_name=row[6] or "",
+                requested_roles=json.loads(row[7]) if row[7] else [],
+                loe_status=row[8] or "",
+                sow_status=row[9] or "",
+                staffing_feasibility=row[10] or "feasible",
+                blockers=row[11] or "",
+                next_action=row[12] or "",
+                updated_at=row[13],
+                deal_id=row[14] or "",
+                next_steps=row[15] or "",
+                delivery_comment=row[16] or "",
+                forecast_category=row[17] or "",
+                probability=float(row[18]) if row[18] else 0.0,
+                services_amount=float(row[19]) if row[19] else 0.0,
+                last_status_changed_date=row[20],
+                source_format=row[21] or "Deals CSV",
+            )
+            deals.append(deal)
+        except Exception as exc:
+            logger.warning("Skipping malformed deal: %s", exc)
+    return deals
+
+
+def get_clients_list(conn) -> list:
+    """Return a list of clients for the dashboard."""
+    rows = conn.execute(
+        """
+        SELECT id, name, aliases, health, current_team, last_update_date,
+               open_risks, client_sentiment, next_milestone, unresolved_decisions, updated_at
+        FROM clients
+        ORDER BY name
+        """
+    ).fetchall()
+    
+    clients = []
+    for row in rows:
+        try:
+            client = {
+                "id": row[0],
+                "name": row[1],
+                "aliases": json.loads(row[2]) if row[2] else [],
+                "health": row[3],
+                "current_team": json.loads(row[4]) if row[4] else [],
+                "last_update_date": row[5],
+                "open_risks": json.loads(row[6]) if row[6] else [],
+                "client_sentiment": row[7],
+                "next_milestone": row[8],
+                "unresolved_decisions": json.loads(row[9]) if row[9] else [],
+                "updated_at": row[10],
+            }
+            clients.append(client)
+        except Exception as exc:
+            logger.warning("Skipping malformed client: %s", exc)
+    return clients

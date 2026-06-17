@@ -339,9 +339,11 @@ class DashboardClientRow(BaseModel):
 class DashboardDealRow(BaseModel):
     model_config = ConfigDict(strict=False)
 
-    account: str
-    deal_name: str
+    id: str = ""
+    account: str = ""
+    deal_name: str = ""
     deal_id: str = ""
+    opportunity_number: str = ""
     stage: str = ""
     close_date: date | None = None
     days_to_close: int | None = None
@@ -355,6 +357,9 @@ class DashboardDealRow(BaseModel):
     next_action: str = ""
     open_signal_count: int = 0
     highest_severity: SeverityType | None = None
+    forecast_category: str = ""
+    probability: float = 0.0
+    source_format: str = "Deals CSV"
     # Document links (from deal_documents table / Google Drive)
     sow_title: str = ""
     sow_url: str = ""
