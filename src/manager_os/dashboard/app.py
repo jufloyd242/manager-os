@@ -524,8 +524,11 @@ with tabs[4]:
     with col4:
         sales_rep_filter = st.text_input("Filter by sales rep", placeholder="e.g., Charlie Lisk")
     with col5:
-        year_filter = st.number_input("Filter by year", min_value=2020, max_value=2030, value=0, step=1)
-        year_filter = year_filter if year_filter > 0 else None
+        enable_year_filter = st.checkbox("Filter by year")
+        if enable_year_filter:
+            year_filter = st.number_input("Year", min_value=2020, max_value=2030, value=2020, step=1)
+        else:
+            year_filter = None
     with col6:
         opp_number_filter = st.text_input("Filter by OppID", placeholder="e.g., OPP032106")
     
