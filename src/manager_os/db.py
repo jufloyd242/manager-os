@@ -219,7 +219,15 @@ CREATE TABLE IF NOT EXISTS forecast_pipeline_demand (
     forecast_type VARCHAR,
     source_row INTEGER,
     notes VARCHAR,
-    ingested_at TIMESTAMP NOT NULL
+    ingested_at TIMESTAMP NOT NULL,
+    duration_weeks INTEGER,
+    expected_start_week DATE,
+    expected_end_week DATE,
+    probability_pct FLOAT,
+    requested_allocation_pct FLOAT,
+    estimated_unweighted_weekly_hours FLOAT,
+    estimated_weighted_weekly_hours FLOAT,
+    demand_hours_is_probability_weighted BOOLEAN
 );
 CREATE TABLE IF NOT EXISTS forecast_summary_metric (
     id VARCHAR PRIMARY KEY,

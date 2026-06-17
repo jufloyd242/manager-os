@@ -66,6 +66,16 @@ class Settings(BaseSettings):
     workspace_activity_source: str = "google_chat_space"
     workspace_activity_chat_url: str = "https://chat.google.com/u/0/app/chat/AAQA61WgdSs"
 
+    # Forecast source configuration
+    forecast_source: str = "google_sheet_gemini"
+    forecast_sheet_url: str = ""
+    forecast_sheet_id: str = ""
+    forecast_sheet_gid: str = ""
+    forecast_export_url: str = ""
+    forecast_local_csv: str = ""
+    forecast_download_timeout_seconds: int = 120
+    forecast_stale_after_hours: int = 24
+
 
 def get_settings() -> Settings:
     return Settings()

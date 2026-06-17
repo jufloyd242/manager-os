@@ -71,6 +71,14 @@ class PipelineDemandRecord:
     candidate_people: list = field(default_factory=list)
     staffing_status: str = "unassigned"
     source_row: int = 0
+    duration_weeks: Optional[int] = None
+    expected_start_week: Optional[date] = None
+    expected_end_week: Optional[date] = None
+    probability_pct: Optional[float] = None
+    requested_allocation_pct: Optional[float] = None
+    estimated_unweighted_weekly_hours: Optional[float] = None
+    estimated_weighted_weekly_hours: Optional[float] = None
+    demand_hours_is_probability_weighted: bool = True
 
 
 @dataclass
@@ -85,6 +93,11 @@ class PipelineOpportunityRecord:
     candidate_people: list = field(default_factory=list)
     status: str = "unscheduled"
     source_row: int = 0
+    duration_weeks: Optional[int] = None
+    probability_pct: Optional[float] = None
+    requested_allocation_pct: Optional[float] = None
+    estimated_unweighted_weekly_hours: Optional[float] = None
+    estimated_weighted_weekly_hours: Optional[float] = None
 
 
 @dataclass
@@ -431,6 +444,14 @@ def parse_wide_forecast(csv_path: str) -> WideParseResult:
                 c = row.iloc[col]
                 return str(c).strip() if pd.notna(c) else ""
 
+            # Parse duration (e.g., "8w", "12w")
+            duration_str = _cell_str(1)  # Column B is usually duration in pipeline rows
+            duration_weeks = None
+            if duration_str:
+                m = re.match(r"^(\d+)\s*w$", duration_str.lower())
+                if m:
+                    duration_weeks = int(m.group(1))
+
             prob = _parse_float(_cell_str(pipeline_prob_col))
             req_alloc = _parse_float(_cell_str(pipeline_alloc_col))
             skillset = _cell_str(pipeline_skillset_col)
@@ -449,6 +470,13 @@ def parse_wide_forecast(csv_path: str) -> WideParseResult:
                 result.infos.append(
                     f"Row {int_idx}: Pipeline '{first_cell}' has no Candidate Engineer(s)"
                 )
+
+            # Compute estimated hours
+            prob_frac = (prob / 100.0) if prob is not None else 0.0
+            alloc_frac = (req_alloc / 100.0) if req_alloc is not None else 0.0
+            est_unweighted = alloc_frac * 40.0 if req_alloc is not None else None
+            est_weighted = prob_frac * alloc_frac * 40.0 if (prob is not None and req_alloc is not None) else None
+
             has_demand = any(
                 _parse_float(str(row.iloc[ci]).strip() if pd.notna(row.iloc[ci]) else "") is not None
                 for ci in date_cols
@@ -464,12 +492,30 @@ def parse_wide_forecast(csv_path: str) -> WideParseResult:
                     candidate_people=candidates,
                     status="unscheduled",
                     source_row=int_idx,
+                    duration_weeks=duration_weeks,
+                    probability_pct=prob,
+                    requested_allocation_pct=req_alloc,
+                    estimated_unweighted_weekly_hours=est_unweighted,
+                    estimated_weighted_weekly_hours=est_weighted,
                 ))
                 result.infos.append(
                     f"Row {int_idx}: Pipeline '{first_cell}' has no weekly demand; "
                     "stored as pipeline_opportunity"
                 )
             else:
+                # Find first and last week with demand
+                first_week = None
+                last_week = None
+                for col_idx, week_date in date_cols.items():
+                    if col_idx >= len(row):
+                        continue
+                    cell = row.iloc[col_idx]
+                    demand = _parse_float(str(cell).strip() if pd.notna(cell) else "")
+                    if demand is not None:
+                        if first_week is None:
+                            first_week = week_date
+                        last_week = week_date
+
                 for col_idx, week_date in date_cols.items():
                     if col_idx >= len(row):
                         continue
@@ -477,6 +523,14 @@ def parse_wide_forecast(csv_path: str) -> WideParseResult:
                     demand = _parse_float(str(cell).strip() if pd.notna(cell) else "")
                     if demand is None:
                         continue
+                    
+                    # Validate formula: expected_weighted_demand_hours = probability_fraction * requested_allocation_fraction * 40
+                    if est_weighted is not None and abs(demand - est_weighted) > 0.5:
+                        result.warnings.append(
+                            f"Row {int_idx}: Pipeline '{first_cell}' week {week_date} demand {demand} "
+                            f"differs from expected {est_weighted:.1f} (prob={prob}%, alloc={req_alloc}%)"
+                        )
+
                     staffing_status = "candidate" if candidates else "unassigned"
                     result.pipeline_demand.append(PipelineDemandRecord(
                         source_section=current_section,
@@ -489,6 +543,14 @@ def parse_wide_forecast(csv_path: str) -> WideParseResult:
                         candidate_people=candidates,
                         staffing_status=staffing_status,
                         source_row=int_idx,
+                        duration_weeks=duration_weeks,
+                        expected_start_week=first_week,
+                        expected_end_week=last_week,
+                        probability_pct=prob,
+                        requested_allocation_pct=req_alloc,
+                        estimated_unweighted_weekly_hours=est_unweighted,
+                        estimated_weighted_weekly_hours=est_weighted,
+                        demand_hours_is_probability_weighted=True,
                     ))
                     acc = _get_acc(current_section, week_date)
                     acc["pip_demand"] += demand

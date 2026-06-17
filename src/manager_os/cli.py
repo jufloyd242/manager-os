@@ -700,7 +700,7 @@ def ingest(
 
     if run_forecast:
         try:
-            r = ingest_forecast(settings.forecast_csv, conn, source_priority=sp, force=force)
+            r = ingest_forecast(settings.forecast_csv, conn, source_priority=sp, force=force, settings=settings)
             table.add_row("forecast", str(r.ingested), "0", str(r.skipped), str(r.failed))
             _source_results.append(("forecast", r))
             if r.failed:
@@ -1019,6 +1019,8 @@ def daily(
     skip_extract: bool = typer.Option(False, "--skip-extract", help="Skip signal extraction."),
     skip_ingest: bool = typer.Option(False, "--skip-ingest", help="Skip all ingest steps."),
     force_ingest: bool = typer.Option(False, "--force-ingest", help="Re-ingest files even if content hash unchanged."),
+    skip_forecast_fetch: bool = typer.Option(False, "--skip-forecast-fetch", help="Skip fetching forecast from Google Sheet."),
+    forecast_force: bool = typer.Option(False, "--forecast-force", help="Force overwrite local forecast CSV during fetch."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed skip/warning information."),
 ) -> None:
     """Run the complete morning Manager OS workflow.
@@ -1141,6 +1143,142 @@ def daily(
     else:
         console.print("[dim]Phase 1: Workspace fetch — Skipped (--no-workspace)[/dim]")
         console.print()
+
+    # ------------------------------------------------------------------
+    # Phase 1.5: Forecast Fetch (if configured)
+    # ------------------------------------------------------------------
+    if not skip_ingest and not skip_forecast_fetch and not dry_run:
+        src = getattr(settings, "forecast_source", "google_sheet_gemini")
+        if src == "google_sheet_gemini":
+            console.print("[bold]Phase 1.5: Forecast Fetch[/bold]")
+            try:
+                import subprocess
+                import json
+                import csv
+                import hashlib
+                from datetime import datetime
+                from manager_os.llm.gemini_cli import GEMINI_CLI_BIN, GEMINI_CLI_MODEL, GEMINI_CLI_ARGS, GEMINI_CLI_TIMEOUT
+                
+                s_id = getattr(settings, "forecast_sheet_id", "")
+                s_gid = getattr(settings, "forecast_sheet_gid", "")
+                s_url = getattr(settings, "forecast_sheet_url", "")
+                local_csv = getattr(settings, "forecast_local_csv", "") or getattr(settings, "forecast_csv", "")
+                timeout = getattr(settings, "forecast_download_timeout_seconds", 120)
+
+                if not s_id or not s_gid or not s_url or not local_csv:
+                    raise RuntimeError("Missing required forecast sheet configuration for fetch.")
+
+                console.print(f"[dim]  → Retrieving forecast via Gemini CLI for Sheet ID: {s_id}, GID: {s_gid}[/dim]")
+                prompt = f"""You are operating in read-only mode.
+Do not create, edit, delete, send, move, or modify anything.
+
+Open this exact Google Sheet:
+{s_url}
+
+Read only the tab with gid:
+{s_gid}
+
+Return the raw tabular data from that tab only.
+
+Do not summarize.
+Do not infer.
+Do not search Drive.
+Do not choose a different spreadsheet.
+Do not transform business semantics.
+Do not omit blank cells.
+
+Return strict JSON only with:
+{{
+  "ok": true,
+  "source": "google_sheet_forecast",
+  "source_url": "{s_url}",
+  "sheet_id": "{s_id}",
+  "gid": "{s_gid}",
+  "retrieved_at": "...",
+  "rows": [
+    ["cell A1", "cell B1", "..."],
+    ["cell A2", "cell B2", "..."]
+  ]
+}}
+
+If you cannot access the sheet, return:
+{{
+  "ok": false,
+  "source": "google_sheet_forecast",
+  "sheet_id": "{s_id}",
+  "gid": "{s_gid}",
+  "error": "..."
+}}"""
+                
+                cmd = [GEMINI_CLI_BIN]
+                if GEMINI_CLI_MODEL:
+                    cmd.extend(["--model", GEMINI_CLI_MODEL])
+                if GEMINI_CLI_ARGS:
+                    cmd.extend(GEMINI_CLI_ARGS.split())
+                cmd.append("-y")
+                
+                effective_timeout = timeout if timeout else GEMINI_CLI_TIMEOUT
+                proc = subprocess.run(
+                    cmd + ["--prompt", prompt],
+                    capture_output=True,
+                    text=True,
+                    timeout=effective_timeout,
+                )
+                
+                if proc.returncode != 0:
+                    raise RuntimeError(f"Gemini CLI failed: {proc.stderr}")
+                    
+                output_text = proc.stdout.strip()
+                if output_text.startswith("```json"):
+                    output_text = output_text[7:]
+                if output_text.endswith("```"):
+                    output_text = output_text[:-3]
+                    
+                result_data = json.loads(output_text)
+                
+                if not result_data.get("ok"):
+                    raise RuntimeError(f"Gemini CLI reported failure: {result_data.get('error', 'Unknown error')}")
+                    
+                rows = result_data.get("rows", [])
+                if not rows:
+                    raise RuntimeError("Gemini CLI returned no rows.")
+                    
+                Path(local_csv).parent.mkdir(parents=True, exist_ok=True)
+                csv_content = ""
+                with open(local_csv, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerows(rows)
+                    f.seek(0)
+                    csv_content = f.read()
+                    
+                content_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
+                retrieved_at = result_data.get("retrieved_at", datetime.utcnow().isoformat())
+                
+                meta_path = f"{local_csv}.meta.json"
+                metadata = {
+                    "source": "google_sheet_gemini",
+                    "sheet_url": s_url,
+                    "sheet_id": s_id,
+                    "gid": s_gid,
+                    "retrieved_at": retrieved_at,
+                    "local_csv_path": local_csv,
+                    "row_count": len(rows),
+                    "content_hash": content_hash
+                }
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(metadata, f, indent=2)
+                    
+                console.print(f"[green]  ✓ Forecast retrieved and saved to {local_csv}[/green]")
+
+            except subprocess.TimeoutExpired:
+                console.print(f"[red]  ✗ Forecast fetch timed out after {timeout} seconds.[/red]")
+                console.print("[red]  ✗ Failing daily run because exact source is mandatory.[/red]")
+                raise typer.Exit(1)
+            except Exception as e:
+                console.print(f"[red]  ✗ Forecast fetch failed: {e}[/red]")
+                console.print("[red]  ✗ Failing daily run because exact source is mandatory.[/red]")
+                raise typer.Exit(1)
+            console.print()
 
     # ------------------------------------------------------------------
     # Phase 2: Ingest
@@ -1566,6 +1704,200 @@ def closeout(
 
 
 # ---------------------------------------------------------------------------
+# manager-os forecast-fetch
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="forecast-fetch")
+def forecast_fetch(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print resolved config without downloading."),
+    force: bool = typer.Option(False, "--force", help="Overwrite the local forecast CSV."),
+    print_url: bool = typer.Option(False, "--print-url", help="Print the deterministic CSV export URL and exit."),
+    print_prompt: bool = typer.Option(False, "--print-prompt", help="Print the Gemini CLI prompt and exit."),
+    output: Optional[str] = typer.Option(None, "--output", help="Override the local CSV output path."),
+    sheet_url: Optional[str] = typer.Option(None, "--sheet-url", help="Override the Google Sheet URL."),
+    sheet_id: Optional[str] = typer.Option(None, "--sheet-id", help="Override the Google Sheet ID."),
+    gid: Optional[str] = typer.Option(None, "--gid", help="Override the Google Sheet GID."),
+    timeout: int = typer.Option(120, "--timeout", help="Download timeout in seconds."),
+) -> None:
+    """Fetch the forecast CSV from the configured Google Sheet via Gemini CLI.
+
+    Uses deterministic retrieval. No fallbacks allowed.
+    """
+    import subprocess
+    import json
+    import csv
+    import hashlib
+    from datetime import datetime
+    from manager_os.config import get_settings
+
+    settings = get_settings()
+
+    # Resolve config
+    src = getattr(settings, "forecast_source", "google_sheet_gemini")
+    s_id = sheet_id or getattr(settings, "forecast_sheet_id", "")
+    s_gid = gid or getattr(settings, "forecast_sheet_gid", "")
+    s_url = sheet_url or getattr(settings, "forecast_sheet_url", "")
+    local_csv = output or getattr(settings, "forecast_local_csv", "") or getattr(settings, "forecast_csv", "")
+
+    if print_url:
+        export_url = getattr(settings, "forecast_export_url", "")
+        if not export_url and s_id and s_gid:
+            export_url = f"https://docs.google.com/spreadsheets/d/{s_id}/export?format=csv&gid={s_gid}"
+        console.print(f"[bold]Export URL:[/bold] {export_url}")
+        raise typer.Exit(0)
+
+    if dry_run:
+        console.print("[bold]Forecast Fetch — Dry Run[/bold]")
+        console.print(f"  Source:       {src}")
+        console.print(f"  Sheet ID:     {s_id}")
+        console.print(f"  GID:          {s_gid}")
+        console.print(f"  Sheet URL:    {s_url}")
+        console.print(f"  Output Path:  {local_csv}")
+        raise typer.Exit(0)
+
+    if src != "google_sheet_gemini":
+        console.print(f"[red]MANAGER_OS_FORECAST_SOURCE must be 'google_sheet_gemini'. Got '{src}'.[/red]")
+        raise typer.Exit(1)
+
+    if not s_id or not s_gid or not s_url:
+        console.print("[red]Missing Sheet ID, GID, or URL. Check MANAGER_OS_FORECAST_SHEET_ID, GID, and URL.[/red]")
+        raise typer.Exit(1)
+
+    if not local_csv:
+        console.print("[red]No local CSV path configured (MANAGER_OS_FORECAST_LOCAL_CSV).[/red]")
+        raise typer.Exit(1)
+
+    prompt = f"""You are operating in read-only mode.
+Do not create, edit, delete, send, move, or modify anything.
+
+Open this exact Google Sheet:
+{s_url}
+
+Read only the tab with gid:
+{s_gid}
+
+Return the raw tabular data from that tab only.
+
+Do not summarize.
+Do not infer.
+Do not search Drive.
+Do not choose a different spreadsheet.
+Do not transform business semantics.
+Do not omit blank cells.
+
+Return strict JSON only with:
+{{
+  "ok": true,
+  "source": "google_sheet_forecast",
+  "source_url": "{s_url}",
+  "sheet_id": "{s_id}",
+  "gid": "{s_gid}",
+  "retrieved_at": "...",
+  "rows": [
+    ["cell A1", "cell B1", "..."],
+    ["cell A2", "cell B2", "..."]
+  ]
+}}
+
+If you cannot access the sheet, return:
+{{
+  "ok": false,
+  "source": "google_sheet_forecast",
+  "sheet_id": "{s_id}",
+  "gid": "{s_gid}",
+  "error": "..."
+}}"""
+
+    if print_prompt:
+        console.print("[bold]Gemini CLI Prompt:[/bold]")
+        console.print(prompt)
+        raise typer.Exit(0)
+
+    console.print(f"[dim]Retrieving forecast via Gemini CLI for Sheet ID: {s_id}, GID: {s_gid}[/dim]")
+    console.print(f"[dim]Saving to:[/dim] {local_csv}")
+
+    try:
+        from manager_os.llm.gemini_cli import GEMINI_CLI_BIN, GEMINI_CLI_MODEL, GEMINI_CLI_ARGS, GEMINI_CLI_TIMEOUT
+        
+        cmd = [GEMINI_CLI_BIN]
+        if GEMINI_CLI_MODEL:
+            cmd.extend(["--model", GEMINI_CLI_MODEL])
+        if GEMINI_CLI_ARGS:
+            cmd.extend(GEMINI_CLI_ARGS.split())
+        cmd.append("-y")
+        
+        effective_timeout = timeout if timeout else GEMINI_CLI_TIMEOUT
+        
+        proc = subprocess.run(
+            cmd + ["--prompt", prompt],
+            capture_output=True,
+            text=True,
+            timeout=effective_timeout,
+        )
+        
+        if proc.returncode != 0:
+            raise RuntimeError(f"Gemini CLI failed: {proc.stderr}")
+            
+        output_text = proc.stdout.strip()
+        if output_text.startswith("```json"):
+            output_text = output_text[7:]
+        if output_text.endswith("```"):
+            output_text = output_text[:-3]
+            
+        result_data = json.loads(output_text)
+        
+        if not result_data.get("ok"):
+            raise RuntimeError(f"Gemini CLI reported failure: {result_data.get('error', 'Unknown error')}")
+            
+        rows = result_data.get("rows", [])
+        if not rows:
+            raise RuntimeError("Gemini CLI returned no rows.")
+            
+        # Write to CSV
+        Path(local_csv).parent.mkdir(parents=True, exist_ok=True)
+        csv_content = ""
+        with open(local_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerows(rows)
+            # Re-read to get exact content for hash
+            f.seek(0)
+            csv_content = f.read()
+            
+        content_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
+        retrieved_at = result_data.get("retrieved_at", datetime.utcnow().isoformat())
+        
+        # Write metadata
+        meta_path = f"{local_csv}.meta.json"
+        metadata = {
+            "source": "google_sheet_gemini",
+            "sheet_url": s_url,
+            "sheet_id": s_id,
+            "gid": s_gid,
+            "retrieved_at": retrieved_at,
+            "local_csv_path": local_csv,
+            "row_count": len(rows),
+            "content_hash": content_hash
+        }
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+            
+        console.print(f"[green]✓ Successfully retrieved and saved forecast to {local_csv}[/green]")
+        console.print(f"[dim]  Metadata written to: {meta_path}[/dim]")
+        
+    except subprocess.TimeoutExpired:
+        console.print(f"[red]✗ Gemini CLI timed out after {timeout} seconds.[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]✗ Retrieval failed: {e}[/red]")
+        console.print(f"  Sheet ID: {s_id}")
+        console.print(f"  GID: {s_gid}")
+        console.print(f"  Sheet URL: {s_url}")
+        console.print("[yellow]Suggestion: Verify your Google account has access to this sheet and Gemini CLI is configured correctly.[/yellow]")
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
 # manager-os demo-reset
 # ---------------------------------------------------------------------------
 
@@ -1836,6 +2168,109 @@ def demo_reset(
     if co_result.weekly_exec_content:
         weekly_path = demo_closeout_dir / f"{target_date.isoformat()}-weekly-exec.md"
         console.print(f"  Weekly:   {weekly_path}")
+
+
+# ---------------------------------------------------------------------------
+# manager-os profile-forecast
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="profile-forecast")
+def profile_forecast() -> None:
+    """Profile the forecast data and report on its structure and contents."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+
+    console.print("[bold]Forecast Profile[/bold]")
+    
+    # Source mode
+    src = getattr(settings, "forecast_source", "local_csv")
+    console.print(f"  Source mode:      {src}")
+    if src == "google_sheet_gemini":
+        console.print(f"  Sheet ID:         {getattr(settings, 'forecast_sheet_id', 'N/A')}")
+        console.print(f"  GID:              {getattr(settings, 'forecast_sheet_gid', 'N/A')}")
+    console.print(f"  Local CSV path:   {getattr(settings, 'forecast_local_csv', '') or getattr(settings, 'forecast_csv', 'N/A')}")
+
+    # Detect format
+    try:
+        from manager_os.ingest.forecast_wide import is_wide_format
+        csv_path = getattr(settings, "forecast_local_csv", "") or getattr(settings, "forecast_csv", "")
+        if csv_path and Path(csv_path).exists():
+            is_wide = is_wide_format(csv_path)
+            console.print(f"  Detected format:  {'wide sectioned forecast' if is_wide else 'normalized long format'}")
+        else:
+            console.print("  Detected format:  CSV not found at configured path")
+    except Exception as e:
+        console.print(f"  Detected format:  Error checking format: {e}")
+
+    # Query DB for stats
+    try:
+        # Sections
+        sections = conn.execute(
+            "SELECT DISTINCT source_section FROM forecast_pipeline_demand WHERE source_section IS NOT NULL"
+        ).fetchall()
+        section_list = [r[0] for r in sections if r[0]]
+        console.print(f"  Sections:         {', '.join(section_list) if section_list else 'None'}")
+
+        # Week range
+        week_range = conn.execute(
+            "SELECT MIN(week_start), MAX(week_start) FROM forecast_pipeline_demand WHERE week_start IS NOT NULL"
+        ).fetchone()
+        if week_range and week_range[0] and week_range[1]:
+            console.print(f"  Week range:       {week_range[0]} through {week_range[1]}")
+
+        # Engineer count by section
+        eng_counts = conn.execute(
+            "SELECT source_section, COUNT(DISTINCT person_name) FROM staffing_forecast "
+            "WHERE forecast_type = 'capacity' AND source_section IS NOT NULL GROUP BY source_section"
+        ).fetchall()
+        for sec, cnt in eng_counts:
+            console.print(f"  Engineers ({sec}): {cnt}")
+
+        # Pipeline scheduled demand count by section
+        sched_counts = conn.execute(
+            "SELECT source_section, COUNT(*) FROM forecast_pipeline_demand "
+            "WHERE record_type = 'pipeline_demand' AND week_start IS NOT NULL GROUP BY source_section"
+        ).fetchall()
+        for sec, cnt in sched_counts:
+            console.print(f"  Scheduled demand ({sec}): {cnt}")
+
+        # Unscheduled pipeline opportunity count by section
+        unsched_counts = conn.execute(
+            "SELECT source_section, COUNT(*) FROM forecast_pipeline_demand "
+            "WHERE record_type = 'pipeline_opportunity' GROUP BY source_section"
+        ).fetchall()
+        for sec, cnt in unsched_counts:
+            console.print(f"  Unscheduled opportunities ({sec}): {cnt}")
+
+        # Candidate engineer count
+        cand_count = conn.execute(
+            "SELECT COUNT(*) FROM forecast_pipeline_demand WHERE candidate_people IS NOT NULL AND candidate_people != '[]'"
+        ).fetchone()[0]
+        console.print(f"  Rows with candidates: {cand_count}")
+
+        # Metric mismatch count
+        mismatch_count = conn.execute(
+            "SELECT COUNT(*) FROM forecast_summary_metric WHERE metric_value IS NOT NULL"  # Simplified, real mismatch logic is in parser
+        ).fetchone()[0]
+        # Actually, let's just count warnings if we stored them, but we don't store them in DB. 
+        # We can mention that mismatches are logged during ingest.
+        console.print("  Metric mismatches:  Logged during ingest (see warnings)")
+
+        # Row counts by record type
+        row_counts = conn.execute(
+            "SELECT record_type, COUNT(*) FROM forecast_pipeline_demand GROUP BY record_type"
+        ).fetchall()
+        for rtype, cnt in row_counts:
+            console.print(f"  {rtype} rows:       {cnt}")
+
+    except Exception as e:
+        console.print(f"  [yellow]Error querying DB: {e}[/yellow]")
+
+    console.print()
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from pathlib import Path
 
 import pandas as pd
 
@@ -86,11 +87,86 @@ def _row_exists(conn, row_id: str) -> bool:
     return row is not None
 
 
+def _verify_forecast_provenance(csv_path: str, settings) -> None:
+    """Verify that the local CSV was produced by a recent, valid forecast-fetch."""
+    import hashlib
+    from datetime import datetime, timedelta
+    import json
+
+    meta_path = f"{csv_path}.meta.json"
+    if not Path(meta_path).exists():
+        raise RuntimeError(
+            f"Forecast local CSV is missing provenance metadata ({meta_path}).\n"
+            "Refusing to ingest fallback/stale forecast data.\n"
+            "Run: manager-os forecast-fetch --force"
+        )
+
+    with open(meta_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+
+    if meta.get("source") != "google_sheet_gemini":
+        raise RuntimeError(
+            f"Forecast metadata source is '{meta.get('source')}', expected 'google_sheet_gemini'.\n"
+            "Refusing to ingest fallback/stale forecast data.\n"
+            "Run: manager-os forecast-fetch --force"
+        )
+
+    expected_sheet_id = getattr(settings, "forecast_sheet_id", "")
+    expected_gid = getattr(settings, "forecast_sheet_gid", "")
+    
+    if meta.get("sheet_id") != expected_sheet_id or str(meta.get("gid")) != str(expected_gid):
+        raise RuntimeError(
+            f"Forecast metadata sheet_id/gid mismatch.\n"
+            f"Expected: {expected_sheet_id} / {expected_gid}\n"
+            f"Found: {meta.get('sheet_id')} / {meta.get('gid')}\n"
+            "Refusing to ingest fallback/stale forecast data.\n"
+            "Run: manager-os forecast-fetch --force"
+        )
+
+    # Verify content hash
+    with open(csv_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    
+    if actual_hash != meta.get("content_hash"):
+        raise RuntimeError(
+            "Forecast local CSV content hash does not match metadata.\n"
+            "The file may have been manually edited or corrupted.\n"
+            "Refusing to ingest fallback/stale forecast data.\n"
+            "Run: manager-os forecast-fetch --force"
+        )
+
+    # Verify freshness
+    stale_hours = getattr(settings, "forecast_stale_after_hours", 24)
+    retrieved_at_str = meta.get("retrieved_at", "")
+    if retrieved_at_str:
+        # Handle both 'Z' and '+00:00' or naive strings
+        retrieved_at_str = retrieved_at_str.replace("Z", "+00:00")
+        try:
+            retrieved_at = datetime.fromisoformat(retrieved_at_str)
+            if retrieved_at.tzinfo is None:
+                retrieved_at = retrieved_at.replace(tzinfo=datetime.now().astimezone().tzinfo)
+            
+            now = datetime.now(retrieved_at.tzinfo)
+            if (now - retrieved_at) > timedelta(hours=stale_hours):
+                raise RuntimeError(
+                    f"Forecast local CSV is stale (retrieved {retrieved_at.isoformat()}, stale after {stale_hours}h).\n"
+                    "Refusing to ingest fallback/stale forecast data.\n"
+                    "Run: manager-os forecast-fetch --force"
+                )
+        except ValueError:
+            raise RuntimeError(
+                f"Invalid retrieved_at format in metadata: {retrieved_at_str}\n"
+                "Run: manager-os forecast-fetch --force"
+            )
+
+
 def ingest_forecast(
     csv_path: str,
     conn,
     source_priority: SourcePriorityConfig | None = None,
     force: bool = False,
+    settings = None,
 ) -> IngestResult:
     """Ingest a staffing forecast CSV into the staffing_forecast table.
 
@@ -194,14 +270,21 @@ def _ingest_wide_forecast(
                 INSERT OR REPLACE INTO forecast_pipeline_demand
                     (id, source_section, week_start, prospect_or_deal, probability,
                      requested_allocation, skillset, demand_hours, candidate_people,
-                     staffing_status, record_type, forecast_type, source_row, notes, ingested_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     staffing_status, record_type, forecast_type, source_row, notes, ingested_at,
+                     duration_weeks, expected_start_week, expected_end_week, probability_pct,
+                     requested_allocation_pct, estimated_unweighted_weekly_hours,
+                     estimated_weighted_weekly_hours, demand_hours_is_probability_weighted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [row_id, record.source_section, record.week_start, record.prospect_or_deal,
                  record.probability, record.requested_allocation, record.skillset,
                  record.demand_hours, json.dumps(record.candidate_people),
                  record.staffing_status, record.record_type, record.forecast_type,
-                 record.source_row, None, now],
+                 record.source_row, None, now,
+                 record.duration_weeks, record.expected_start_week, record.expected_end_week,
+                 record.probability_pct, record.requested_allocation_pct,
+                 record.estimated_unweighted_weekly_hours, record.estimated_weighted_weekly_hours,
+                 record.demand_hours_is_probability_weighted],
             )
             result.ingested += 1
         except Exception as exc:
@@ -228,14 +311,20 @@ def _ingest_wide_forecast(
                 INSERT OR REPLACE INTO forecast_pipeline_demand
                     (id, source_section, week_start, prospect_or_deal, probability,
                      requested_allocation, skillset, demand_hours, candidate_people,
-                     staffing_status, record_type, forecast_type, source_row, notes, ingested_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     staffing_status, record_type, forecast_type, source_row, notes, ingested_at,
+                     duration_weeks, probability_pct, requested_allocation_pct,
+                     estimated_unweighted_weekly_hours, estimated_weighted_weekly_hours,
+                     demand_hours_is_probability_weighted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [row_id, record.source_section, None, record.prospect_or_deal,
                  record.probability, record.requested_allocation, record.skillset,
                  0.0, json.dumps(record.candidate_people),
                  record.status, record.record_type, record.forecast_type,
-                 record.source_row, None, now],
+                 record.source_row, None, now,
+                 record.duration_weeks, record.probability_pct, record.requested_allocation_pct,
+                 record.estimated_unweighted_weekly_hours, record.estimated_weighted_weekly_hours,
+                 True],
             )
             result.ingested += 1
         except Exception as exc:
