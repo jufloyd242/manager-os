@@ -248,6 +248,29 @@ ALTER TABLE deals ADD COLUMN IF NOT EXISTS probability FLOAT;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS services_amount FLOAT;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS last_status_changed_date DATE;
 ALTER TABLE deals ADD COLUMN IF NOT EXISTS source_format VARCHAR;
+CREATE TABLE IF NOT EXISTS projects (
+    id VARCHAR PRIMARY KEY,
+    project_name VARCHAR,
+    client VARCHAR,
+    opportunity_number VARCHAR,
+    deal_id VARCHAR,
+    status VARCHAR,
+    start_date DATE,
+    end_date DATE,
+    technologies_json JSON,
+    skills_json JSON,
+    team_members_json JSON,
+    summary VARCHAR,
+    outcome VARCHAR,
+    lessons_learned VARCHAR,
+    risks_json JSON,
+    reusable_artifacts_json JSON,
+    source_urls_json JSON,
+    source_note_ids_json JSON,
+    source_doc_ids_json JSON,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
 ALTER TABLE action_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;
 ALTER TABLE action_items ADD COLUMN IF NOT EXISTS feedback_rating VARCHAR;
 ALTER TABLE action_items ADD COLUMN IF NOT EXISTS feedback_reason VARCHAR;

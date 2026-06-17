@@ -2274,6 +2274,90 @@ def profile_forecast() -> None:
 
 
 # ---------------------------------------------------------------------------
+# manager-os index-projects
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="index-projects")
+def index_projects(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing."),
+    force: bool = typer.Option(False, "--force", help="Re-index all notes."),
+    limit: int = typer.Option(None, "--limit", help="Limit number of notes to process."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output."),
+) -> None:
+    """Index projects from notes and deals into the project knowledge base."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.project_index import extract_projects_from_notes
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+
+    if dry_run:
+        console.print("[bold]Index Projects — Dry Run[/bold]")
+        console.print(f"  Force:  {force}")
+        console.print(f"  Limit:  {limit}")
+        raise typer.Exit(0)
+
+    console.print("[bold]Indexing projects...[/bold]")
+    try:
+        count = extract_projects_from_notes(conn, force=force, limit=limit)
+        console.print(f"[green]✓ Successfully indexed {count} project(s).[/green]")
+    except Exception as e:
+        console.print(f"[red]✗ Indexing failed: {e}[/red]")
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# manager-os search-projects
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="search-projects")
+def search_projects(
+    query: str = typer.Argument("", help="Search query."),
+    client: str = typer.Option("", "--client", help="Filter by client."),
+    person: str = typer.Option("", "--person", help="Filter by person."),
+    technology: str = typer.Option("", "--technology", help="Filter by technology."),
+    status: str = typer.Option("", "--status", help="Filter by status."),
+    limit: int = typer.Option(20, "--limit", help="Max results."),
+    as_json: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """Search the project knowledge index."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.project_index import search_projects
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+
+    results = search_projects(
+        conn,
+        query=query,
+        client=client,
+        person=person,
+        technology=technology,
+        status=status,
+        limit=limit,
+    )
+
+    if as_json:
+        import json
+        console.print(json.dumps(results, indent=2))
+    else:
+        if not results:
+            console.print("[yellow]No projects found matching criteria.[/yellow]")
+        else:
+            for r in results:
+                console.print(f"\n[bold]{r['project_name']}[/bold] ({r['client']})")
+                console.print(f"  Status: {r['status']} | Opp: {r['opportunity_number']}")
+                if r['technologies']:
+                    console.print(f"  Tech: {', '.join(r['technologies'])}")
+                if r['summary']:
+                    console.print(f"  Summary: {r['summary'][:100]}...")
+
+
+# ---------------------------------------------------------------------------
 # manager-os status
 # ---------------------------------------------------------------------------
 
