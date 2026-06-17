@@ -990,12 +990,27 @@ def dashboard() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_daily_extract_mode(rules_only: bool, llm_only: bool) -> str:
+    """Resolve daily extraction mode from flags.  Fails fast on conflict."""
+    if rules_only and llm_only:
+        raise typer.BadParameter(
+            "Use only one of --rules-only or --llm-only.",
+            param_hint="'--rules-only' / '--llm-only'",
+        )
+    if rules_only:
+        return "rules"
+    if llm_only:
+        return "llm"
+    return "both"
+
+
 @app.command()
 def daily(
     target_date: Optional[str] = typer.Option(None, "--date", help="Date (YYYY-MM-DD). Defaults to today."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing to DB or retrieving workspace."),
     no_workspace: bool = typer.Option(False, "--no-workspace", help="Skip workspace retrieval entirely."),
-    rules_only: bool = typer.Option(False, "--rules-only", help="Use rules-only extraction (no LLM)."),
+    rules_only: bool = typer.Option(False, "--rules-only", help="Run rule-based extraction only (no LLM)."),
+    llm_only: bool = typer.Option(False, "--llm-only", help="Run LLM extraction only (skip rule extraction)."),
     llm_limit: int = typer.Option(25, "--llm-limit", help="Maximum notes to send to the LLM."),
     llm_timeout_seconds: int = typer.Option(120, "--llm-timeout-seconds", help="Per-note LLM timeout in seconds."),
     max_items: int = typer.Option(20, "--max-items", help="Maximum items per section in the brief."),
@@ -1007,6 +1022,10 @@ def daily(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed skip/warning information."),
 ) -> None:
     """Run the complete morning Manager OS workflow.
+
+    Default extraction runs both rule-based and LLM extraction.
+    Use --rules-only to skip LLM, or --llm-only to skip rules.
+    Combining both flags is an error.
 
     Equivalent to running ingest, extract, brief, and optionally
     dashboard in sequence with sensible defaults.
@@ -1023,7 +1042,7 @@ def daily(
 
     run_date = _date.fromisoformat(target_date) if target_date else _date.today()
     settings = get_settings()
-    extract_mode = "rules" if rules_only else "both"
+    extract_mode = _resolve_daily_extract_mode(rules_only, llm_only)
 
     # Track warnings across phases for the closing summary
     extraction_warnings: list[str] = []
@@ -1273,22 +1292,25 @@ def daily(
         _step_results: list[tuple[str, object]] = []
         extraction_warnings: list[str] = []
 
-        # Rule extraction
-        from manager_os.extract.signals import run_rule_extraction
-        stage_start = _time.monotonic()
-        console.print("[dim]  → Running rule-based signal extraction…[/dim]")
-        rule_result = run_rule_extraction(conn, run_date=run_date)
-        console.print(
-            f"[dim]  ← Rules complete in {_time.monotonic() - stage_start:.2f}s "
-            f"(written={rule_result.written}, skipped={rule_result.skipped}, "
-            f"failed={rule_result.failed})[/dim]"
-        )
-        table.add_row("signals (rules)", str(rule_result.written),
-                       str(rule_result.skipped), str(rule_result.failed))
-        _step_results.append(("signals (rules)", rule_result))
+        # Rule extraction (modes: rules, both)
+        if extract_mode in ("rules", "both"):
+            from manager_os.extract.signals import run_rule_extraction
+            stage_start = _time.monotonic()
+            console.print("[dim]  → Running rule-based signal extraction…[/dim]")
+            rule_result = run_rule_extraction(conn, run_date=run_date)
+            console.print(
+                f"[dim]  ← Rules complete in {_time.monotonic() - stage_start:.2f}s "
+                f"(written={rule_result.written}, skipped={rule_result.skipped}, "
+                f"failed={rule_result.failed})[/dim]"
+            )
+            table.add_row("signals (rules)", str(rule_result.written),
+                           str(rule_result.skipped), str(rule_result.failed))
+            _step_results.append(("signals (rules)", rule_result))
+        else:
+            console.print("[dim]  → Rule extraction skipped (--llm-only)[/dim]")
 
-        # LLM extraction (if mode is both)
-        if extract_mode == "both":
+        # LLM extraction (modes: llm, both)
+        if extract_mode in ("llm", "both"):
             from manager_os.extract.llm_signals import run_llm_extraction, LLMExtractionUnavailable
             try:
                 def _progress_cb(event: str, payload: dict) -> None:
@@ -1317,8 +1339,21 @@ def daily(
                                str(llm_result.skipped), str(llm_result.failed))
                 _step_results.append(("signals (llm)", llm_result))
             except LLMExtractionUnavailable as exc:
-                console.print(f"[yellow]LLM extraction skipped: {exc}[/yellow]")
-                extraction_warnings.append(f"LLM: {exc}")
+                if extract_mode == "llm":
+                    # --llm-only: fail loudly — user explicitly requested LLM
+                    console.print(
+                        f"[red bold]LLM extraction unavailable (--llm-only run): {exc}[/red bold]"
+                    )
+                    console.print(
+                        "[red]Gemini CLI / LLM is not configured or reachable. "
+                        "Run 'manager-os llm-doctor' to diagnose.[/red]"
+                    )
+                    conn.close()
+                    raise typer.Exit(1)
+                else:
+                    # default both: warn and continue (existing behavior)
+                    console.print(f"[yellow]LLM extraction skipped: {exc}[/yellow]")
+                    extraction_warnings.append(f"LLM: {exc}")
 
         # Action items
         from manager_os.extract.action_items import extract_action_items_from_all_notes
