@@ -248,9 +248,8 @@ class TestDemoResetSuccess:
     single reset run via the module-scoped ``_demo_run`` fixture.
     """
 
-    @classmethod
     @pytest.fixture(scope="class", autouse=True)
-    def _demo_run(cls, tmp_path_factory: pytest.TempPathFactory) -> None:
+    def _demo_run(self, tmp_path_factory: pytest.TempPathFactory) -> None:
         """Run demo-reset once so all tests in this class can inspect results."""
         tmp = tmp_path_factory.mktemp("demo_reset_success")
         runner = CliRunner()
@@ -259,7 +258,7 @@ class TestDemoResetSuccess:
             ["demo-reset", "--date", TARGET_DATE],
             env=_env(tmp),
         )
-        cls._result = result
+        self.__class__._result = result
 
     # ── Exit code ────────────────────────────────────────────────────────────
 
@@ -358,15 +357,14 @@ class TestDemoResetIdempotency:
     """Running demo-reset twice must always succeed; the second run replaces
     (not duplicates) records because it wipes and rebuilds the DB."""
 
-    @classmethod
     @pytest.fixture(scope="class", autouse=True)
-    def _two_runs(cls, tmp_path_factory: pytest.TempPathFactory) -> None:
+    def _two_runs(self, tmp_path_factory: pytest.TempPathFactory) -> None:
         tmp = tmp_path_factory.mktemp("demo_reset_idem")
         runner = CliRunner()
         env = _env(tmp)
         runner.invoke(cli_app, ["demo-reset", "--date", TARGET_DATE], env=env)
         result2 = runner.invoke(cli_app, ["demo-reset", "--date", TARGET_DATE], env=env)
-        cls._result2 = result2
+        self.__class__._result2 = result2
 
     def test_second_run_exits_zero(self) -> None:
         assert self._result2.exit_code == 0, self._result2.output
