@@ -82,12 +82,13 @@ class Settings(BaseSettings):
     project_index_sheet_id: str = ""
     project_index_sheet_gid: str = ""
     project_index_export_url: str = ""
-    project_index_local_csv: str = ""
+    project_index_local_csv: str = "./data/raw/project_index.csv"
     project_index_download_timeout_seconds: int = 180
     project_index_stale_after_hours: int = 24
     project_index_require_exact_source: bool = True
     project_doc_search_enabled: bool = True
     project_doc_search_limit_per_project: int = 10
+    project_doc_search_timeout_seconds: int = 180
 
 
 def get_settings() -> Settings:
