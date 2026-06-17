@@ -2358,6 +2358,61 @@ def search_projects(
 
 
 # ---------------------------------------------------------------------------
+# manager-os match-projects
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="match-projects")
+def match_projects(
+    deal_id: str = typer.Option("", "--deal-id", help="Deal ID to match."),
+    opportunity_number: str = typer.Option("", "--opportunity-number", help="Opportunity number to match."),
+    limit: int = typer.Option(5, "--limit", help="Max matches to return."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output."),
+    as_json: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """Find similar past projects for a given deal to accelerate delivery intelligence."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.similar_projects import find_similar_projects
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+
+    if dry_run:
+        console.print("[bold]Match Projects — Dry Run[/bold]")
+        console.print(f"  Deal ID:          {deal_id}")
+        console.print(f"  Opportunity #:    {opportunity_number}")
+        console.print(f"  Limit:            {limit}")
+        raise typer.Exit(0)
+
+    if not deal_id and not opportunity_number:
+        console.print("[yellow]Please provide either --deal-id or --opportunity-number.[/yellow]")
+        raise typer.Exit(1)
+
+    matches = find_similar_projects(
+        conn,
+        deal_id=deal_id,
+        opportunity_number=opportunity_number,
+        limit=limit,
+    )
+
+    if as_json:
+        import json
+        console.print(json.dumps(matches, indent=2))
+    else:
+        if not matches:
+            console.print("[yellow]No similar past projects found.[/yellow]")
+        else:
+            console.print(f"[bold]Found {len(matches)} similar project(s):[/bold]")
+            for m in matches:
+                console.print(f"\n  [bold]{m['project_name']}[/bold] ({m['client']}) - Score: {m['score']}")
+                console.print(f"  Why: {m['why_it_matched']}")
+                if m['lessons_learned']:
+                    console.print(f"  Lessons: {m['lessons_learned'][:100]}...")
+
+
+# ---------------------------------------------------------------------------
 # manager-os status
 # ---------------------------------------------------------------------------
 
