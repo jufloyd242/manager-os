@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,182 @@ class ParseResult:
     skipped_rows: int = 0
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MetadataInfo:
+    """Metadata validation result."""
+    valid: bool = False
+    sheet_id: str = ""
+    gid: str = ""
+    retrieved_at: str = ""
+    content_hash: str = ""
+    row_count: int = 0
+    error: str = ""
+
+
+def validate_metadata(csv_path: str, expected_sheet_id: str, expected_gid: str, stale_hours: int = 24) -> MetadataInfo:
+    """Validate project index CSV metadata.
+    
+    Args:
+        csv_path: Path to the CSV file
+        expected_sheet_id: Expected Google Sheet ID
+        expected_gid: Expected Google Sheet GID
+        stale_hours: Hours after which metadata is considered stale
+        
+    Returns:
+        MetadataInfo with validation result
+    """
+    meta_path = f"{csv_path}.meta.json"
+    
+    if not Path(meta_path).exists():
+        return MetadataInfo(
+            valid=False,
+            error=f"Metadata file not found: {meta_path}. Run 'manager-os project-index-fetch' first."
+        )
+    
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        
+        # Check sheet_id and gid
+        if meta.get("sheet_id") != expected_sheet_id:
+            return MetadataInfo(
+                valid=False,
+                sheet_id=meta.get("sheet_id", ""),
+                gid=meta.get("gid", ""),
+                error=f"Sheet ID mismatch. Expected {expected_sheet_id}, got {meta.get('sheet_id')}"
+            )
+        
+        if meta.get("gid") != expected_gid:
+            return MetadataInfo(
+                valid=False,
+                sheet_id=meta.get("sheet_id", ""),
+                gid=meta.get("gid", ""),
+                error=f"GID mismatch. Expected {expected_gid}, got {meta.get('gid')}"
+            )
+        
+        # Check freshness
+        retrieved_at_str = meta.get("retrieved_at", "")
+        if retrieved_at_str:
+            retrieved_at_str = retrieved_at_str.replace("Z", "+00:00")
+            try:
+                retrieved_at = datetime.fromisoformat(retrieved_at_str)
+                if retrieved_at.tzinfo is None:
+                    retrieved_at = retrieved_at.replace(tzinfo=datetime.now().astimezone().tzinfo)
+                
+                now = datetime.now(retrieved_at.tzinfo)
+                age_hours = (now - retrieved_at).total_seconds() / 3600
+                
+                if age_hours > stale_hours:
+                    return MetadataInfo(
+                        valid=False,
+                        sheet_id=meta.get("sheet_id", ""),
+                        gid=meta.get("gid", ""),
+                        retrieved_at=retrieved_at_str,
+                        error=f"Metadata is stale (retrieved {age_hours:.1f}h ago, stale after {stale_hours}h). Run 'manager-os project-index-fetch --force' to refresh."
+                    )
+            except ValueError:
+                pass
+        
+        # Check content hash
+        if not Path(csv_path).exists():
+            return MetadataInfo(
+                valid=False,
+                sheet_id=meta.get("sheet_id", ""),
+                gid=meta.get("gid", ""),
+                retrieved_at=retrieved_at_str,
+                error=f"CSV file not found: {csv_path}"
+            )
+        
+        with open(csv_path, "rb") as f:
+            actual_hash = hashlib.sha256(f.read()).hexdigest()
+        
+        expected_hash = meta.get("content_hash", "")
+        if actual_hash != expected_hash:
+            return MetadataInfo(
+                valid=False,
+                sheet_id=meta.get("sheet_id", ""),
+                gid=meta.get("gid", ""),
+                retrieved_at=retrieved_at_str,
+                content_hash=actual_hash,
+                error=f"Content hash mismatch. CSV may have been modified. Run 'manager-os project-index-fetch --force' to refresh."
+            )
+        
+        return MetadataInfo(
+            valid=True,
+            sheet_id=meta.get("sheet_id", ""),
+            gid=meta.get("gid", ""),
+            retrieved_at=retrieved_at_str,
+            content_hash=actual_hash,
+            row_count=meta.get("row_count", 0)
+        )
+    
+    except Exception as e:
+        return MetadataInfo(
+            valid=False,
+            error=f"Failed to validate metadata: {str(e)}"
+        )
+
+
+def record_indexing_run(
+    conn,
+    source: str,
+    sheet_id: str,
+    gid: str,
+    source_url: str,
+    local_csv_path: str,
+    row_count: int,
+    valid_project_count: int,
+    skipped_row_count: int,
+    warning_count: int,
+    content_hash: str,
+    started_at: datetime,
+    finished_at: datetime,
+    status: str,
+    error: str = ""
+) -> str:
+    """Record a project indexing run in the project_index_runs table.
+    
+    Args:
+        conn: DuckDB connection
+        source: Source type (e.g., "google_sheet_project_index")
+        sheet_id: Google Sheet ID
+        gid: Google Sheet GID
+        source_url: Source URL
+        local_csv_path: Local CSV path
+        row_count: Total rows in CSV
+        valid_project_count: Number of valid projects parsed
+        skipped_row_count: Number of skipped rows
+        warning_count: Number of warnings
+        content_hash: Content hash of CSV
+        started_at: Run start time
+        finished_at: Run finish time
+        status: Run status ("success" or "failed")
+        error: Error message if failed
+        
+    Returns:
+        Run ID
+    """
+    run_id = content_hash(f"project_index_run::{started_at.isoformat()}::{sheet_id}")
+    
+    conn.execute(
+        """
+        INSERT INTO project_index_runs (
+            id, source, sheet_id, gid, source_url, local_csv_path,
+            row_count, valid_project_count, skipped_row_count, warning_count,
+            content_hash, started_at, finished_at, status, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            run_id, source, sheet_id, gid, source_url, local_csv_path,
+            row_count, valid_project_count, skipped_row_count, warning_count,
+            content_hash, started_at.isoformat(), finished_at.isoformat(),
+            status, error
+        ]
+    )
+    
+    return run_id
 
 
 def _parse_currency(value: str) -> float | None:

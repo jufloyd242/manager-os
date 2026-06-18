@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     project_doc_search_enabled: bool = True
     project_doc_search_limit_per_project: int = 10
     project_doc_search_timeout_seconds: int = 180
+    project_index_strict_daily: bool = False
 
 
 def get_settings() -> Settings:

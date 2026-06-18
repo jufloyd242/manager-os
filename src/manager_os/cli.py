@@ -1021,6 +1021,9 @@ def daily(
     force_ingest: bool = typer.Option(False, "--force-ingest", help="Re-ingest files even if content hash unchanged."),
     skip_forecast_fetch: bool = typer.Option(False, "--skip-forecast-fetch", help="Skip fetching forecast from Google Sheet."),
     forecast_force: bool = typer.Option(False, "--forecast-force", help="Force overwrite local forecast CSV during fetch."),
+    skip_project_index: bool = typer.Option(False, "--skip-project-index", help="Skip project index refresh."),
+    project_index_force: bool = typer.Option(False, "--project-index-force", help="Force project index refresh even if fresh."),
+    skip_project_docs: bool = typer.Option(False, "--skip-project-docs", help="Skip Drive document enrichment for projects."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed skip/warning information."),
 ) -> None:
     """Run the complete morning Manager OS workflow.
@@ -1395,6 +1398,108 @@ If you cannot access the sheet, return:
         console.print()
 
         conn.close()
+
+    # ------------------------------------------------------------------
+    # Phase 2.5: Project Index Refresh (if configured)
+    # ------------------------------------------------------------------
+    if not skip_ingest and not skip_project_index and not dry_run:
+        project_index_source = getattr(settings, "project_index_source", "")
+        if project_index_source == "google_sheet_gemini":
+            console.print("[bold]Phase 2.5: Project Index Refresh[/bold]")
+            try:
+                from manager_os.ingest.project_sheet import validate_metadata, parse_project_sheet, upsert_projects, record_indexing_run
+                from datetime import datetime
+                import hashlib
+                
+                local_csv = getattr(settings, "project_index_local_csv", "")
+                if not local_csv:
+                    console.print("[yellow]  ⚠ MANAGER_OS_PROJECT_INDEX_LOCAL_CSV not set, skipping project index refresh.[/yellow]")
+                else:
+                    # Check if metadata exists and is fresh
+                    expected_sheet_id = getattr(settings, "project_index_sheet_id", "")
+                    expected_gid = getattr(settings, "project_index_sheet_gid", "")
+                    stale_hours = getattr(settings, "project_index_stale_after_hours", 24)
+                    
+                    metadata = validate_metadata(local_csv, expected_sheet_id, expected_gid, stale_hours)
+                    
+                    if not metadata.valid and not project_index_force:
+                        console.print(f"[yellow]  ⚠ {metadata.error}[/yellow]")
+                        console.print("[yellow]  Run 'manager-os project-index-fetch --force' to refresh.[/yellow]")
+                    else:
+                        # Parse and upsert projects
+                        started_at = datetime.utcnow()
+                        parse_result = parse_project_sheet(local_csv)
+                        
+                        if parse_result.errors:
+                            for error in parse_result.errors:
+                                console.print(f"  [red]✗ {error}[/red]")
+                        else:
+                            conn = get_connection(settings.db_path)
+                            inserted, updated = upsert_projects(conn, parse_result.projects, force=project_index_force)
+                            
+                            # Record indexing run
+                            finished_at = datetime.utcnow()
+                            with open(local_csv, "rb") as f:
+                                content_hash = hashlib.sha256(f.read()).hexdigest()
+                            
+                            run_id = record_indexing_run(
+                                conn=conn,
+                                source="google_sheet_project_index",
+                                sheet_id=expected_sheet_id,
+                                gid=expected_gid,
+                                source_url=getattr(settings, "project_index_sheet_url", ""),
+                                local_csv_path=local_csv,
+                                row_count=len(parse_result.projects) + parse_result.skipped_rows,
+                                valid_project_count=len(parse_result.projects),
+                                skipped_row_count=parse_result.skipped_rows,
+                                warning_count=len(parse_result.warnings),
+                                content_hash=content_hash,
+                                started_at=started_at,
+                                finished_at=finished_at,
+                                status="success"
+                            )
+                            
+                            console.print(f"[green]  ✓ Indexed {len(parse_result.projects)} projects (inserted: {inserted}, updated: {updated})[/green]")
+                            
+                            # Drive enrichment (if enabled)
+                            if not skip_project_docs and getattr(settings, "project_doc_search_enabled", True):
+                                from manager_os.ingest.project_drive_docs import search_drive_for_project_docs, upsert_project_documents
+                                
+                                doc_limit = getattr(settings, "project_doc_search_limit_per_project", 10)
+                                doc_timeout = getattr(settings, "project_doc_search_timeout_seconds", 180)
+                                total_docs = 0
+                                
+                                console.print(f"[dim]  → Enriching with Drive documents...[/dim]")
+                                for project in parse_result.projects:
+                                    if not project.opportunity_number:
+                                        continue
+                                    
+                                    project_id = f"project::{project.opportunity_number}"
+                                    drive_result = search_drive_for_project_docs(
+                                        opportunity_number=project.opportunity_number,
+                                        client=project.client,
+                                        project_name=project.project_name,
+                                        timeout=doc_timeout,
+                                    )
+                                    
+                                    for doc in drive_result.documents:
+                                        doc.project_id = project_id
+                                    
+                                    if drive_result.documents:
+                                        docs_to_insert = drive_result.documents[:doc_limit]
+                                        upsert_project_documents(conn, docs_to_insert, force=project_index_force)
+                                        total_docs += len(docs_to_insert)
+                                
+                                console.print(f"[green]  ✓ Enriched with {total_docs} documents[/green]")
+                            
+                            conn.close()
+            except Exception as e:
+                console.print(f"[yellow]  ⚠ Project index refresh failed: {e}[/yellow]")
+                strict_daily = getattr(settings, "project_index_strict_daily", False)
+                if strict_daily:
+                    console.print("[red]  ✗ Failing daily run because MANAGER_OS_PROJECT_INDEX_STRICT_DAILY=true[/red]")
+                    raise typer.Exit(1)
+            console.print()
 
     # ------------------------------------------------------------------
     # Phase 3: Extract
@@ -2472,6 +2577,159 @@ If you cannot access the sheet, return:
 
 
 # ---------------------------------------------------------------------------
+# manager-os project-docs-fetch
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="project-docs-fetch")
+def project_docs_fetch(
+    project_id: Optional[str] = typer.Option(None, "--project-id", help="Project ID to fetch docs for."),
+    opportunity_number: Optional[str] = typer.Option(None, "--opportunity-number", help="Opportunity number to fetch docs for."),
+    limit: int = typer.Option(10, "--limit", help="Max documents to find per project."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print what would be done without executing."),
+    print_prompt: bool = typer.Option(False, "--print-prompt", help="Print the Gemini CLI prompt and exit."),
+    timeout: int = typer.Option(180, "--timeout", help="Download timeout in seconds."),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing document records."),
+) -> None:
+    """Fetch Google Drive documents for projects by opportunity number.
+
+    Searches Drive for SOWs, deal sheets, closure decks, design docs, etc.
+    """
+    import json
+    from datetime import datetime
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.ingest.project_drive_docs import (
+        search_drive_for_project_docs,
+        upsert_project_documents,
+        _build_drive_search_prompt,
+    )
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+
+    # Resolve which projects to process
+    projects_to_process = []
+
+    if opportunity_number:
+        # Single project by opportunity number
+        project_id = f"project::{opportunity_number}"
+        row = conn.execute(
+            "SELECT id, opportunity_number, client, project_name FROM projects WHERE id = ?",
+            [project_id]
+        ).fetchone()
+        if row:
+            projects_to_process.append({
+                "project_id": row[0],
+                "opportunity_number": row[1],
+                "client": row[2],
+                "project_name": row[3],
+            })
+        else:
+            console.print(f"[red]Project not found: {project_id}[/red]")
+            raise typer.Exit(1)
+    elif project_id:
+        # Single project by ID
+        row = conn.execute(
+            "SELECT id, opportunity_number, client, project_name FROM projects WHERE id = ?",
+            [project_id]
+        ).fetchone()
+        if row:
+            projects_to_process.append({
+                "project_id": row[0],
+                "opportunity_number": row[1],
+                "client": row[2],
+                "project_name": row[3],
+            })
+        else:
+            console.print(f"[red]Project not found: {project_id}[/red]")
+            raise typer.Exit(1)
+    else:
+        # All projects with opportunity numbers
+        rows = conn.execute(
+            """
+            SELECT id, opportunity_number, client, project_name
+            FROM projects
+            WHERE opportunity_number IS NOT NULL AND opportunity_number != ''
+            ORDER BY close_date DESC
+            """
+        ).fetchall()
+        projects_to_process = [
+            {
+                "project_id": r[0],
+                "opportunity_number": r[1],
+                "client": r[2],
+                "project_name": r[3],
+            }
+            for r in rows
+        ]
+
+    if not projects_to_process:
+        console.print("[yellow]No projects found to process.[/yellow]")
+        raise typer.Exit(0)
+
+    if print_prompt and projects_to_process:
+        p = projects_to_process[0]
+        prompt = _build_drive_search_prompt(
+            p["opportunity_number"],
+            p["client"],
+            p["project_name"],
+        )
+        console.print("[bold]Gemini CLI Prompt:[/bold]")
+        console.print(prompt)
+        raise typer.Exit(0)
+
+    if dry_run:
+        console.print("[bold]Project Docs Fetch — Dry Run[/bold]")
+        console.print(f"  Projects to process: {len(projects_to_process)}")
+        console.print(f"  Limit per project: {limit}")
+        console.print(f"  Force overwrite: {force}")
+        for p in projects_to_process[:5]:
+            console.print(f"    - {p['opportunity_number']}: {p['project_name']} ({p['client']})")
+        if len(projects_to_process) > 5:
+            console.print(f"    ... and {len(projects_to_process) - 5} more")
+        raise typer.Exit(0)
+
+    # Process each project
+    total_docs = 0
+    total_errors = 0
+
+    for idx, p in enumerate(projects_to_process, 1):
+        console.print(f"\n[dim][{idx}/{len(projects_to_process)}] Searching Drive for {p['opportunity_number']}...[/dim]")
+
+        drive_result = search_drive_for_project_docs(
+            opportunity_number=p["opportunity_number"],
+            client=p["client"],
+            project_name=p["project_name"],
+            timeout=timeout,
+        )
+
+        if drive_result.errors:
+            for err in drive_result.errors:
+                console.print(f"  [red]✗ {err}[/red]")
+            total_errors += len(drive_result.errors)
+
+        if drive_result.warnings:
+            for warn in drive_result.warnings:
+                console.print(f"  [yellow]⚠ {warn}[/yellow]")
+
+        # Set project_id on documents
+        for doc in drive_result.documents:
+            doc.project_id = p["project_id"]
+
+        if drive_result.documents:
+            # Limit documents per project
+            docs_to_insert = drive_result.documents[:limit]
+            inserted, updated = upsert_project_documents(conn, docs_to_insert, force=force)
+            total_docs += len(docs_to_insert)
+            console.print(f"  [green]✓ Found {len(docs_to_insert)} documents (inserted: {inserted}, updated: {updated})[/green]")
+        else:
+            console.print(f"  [dim]No documents found[/dim]")
+
+    console.print(f"\n[bold green]✓ Complete: {total_docs} documents processed, {total_errors} errors[/bold green]")
+
+
+# ---------------------------------------------------------------------------
 # manager-os index-projects
 # ---------------------------------------------------------------------------
 
@@ -2515,36 +2773,28 @@ def index_projects(
         console.print("[red]No local CSV path configured (MANAGER_OS_PROJECT_INDEX_LOCAL_CSV).[/red]")
         raise typer.Exit(1)
 
+    started_at = datetime.utcnow()
+    
     if not skip_fetch:
         console.print("[bold]Step 1: Fetching project sheet...[/bold]")
-        # Call project-index-fetch logic inline
-        # For now, we'll just check if the file exists and is fresh
-        meta_path = f"{local_csv}.meta.json"
-        if not Path(meta_path).exists():
-            console.print("[red]Project index metadata not found. Run 'manager-os project-index-fetch' first.[/red]")
+        # Validate metadata
+        from manager_os.ingest.project_sheet import validate_metadata
+        
+        expected_sheet_id = getattr(settings, "project_index_sheet_id", "")
+        expected_gid = getattr(settings, "project_index_sheet_gid", "")
+        stale_hours = getattr(settings, "project_index_stale_after_hours", 24)
+        
+        metadata = validate_metadata(local_csv, expected_sheet_id, expected_gid, stale_hours)
+        
+        if not metadata.valid:
+            console.print(f"[red]✗ {metadata.error}[/red]")
             raise typer.Exit(1)
         
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        
-        # Verify freshness
-        stale_hours = getattr(settings, "project_index_stale_after_hours", 24)
-        retrieved_at_str = meta.get("retrieved_at", "")
-        if retrieved_at_str:
-            retrieved_at_str = retrieved_at_str.replace("Z", "+00:00")
-            try:
-                retrieved_at = datetime.fromisoformat(retrieved_at_str)
-                if retrieved_at.tzinfo is None:
-                    retrieved_at = retrieved_at.replace(tzinfo=datetime.now().astimezone().tzinfo)
-                
-                now = datetime.now(retrieved_at.tzinfo)
-                if (now - retrieved_at) > timedelta(hours=stale_hours):
-                    console.print(f"[red]Project index is stale (retrieved {retrieved_at.isoformat()}, stale after {stale_hours}h).[/red]")
-                    console.print("[red]Run 'manager-os project-index-fetch --force' to refresh.[/red]")
-                    raise typer.Exit(1)
-            except ValueError:
-                console.print(f"[red]Invalid retrieved_at format in metadata: {retrieved_at_str}[/red]")
-                raise typer.Exit(1)
+        if verbose:
+            console.print(f"  Sheet ID: {metadata.sheet_id}")
+            console.print(f"  GID: {metadata.gid}")
+            console.print(f"  Retrieved: {metadata.retrieved_at}")
+            console.print(f"  Content hash: {metadata.content_hash[:16]}...")
     else:
         console.print("[bold]Step 1: Skipping fetch (--skip-fetch)[/bold]")
 
@@ -2569,6 +2819,35 @@ def index_projects(
     
     inserted, updated = upsert_projects(conn, parse_result.projects, force=force)
     console.print(f"[green]✓ Inserted {inserted} projects, updated {updated} projects[/green]")
+    
+    # Record indexing run
+    finished_at = datetime.utcnow()
+    from manager_os.ingest.project_sheet import record_indexing_run
+    import hashlib
+    
+    # Calculate content hash
+    with open(local_csv, "rb") as f:
+        content_hash = hashlib.sha256(f.read()).hexdigest()
+    
+    run_id = record_indexing_run(
+        conn=conn,
+        source="google_sheet_project_index",
+        sheet_id=getattr(settings, "project_index_sheet_id", ""),
+        gid=getattr(settings, "project_index_sheet_gid", ""),
+        source_url=getattr(settings, "project_index_sheet_url", ""),
+        local_csv_path=local_csv,
+        row_count=len(parse_result.projects) + parse_result.skipped_rows,
+        valid_project_count=len(parse_result.projects),
+        skipped_row_count=parse_result.skipped_rows,
+        warning_count=len(parse_result.warnings),
+        content_hash=content_hash,
+        started_at=started_at,
+        finished_at=finished_at,
+        status="success"
+    )
+    
+    if verbose:
+        console.print(f"  Indexing run ID: {run_id[:16]}...")
 
     # Step 3: Drive enrichment (if enabled)
     if not skip_drive_enrichment and getattr(settings, "project_doc_search_enabled", True):
@@ -2576,6 +2855,7 @@ def index_projects(
         from manager_os.ingest.project_drive_docs import search_drive_for_project_docs, upsert_project_documents
         
         doc_limit = getattr(settings, "project_doc_search_limit_per_project", 10)
+        doc_timeout = getattr(settings, "project_doc_search_timeout_seconds", 180)
         total_docs = 0
         
         for project in parse_result.projects:
@@ -2589,7 +2869,7 @@ def index_projects(
                 opportunity_number=project.opportunity_number,
                 client=project.client,
                 project_name=project.project_name,
-                timeout=120,
+                timeout=doc_timeout,
             )
             
             if drive_result.errors and verbose:
@@ -2601,10 +2881,12 @@ def index_projects(
                 doc.project_id = project_id
             
             if drive_result.documents:
-                inserted_docs, updated_docs = upsert_project_documents(conn, drive_result.documents, force=force)
-                total_docs += len(drive_result.documents)
+                # Limit documents per project
+                docs_to_insert = drive_result.documents[:doc_limit]
+                inserted_docs, updated_docs = upsert_project_documents(conn, docs_to_insert, force=force)
+                total_docs += len(docs_to_insert)
                 if verbose:
-                    console.print(f"    Found {len(drive_result.documents)} documents")
+                    console.print(f"    Found {len(docs_to_insert)} documents")
         
         console.print(f"[green]✓ Enriched with {total_docs} documents[/green]")
     else:

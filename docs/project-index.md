@@ -1,8 +1,125 @@
-# Project Index Documentation
+# Project Index
 
-## Overview
+Manager OS maintains a searchable index of historical closed-won AI/ML delivery projects.
 
-The Manager OS project index provides a searchable knowledge base of historical closed-won opportunities, enabling delivery intelligence and similar project matching for prospective deals.
+## Source of Truth
+
+**Primary source**: NetSuite AI/ML Closed-Won Opportunities Google Sheet
+
+- Sheet ID: `1qoxa7kh5UPs8yCs6UIAbR9_n_odnYl1lByJi4F85P5A`
+- GID: `326551622`
+- Export URL: `https://docs.google.com/spreadsheets/d/1qoxa7kh5UPs8yCs6UIAbR9_n_odnYl1lByJi4F85P5A/export?format=csv&gid=326551622`
+
+The local CSV at `MANAGER_OS_PROJECT_INDEX_LOCAL_CSV` is **cache/output only**. It is written by `project-index-fetch` and is never the source of truth.
+
+## OPP Number as Join Key
+
+Every project row in the Sheet has an **OppID** (e.g., `OPP032106`). This is the canonical primary key for all project records and is used to:
+- Create stable project IDs (`project::OPP032106`)
+- Join Drive document enrichment results
+- Link deals to historical projects
+
+## Columns
+
+| Column | Canonical field | Description |
+|--------|----------------|-------------|
+| Year | `year` | Fiscal year |
+| Month | `month` | Fiscal month |
+| Services ($) | `services_amount` | Bookings value (currency, e.g. `$267,000`) |
+| OppID | `opportunity_number` | Primary key |
+| Close Date | `close_date` | Historical close date |
+| Sales Rep | `sales_rep` | Sales owner (not delivery team) |
+| Customer | `client` | Customer/account name |
+| Opp Name | `project_name` | Opportunity/project name |
+| Services Delivery Team | `services_delivery_team` | Delivery team category |
+| Solution Pillar | `solution_pillar` | High-level solution category |
+| Type | `project_type` | Classification facet (ADK, GenAI, CES, ML, Search, …) |
+| Industry | `industry` | Industry vertical |
+| 3-5 words | `short_description` | Short capability label |
+| 1-2 sentences | `summary` | Human-friendly project description |
+
+## Project Types
+
+| Type | Technologies/categories |
+|------|------------------------|
+| ADK | ADK, Agent Development Kit, agentic, agent |
+| GenAI | GenAI, Gemini, LLM, RAG, chatbot, agent |
+| CES | CES, CCAI, Contact Center AI, Dialogflow, Dialogflow CX |
+| ML | ML, machine learning, Vertex AI, model, prediction |
+| Search | Vertex AI Search, search, semantic search |
+| Media Rec | Recommendations AI, media recommendations |
+| Retail Rec | Recommendations AI, retail recommendations |
+| DocAI | Document AI, Doc AI, document extraction |
+
+## Commands
+
+### Fetch the Sheet
+
+Retrieve the exact Sheet tab via Gemini CLI (read-only):
+
+```bash
+manager-os project-index-fetch --dry-run
+manager-os project-index-fetch --print-url
+manager-os project-index-fetch --print-prompt
+manager-os project-index-fetch --force
+```
+
+### Index Projects
+
+```bash
+manager-os index-projects --dry-run --verbose
+manager-os index-projects --force --verbose
+manager-os index-projects --skip-drive-enrichment
+manager-os index-projects --skip-fetch
+```
+
+### Search Projects
+
+```bash
+manager-os search-projects "ADK" --json
+manager-os search-projects "Vertex AI" --json
+manager-os search-projects "Dialogflow CX" --json
+manager-os search-projects "" --type GenAI --json
+manager-os search-projects "" --industry Retail --json
+manager-os search-projects "" --sales-rep "Charlie Lisk" --json
+manager-os search-projects "" --opportunity-number OPP032106 --json
+manager-os search-projects "" --document-type sow --json
+```
+
+### Fetch Drive Documents
+
+```bash
+manager-os project-docs-fetch --opportunity-number OPP032106 --print-prompt
+manager-os project-docs-fetch --opportunity-number OPP032106 --dry-run
+manager-os project-docs-fetch --opportunity-number OPP032106
+manager-os project-docs-fetch
+```
+
+### Daily Integration
+
+```bash
+manager-os daily                        # includes project index if not stale
+manager-os daily --skip-project-index  # skip project index
+manager-os daily --project-index-force # force refresh
+manager-os daily --skip-project-docs   # skip Drive enrichment
+```
+
+Set `MANAGER_OS_PROJECT_INDEX_STRICT_DAILY=true` to fail daily if project index refresh fails (default: false).
+
+## Provenance
+
+Metadata is tracked in `./data/raw/project_index.csv.meta.json` with `sheet_id`, `gid`, `retrieved_at`, and `content_hash`. Default staleness: 24 hours (`MANAGER_OS_PROJECT_INDEX_STALE_AFTER_HOURS`).
+
+If metadata is missing, stale, or sheet_id/gid mismatch, `index-projects` will refuse to run.
+
+## Troubleshooting
+
+- **"Metadata file not found"** — Run `manager-os project-index-fetch` first.
+- **"Stale metadata"** — Run `manager-os project-index-fetch --force`.
+- **"Sheet ID mismatch"** — Check `MANAGER_OS_PROJECT_INDEX_SHEET_ID` and `MANAGER_OS_PROJECT_INDEX_SHEET_GID`.
+- **"Gemini CLI failed"** — Ensure `gemini` is installed and authenticated with access to the Sheet.
+
+## Legacy overview
 
 ## Source of Truth
 

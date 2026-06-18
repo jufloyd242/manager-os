@@ -30,6 +30,50 @@ class ProjectDocument:
     confidence: float = 0.0
     why_matched: str = ""
     error: str = ""
+    metadata_json: dict = field(default_factory=dict)
+
+
+# Document type detection patterns
+# Order matters: more specific patterns must come before general ones
+DOCUMENT_TYPE_PATTERNS = {
+    "int_sow": ["int sow", "internal sow"],
+    "sow": ["sow", "statement of work"],
+    "deal_sheet": ["deal sheet", "deal summary"],
+    "closure_deck": ["closure deck", "project closure deck"],
+    "closure_presentation": ["closure presentation", "project closure"],
+    "closeout": ["closeout", "project closeout"],
+    "retrospective": ["retro", "retrospective", "lessons learned", "post-mortem"],
+    "project_plan": ["project plan", "implementation plan"],
+    "architecture": ["architecture", "arch design", "technical architecture"],
+    "design_doc": ["design doc", "design document", "technical design"],
+    "delivery_plan": ["delivery plan", "implementation timeline"],
+    "runbook": ["runbook", "operations guide", "ops guide"],
+    "handoff": ["handoff", "hand-off", "transition"],
+    "executive_update": ["exec update", "executive update", "exec summary"],
+    "proposal": ["proposal", "rfp response"],
+    "estimate": ["estimate", "sizing", "effort estimate"],
+    "loe": ["loe", "level of effort"],
+}
+
+
+def detect_document_type(title: str, url: str = "") -> str:
+    """Detect document type from title and URL.
+    
+    Args:
+        title: Document title
+        url: Document URL (optional)
+        
+    Returns:
+        Document type string
+    """
+    text = f"{title} {url}".lower()
+    
+    for doc_type, patterns in DOCUMENT_TYPE_PATTERNS.items():
+        for pattern in patterns:
+            if pattern in text:
+                return doc_type
+    
+    return "other"
 
 
 @dataclass
@@ -169,19 +213,28 @@ def search_drive_for_project_docs(
         # Extract documents
         retrieved_at = response.get("retrieved_at", datetime.utcnow().isoformat())
         for doc_data in response.get("documents", []):
+            # Detect document type if not provided or if it's "other"
+            doc_type = doc_data.get("document_type", "other")
+            title = doc_data.get("title", "")
+            url = doc_data.get("url", "")
+            
+            if doc_type == "other" or not doc_type:
+                doc_type = detect_document_type(title, url)
+            
             doc = ProjectDocument(
                 project_id="",  # Will be set by caller
                 opportunity_number=opportunity_number,
                 client=client,
                 project_name=project_name,
-                document_type=doc_data.get("document_type", "other"),
-                title=doc_data.get("title", ""),
-                url=doc_data.get("url", ""),
+                document_type=doc_type,
+                title=title,
+                url=url,
                 source="google_drive",
                 retrieved_at=retrieved_at,
                 search_status="success",
                 confidence=float(doc_data.get("confidence", 0.0)),
                 why_matched=doc_data.get("why_matched", ""),
+                metadata_json=doc_data.get("metadata", {}),
             )
             result.documents.append(doc)
     
@@ -231,7 +284,8 @@ def upsert_project_documents(
                     confidence = ?,
                     why_matched = ?,
                     retrieved_at = ?,
-                    search_status = ?
+                    search_status = ?,
+                    metadata_json = ?
                 WHERE id = ?
                 """,
                 [
@@ -240,19 +294,20 @@ def upsert_project_documents(
                     doc.why_matched,
                     doc.retrieved_at,
                     doc.search_status,
+                    json.dumps(doc.metadata_json) if doc.metadata_json else None,
                     doc_id,
                 ]
             )
         else:
             inserted += 1
-            # Insert new record
+            # Insert new record (or replace if force=True and exists)
             conn.execute(
                 """
-                INSERT INTO project_documents (
+                INSERT OR REPLACE INTO project_documents (
                     id, project_id, opportunity_number, client, project_name,
                     document_type, title, url, source, retrieved_at,
-                    search_status, confidence, why_matched, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    search_status, confidence, why_matched, error, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     doc_id,
@@ -269,6 +324,7 @@ def upsert_project_documents(
                     doc.confidence,
                     doc.why_matched,
                     doc.error,
+                    json.dumps(doc.metadata_json) if doc.metadata_json else None,
                 ]
             )
     
