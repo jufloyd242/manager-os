@@ -1246,13 +1246,16 @@ If you cannot access the sheet, return:
                 if not rows:
                     raise RuntimeError("Gemini CLI returned no rows.")
                     
+                # Serialize CSV to string first, then write to disk
+                from io import StringIO
+                buffer = StringIO()
+                writer = csv.writer(buffer)
+                writer.writerows(rows)
+                csv_content = buffer.getvalue()
+                
                 Path(local_csv).parent.mkdir(parents=True, exist_ok=True)
-                csv_content = ""
                 with open(local_csv, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerows(rows)
-                    f.seek(0)
-                    csv_content = f.read()
+                    f.write(csv_content)
                     
                 content_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
                 retrieved_at = result_data.get("retrieved_at", datetime.utcnow().isoformat())
@@ -1453,7 +1456,7 @@ If you cannot access the sheet, return:
                                 valid_project_count=len(parse_result.projects),
                                 skipped_row_count=parse_result.skipped_rows,
                                 warning_count=len(parse_result.warnings),
-                                content_hash=content_hash,
+                                csv_content_hash=content_hash,
                                 started_at=started_at,
                                 finished_at=finished_at,
                                 status="success"
@@ -1959,15 +1962,16 @@ If you cannot access the sheet, return:
         if not rows:
             raise RuntimeError("Gemini CLI returned no rows.")
             
-        # Write to CSV
+        # Serialize CSV to string first, then write to disk
+        from io import StringIO
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerows(rows)
+        csv_content = buffer.getvalue()
+        
         Path(local_csv).parent.mkdir(parents=True, exist_ok=True)
-        csv_content = ""
         with open(local_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerows(rows)
-            # Re-read to get exact content for hash
-            f.seek(0)
-            csv_content = f.read()
+            f.write(csv_content)
             
         content_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
         retrieved_at = result_data.get("retrieved_at", datetime.utcnow().isoformat())
@@ -2534,14 +2538,16 @@ If you cannot access the sheet, return:
         if not rows:
             raise RuntimeError("Gemini CLI returned no rows.")
             
-        # Write to CSV
+        # Serialize CSV to string first, then write to disk
+        from io import StringIO
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerows(rows)
+        csv_content = buffer.getvalue()
+        
         Path(local_csv).parent.mkdir(parents=True, exist_ok=True)
-        csv_content = ""
         with open(local_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerows(rows)
-            f.seek(0)
-            csv_content = f.read()
+            f.write(csv_content)
             
         content_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
         retrieved_at = result_data.get("retrieved_at", datetime.utcnow().isoformat())
@@ -2840,7 +2846,7 @@ def index_projects(
         valid_project_count=len(parse_result.projects),
         skipped_row_count=parse_result.skipped_rows,
         warning_count=len(parse_result.warnings),
-        content_hash=content_hash,
+        csv_content_hash=content_hash,
         started_at=started_at,
         finished_at=finished_at,
         status="success"

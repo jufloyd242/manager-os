@@ -1,0 +1,3 @@
+Year,Month,Services ($),OppID,Close Date,Sales Rep,Customer,Opp Name,Services Delivery Team,Solution Pillar,Type,Industry,3-5 words,1-2 sentences
+2024,3,"$267,000",OPP030034,3/15/2024,Charlie Lisk,Acme Corp,GenAI Chatbot,AI/ML,GenAI,GenAI,Retail,AI-powered customer support,Implemented a GenAI-powered chatbot for customer support using Dialogflow CX and Vertex AI.
+2024,6,"$1,097,513",OPP027764,6/20/2024,Sarah Johnson,TechStart Inc,ML Recommendation Engine,AI/ML,ML,ML,E-commerce,Built ML recommendation system,Developed a machine learning recommendation engine using Vertex AI and BigQuery.

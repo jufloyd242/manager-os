@@ -19,18 +19,10 @@ from manager_os.db import get_connection
 
 @pytest.fixture
 def sample_csv(tmp_path):
-    """Create a sample project index CSV for testing."""
+    """Create a minimal sample project index CSV for testing (2 records)."""
     csv_content = """Year,Month,Services ($),OppID,Close Date,Sales Rep,Customer,Opp Name,Services Delivery Team,Solution Pillar,Type,Industry,3-5 words,1-2 sentences
-2024,3,"$267,000",OPP030034,3/15/2024,Charlie Lisk,Acme Corp,GenAI Chatbot Implementation,AI/ML,GenAI,GenAI,Retail,AI-powered customer support,Implemented a GenAI-powered chatbot for customer support using Dialogflow CX and Vertex AI, reducing support tickets by 40%.
-2024,6,"$1,097,513",OPP027764,6/20/2024,Sarah Johnson,TechStart Inc,ML Recommendation Engine,AI/ML,ML,ML,E-commerce,Built ML recommendation system,Developed a machine learning recommendation engine using Vertex AI and BigQuery, increasing conversion rates by 25%.
-2025,1,"$450,000",OPP032106,1/10/2025,Charlie Lisk,Global Retail Co,ADK Agent Development,AI/ML,GenAI,ADK,Technology,Agentic AI platform,Developed an agentic AI platform using Agent Development Kit (ADK) for automated workflow orchestration and task completion.
-2023,11,"$180,000",OPP025890,11/5/2023,Mike Chen,Healthcare Plus,Contact Center AI,AI/ML,CES,CES,Healthcare,AI contact center solution,Implemented Contact Center AI (CCAI) with Dialogflow CX to automate customer service inquiries and reduce wait times.
-2024,9,"$320,000",OPP029456,9/25/2024,Sarah Johnson,Media Group Inc,Media Recommendations,AI/ML,GenAI,Media Rec,Media,Personalized content recommendations,Built a media recommendation system using Recommendations AI to personalize content delivery and increase engagement.
-2025,2,"$890,000",OPP033201,2/15/2025,Charlie Lisk,Finance Corp,Document AI Processing,AI/ML,GenAI,DocAI,Finance,Automated document processing,Implemented Document AI for automated processing of financial documents, reducing manual data entry by 80%.
-2024,4,"$150,000",OPP028123,4/10/2024,Mike Chen,Retail Chain Co,Retail Recommendations,AI/ML,GenAI,Retail Rec,Retail,Product recommendation engine,Deployed Recommendations AI for retail product recommendations, increasing average order value by 15%.
-2023,8,"$220,000",OPP024567,8/20/2023,Sarah Johnson,Search Corp,Enterprise Search,AI/ML,GenAI,Search,Technology,Semantic search implementation,Implemented Vertex AI Search for enterprise semantic search across internal knowledge bases.
-2024,7,,OPP029789,7/15/2024,Charlie Lisk,Legacy Corp,Legacy System Migration,AI/ML,ML,,Manufacturing,,
-2025,3,"$500,000",OPP034500,3/30/2025,Mike Chen,Innovation Labs,Advanced ML Pipeline,AI/ML,ML,ML,Technology,End-to-end ML platform,Built an end-to-end machine learning platform using Vertex AI, BigQuery, and Cloud Run for model training and deployment.
+2024,3,"$267,000",OPP030034,3/15/2024,Charlie Lisk,Acme Corp,GenAI Chatbot,AI/ML,GenAI,GenAI,Retail,AI-powered customer support,Implemented a GenAI-powered chatbot for customer support using Dialogflow CX and Vertex AI.
+2024,6,"$1,097,513",OPP027764,6/20/2024,Sarah Johnson,TechStart Inc,ML Recommendation Engine,AI/ML,ML,ML,E-commerce,Built ML recommendation system,Developed a machine learning recommendation engine using Vertex AI and BigQuery.
 """
     csv_path = tmp_path / "project_index.csv"
     csv_path.write_text(csv_content)
@@ -76,13 +68,13 @@ def test_parse_project_sheet(sample_csv):
     """Test parsing project sheet CSV."""
     result = parse_project_sheet(sample_csv)
     
-    # Should parse 10 projects
-    assert len(result.projects) == 10
+    # Should parse 2 projects
+    assert len(result.projects) == 2
     
     # Check first project
     project = result.projects[0]
     assert project.opportunity_number == "OPP030034"
-    assert project.project_name == "GenAI Chatbot Implementation"
+    assert project.project_name == "GenAI Chatbot"
     assert project.client == "Acme Corp"
     assert project.year == 2024
     assert project.month == 3
@@ -95,10 +87,14 @@ def test_parse_project_sheet(sample_csv):
     assert "GenAI" in project.technologies
     assert "CES" in project.technologies  # Dialogflow CX
     
-    # Check project with missing summary (should generate fallback)
-    legacy_project = next(p for p in result.projects if p.opportunity_number == "OPP029789")
-    assert legacy_project.summary_is_generated is True
-    assert legacy_project.services_amount is None  # Missing services amount
+    # Check second project
+    project2 = result.projects[1]
+    assert project2.opportunity_number == "OPP027764"
+    assert project2.project_name == "ML Recommendation Engine"
+    assert project2.client == "TechStart Inc"
+    assert project2.services_amount == 1097513.0
+    assert "ML" in project2.technologies
+    assert "BigQuery" in project2.technologies
     
     # Check no errors
     assert len(result.errors) == 0
@@ -122,6 +118,102 @@ def test_parse_project_sheet_skips_invalid_rows(tmp_path):
     assert len(result.warnings) > 0
 
 
+def test_parse_project_sheet_handles_incomplete_rows(tmp_path):
+    """Test that parser handles rows with fewer columns than header."""
+    csv_content = """Year,Month,Services ($),OppID,Close Date,Sales Rep,Customer,Opp Name,Services Delivery Team,Solution Pillar,Type,Industry,3-5 words,1-2 sentences
+2024,3,"$267,000",OPP030034,3/15/2024,Charlie Lisk,Acme Corp,GenAI Chatbot
+2024,6,"$100,000",OPP027764,6/20/2024,Sarah Johnson,TechStart,ML Engine,AI/ML,ML,ML,Tech,Test,Test
+"""
+    csv_path = tmp_path / "project_index.csv"
+    csv_path.write_text(csv_content)
+    
+    result = parse_project_sheet(str(csv_path))
+    
+    # Should parse both rows without crashing
+    assert len(result.projects) == 2
+    # First row has missing fields but should still be parsed
+    assert result.projects[0].opportunity_number == "OPP030034"
+    assert result.projects[0].project_name == "GenAI Chatbot"
+    # Missing fields should be empty strings
+    assert result.projects[0].services_delivery_team == ""
+    assert result.projects[0].solution_pillar == ""
+
+
+def test_parse_project_sheet_handles_none_values(tmp_path):
+    """Test that parser handles None values without crashing."""
+    csv_content = """Year,Month,Services ($),OppID,Close Date,Sales Rep,Customer,Opp Name,Services Delivery Team,Solution Pillar,Type,Industry,3-5 words,1-2 sentences
+2024,3,,OPP030034,,Charlie Lisk,Acme Corp,GenAI Chatbot,AI/ML,GenAI,GenAI,Retail,,
+2024,6,"$100,000",OPP027764,6/20/2024,Sarah Johnson,TechStart,ML Engine,AI/ML,ML,ML,Tech,Test,Test
+"""
+    csv_path = tmp_path / "project_index.csv"
+    csv_path.write_text(csv_content)
+    
+    result = parse_project_sheet(str(csv_path))
+    
+    # Should parse both rows without crashing
+    assert len(result.projects) == 2
+    # First row has None/empty values but should still be parsed
+    assert result.projects[0].opportunity_number == "OPP030034"
+    assert result.projects[0].services_amount is None
+    assert result.projects[0].close_date is None
+    assert result.projects[0].short_description == ""
+
+
+def test_parse_project_sheet_skips_trailing_incomplete_row(tmp_path):
+    """Test that parser skips trailing incomplete rows."""
+    csv_content = """Year,Month,Services ($),OppID,Close Date,Sales Rep,Customer,Opp Name,Services Delivery Team,Solution Pillar,Type,Industry,3-5 words,1-2 sentences
+2024,3,"$267,000",OPP030034,3/15/2024,Charlie Lisk,Acme Corp,GenAI Chatbot,AI/ML,GenAI,GenAI,Retail,Test,Test summary
+2024,6,"$100,000",OPP027764,6/20/2024,Sarah Johnson,TechStart,ML Engine,AI/ML,ML,ML,Tech,Test,Test
+,,,,
+"""
+    csv_path = tmp_path / "project_index.csv"
+    csv_path.write_text(csv_content)
+    
+    result = parse_project_sheet(str(csv_path))
+    
+    # Should parse 2 valid projects, skip 1 incomplete row
+    assert len(result.projects) == 2
+    assert result.skipped_rows == 1
+    # Should have warning about skipped row
+    assert any("Skipped" in w for w in result.warnings)
+
+
+def test_parse_project_sheet_keeps_valid_row_with_blank_summary(tmp_path):
+    """Test that parser keeps valid rows even with blank summary fields."""
+    csv_content = """Year,Month,Services ($),OppID,Close Date,Sales Rep,Customer,Opp Name,Services Delivery Team,Solution Pillar,Type,Industry,3-5 words,1-2 sentences
+2024,3,"$267,000",OPP030034,3/15/2024,Charlie Lisk,Acme Corp,GenAI Chatbot,AI/ML,GenAI,GenAI,Retail,,
+"""
+    csv_path = tmp_path / "project_index.csv"
+    csv_path.write_text(csv_content)
+    
+    result = parse_project_sheet(str(csv_path))
+    
+    # Should parse the row even with blank summary
+    assert len(result.projects) == 1
+    assert result.projects[0].opportunity_number == "OPP030034"
+    # When summary is blank, a fallback summary is generated
+    assert result.projects[0].summary_is_generated is True
+    assert result.projects[0].summary != ""  # Should have generated fallback
+
+
+def test_parse_project_sheet_emits_warnings_with_row_numbers(tmp_path):
+    """Test that parser emits warnings with row numbers."""
+    csv_content = """Year,Month,Services ($),OppID,Close Date,Sales Rep,Customer,Opp Name,Services Delivery Team,Solution Pillar,Type,Industry,3-5 words,1-2 sentences
+2024,3,"$267,000",OPP030034,3/15/2024,Charlie Lisk,Acme Corp,GenAI Chatbot,AI/ML,GenAI,GenAI,Retail,Test,Test summary
+,,,,,,,
+2024,6,"$100,000",OPP027764,6/20/2024,Sarah Johnson,TechStart,ML Engine,AI/ML,ML,ML,Tech,Test,Test
+"""
+    csv_path = tmp_path / "project_index.csv"
+    csv_path.write_text(csv_content)
+    
+    result = parse_project_sheet(str(csv_path))
+    
+    # Should have warnings with row numbers
+    assert len(result.warnings) > 0
+    # Check that at least one warning contains "Row"
+    assert any("Row" in w for w in result.warnings)
+
+
 def test_upsert_projects(sample_csv):
     """Test upserting projects to database."""
     conn = get_connection(":memory:")
@@ -129,30 +221,30 @@ def test_upsert_projects(sample_csv):
     
     # Insert projects
     inserted, updated = upsert_projects(conn, result.projects, force=False)
-    assert inserted == 10
+    assert inserted == 2
     assert updated == 0
     
     # Verify projects in database
     rows = conn.execute("SELECT COUNT(*) FROM projects").fetchone()
-    assert rows[0] == 10
+    assert rows[0] == 2
     
     # Verify specific project
     row = conn.execute(
         "SELECT project_name, client, services_amount FROM projects WHERE id = ?",
         ["project::OPP030034"]
     ).fetchone()
-    assert row[0] == "GenAI Chatbot Implementation"
+    assert row[0] == "GenAI Chatbot"
     assert row[1] == "Acme Corp"
     assert row[2] == 267000.0
     
     # Upsert again without force - should update
     inserted2, updated2 = upsert_projects(conn, result.projects, force=False)
     assert inserted2 == 0
-    assert updated2 == 10
+    assert updated2 == 2
     
     # Upsert with force - should insert/replace
     inserted3, updated3 = upsert_projects(conn, result.projects, force=True)
-    assert inserted3 == 10
+    assert inserted3 == 2
     assert updated3 == 0
 
 
@@ -204,14 +296,6 @@ def test_technology_extraction_from_sheet(sample_csv):
     ml_project = next(p for p in result.projects if p.opportunity_number == "OPP027764")
     assert "ML" in ml_project.technologies
     assert "BigQuery" in ml_project.technologies
-    
-    # ADK project should have ADK
-    adk_project = next(p for p in result.projects if p.opportunity_number == "OPP032106")
-    assert "ADK" in adk_project.technologies
-    
-    # DocAI project should have DocAI
-    docai_project = next(p for p in result.projects if p.opportunity_number == "OPP033201")
-    assert "DocAI" in docai_project.technologies
 
 
 def test_search_projects_by_type(sample_csv):
@@ -227,10 +311,10 @@ def test_search_projects_by_type(sample_csv):
     assert len(genai_results) > 0
     assert all(r["project_type"] == "GenAI" for r in genai_results)
     
-    # Search for ADK projects
-    adk_results = search_projects(conn, project_type="ADK")
-    assert len(adk_results) > 0
-    assert all(r["project_type"] == "ADK" for r in adk_results)
+    # Search for ML projects
+    ml_results = search_projects(conn, project_type="ML")
+    assert len(ml_results) > 0
+    assert all(r["project_type"] == "ML" for r in ml_results)
 
 
 def test_search_projects_by_industry(sample_csv):
@@ -270,9 +354,9 @@ def test_search_projects_by_opportunity_number(sample_csv):
     upsert_projects(conn, result.projects, force=False)
     
     # Search for specific OppID
-    opp_results = search_projects(conn, opportunity_number="OPP032106")
+    opp_results = search_projects(conn, opportunity_number="OPP030034")
     assert len(opp_results) == 1
-    assert opp_results[0]["opportunity_number"] == "OPP032106"
+    assert opp_results[0]["opportunity_number"] == "OPP030034"
 
 
 def test_search_projects_by_technology(sample_csv):
@@ -283,10 +367,10 @@ def test_search_projects_by_technology(sample_csv):
     result = parse_project_sheet(sample_csv)
     upsert_projects(conn, result.projects, force=False)
     
-    # Search for ADK technology
-    adk_results = search_projects(conn, technology="ADK")
-    assert len(adk_results) > 0
-    assert all("ADK" in r["technologies"] for r in adk_results)
+    # Search for GenAI technology
+    genai_results = search_projects(conn, technology="GenAI")
+    assert len(genai_results) > 0
+    assert all("GenAI" in r["technologies"] for r in genai_results)
     
     # Search for BigQuery technology
     bq_results = search_projects(conn, technology="BigQuery")

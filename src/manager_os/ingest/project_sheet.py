@@ -207,7 +207,7 @@ def record_indexing_run(
     valid_project_count: int,
     skipped_row_count: int,
     warning_count: int,
-    content_hash: str,
+    csv_content_hash: str,
     started_at: datetime,
     finished_at: datetime,
     status: str,
@@ -226,7 +226,7 @@ def record_indexing_run(
         valid_project_count: Number of valid projects parsed
         skipped_row_count: Number of skipped rows
         warning_count: Number of warnings
-        content_hash: Content hash of CSV
+        csv_content_hash: Content hash of CSV
         started_at: Run start time
         finished_at: Run finish time
         status: Run status ("success" or "failed")
@@ -248,7 +248,7 @@ def record_indexing_run(
         [
             run_id, source, sheet_id, gid, source_url, local_csv_path,
             row_count, valid_project_count, skipped_row_count, warning_count,
-            content_hash, started_at.isoformat(), finished_at.isoformat(),
+            csv_content_hash, started_at.isoformat(), finished_at.isoformat(),
             status, error
         ]
     )
@@ -256,8 +256,17 @@ def record_indexing_run(
     return run_id
 
 
-def _parse_currency(value: str) -> float | None:
+def _cell(row: dict, name: str) -> str:
+    """Safely extract a cell value from a row, handling None values."""
+    value = row.get(name, "")
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _parse_currency(value: object) -> float | None:
     """Parse currency string like '$267,000' to float."""
+    value = "" if value is None else str(value).strip()
     if not value:
         return None
     # Remove $ and commas
@@ -268,15 +277,16 @@ def _parse_currency(value: str) -> float | None:
         return None
 
 
-def _parse_date(value: str) -> str | None:
+def _parse_date(value: object) -> str | None:
     """Parse date string like '8/4/2021' to ISO format."""
+    value = "" if value is None else str(value).strip()
     if not value:
         return None
     try:
         # Try common formats
         for fmt in ["%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"]:
             try:
-                dt = datetime.strptime(value.strip(), fmt)
+                dt = datetime.strptime(value, fmt)
                 return dt.strftime("%Y-%m-%d")
             except ValueError:
                 continue
@@ -285,7 +295,7 @@ def _parse_date(value: str) -> str | None:
         return None
 
 
-def _extract_technologies(project_type: str, text_fields: list[str]) -> list[str]:
+def _extract_technologies(project_type: str, text_fields: list[object]) -> list[str]:
     """Extract technology keywords from project type and text fields."""
     technologies = set()
     
@@ -294,7 +304,8 @@ def _extract_technologies(project_type: str, text_fields: list[str]) -> list[str
         technologies.add(project_type)
     
     # Search text fields for technology keywords
-    combined_text = " ".join(text_fields).lower()
+    safe_fields = ["" if v is None else str(v) for v in text_fields]
+    combined_text = " ".join(safe_fields).lower()
     for tech, keywords in TECH_KEYWORDS.items():
         for keyword in keywords:
             if keyword.lower() in combined_text:
@@ -338,7 +349,7 @@ def parse_project_sheet(csv_path: str) -> ParseResult:
     
     try:
         with open(csv_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
+            reader = csv.DictReader(f, restval="")
             
             # Validate required columns
             required_columns = {
@@ -358,9 +369,14 @@ def parse_project_sheet(csv_path: str) -> ParseResult:
                 result.warnings.append(f"Missing columns: {', '.join(sorted(missing_columns))}")
             
             for row_idx, row in enumerate(reader, start=2):  # Start at 2 (1 is header)
-                opp_id = row.get("OppID", "").strip()
-                customer = row.get("Customer", "").strip()
-                opp_name = row.get("Opp Name", "").strip()
+                # Check for extra fields beyond expected headers
+                if None in row:
+                    result.warnings.append(f"Row {row_idx}: Ignored extra cells beyond expected headers")
+                
+                # Safely extract all fields using _cell helper
+                opp_id = _cell(row, "OppID")
+                customer = _cell(row, "Customer")
+                opp_name = _cell(row, "Opp Name")
                 
                 # Skip rows missing all three key fields
                 if not opp_id and not customer and not opp_name:
@@ -372,18 +388,18 @@ def parse_project_sheet(csv_path: str) -> ParseResult:
                 if opp_id and (not customer or not opp_name):
                     result.warnings.append(f"Row {row_idx}: OppID {opp_id} missing Customer or Opp Name")
                 
-                # Parse fields
-                year_str = row.get("Year", "").strip()
-                month_str = row.get("Month", "").strip()
-                services_str = row.get("Services ($)", "").strip()
-                close_date_str = row.get("Close Date", "").strip()
-                sales_rep = row.get("Sales Rep", "").strip()
-                delivery_team = row.get("Services Delivery Team", "").strip()
-                solution_pillar = row.get("Solution Pillar", "").strip()
-                project_type = row.get("Type", "").strip()
-                industry = row.get("Industry", "").strip()
-                short_desc = row.get("3-5 words", "").strip()
-                summary = row.get("1-2 sentences", "").strip()
+                # Parse fields using _cell helper
+                year_str = _cell(row, "Year")
+                month_str = _cell(row, "Month")
+                services_str = _cell(row, "Services ($)")
+                close_date_str = _cell(row, "Close Date")
+                sales_rep = _cell(row, "Sales Rep")
+                delivery_team = _cell(row, "Services Delivery Team")
+                solution_pillar = _cell(row, "Solution Pillar")
+                project_type = _cell(row, "Type")
+                industry = _cell(row, "Industry")
+                short_desc = _cell(row, "3-5 words")
+                summary = _cell(row, "1-2 sentences")
                 
                 # Parse numeric fields
                 year = None
