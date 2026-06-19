@@ -1018,6 +1018,7 @@ def daily(
     skip_brief: bool = typer.Option(False, "--skip-brief", help="Skip brief generation."),
     skip_extract: bool = typer.Option(False, "--skip-extract", help="Skip signal extraction."),
     skip_ingest: bool = typer.Option(False, "--skip-ingest", help="Skip all ingest steps."),
+    skip_project_index: bool = typer.Option(False, "--skip-project-index", help="Skip project index (alias for --skip-ingest)."),
     force_ingest: bool = typer.Option(False, "--force-ingest", help="Re-ingest files even if content hash unchanged."),
     skip_forecast_fetch: bool = typer.Option(False, "--skip-forecast-fetch", help="Skip fetching forecast from Google Sheet."),
     forecast_force: bool = typer.Option(False, "--forecast-force", help="Force overwrite local forecast CSV during fetch."),
@@ -1045,6 +1046,10 @@ def daily(
     run_date = _date.fromisoformat(target_date) if target_date else _date.today()
     settings = get_settings()
     extract_mode = _resolve_daily_extract_mode(rules_only, llm_only)
+
+    # --skip-project-index is an alias for --skip-ingest
+    if skip_project_index:
+        skip_ingest = True
 
     # Track warnings across phases for the closing summary
     extraction_warnings: list[str] = []
@@ -5330,6 +5335,7 @@ def workspace_fetch_deal_docs(
     target_date: Optional[str] = typer.Option(None, "--date", help="Date label for snapshot (YYYY-MM-DD)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without contacting Google Drive."),
     deal_id: Optional[str] = typer.Option(None, "--deal-id", help="Fetch docs for a single deal ID."),
+    opportunity_number: Optional[str] = typer.Option(None, "--opportunity-number", help="Opportunity number (alias for --deal-id)."),
     limit: Optional[int] = typer.Option(None, "--limit", help="Max deals to fetch docs for."),
     timeout: int = typer.Option(60, "--timeout", help="Timeout in seconds per Gemini CLI call."),
     print_prompt: bool = typer.Option(False, "--print-prompt", help="Print the prompt that would be sent."),
@@ -5352,13 +5358,16 @@ def workspace_fetch_deal_docs(
     settings = get_settings()
     run_date = date.fromisoformat(target_date) if target_date else date.today()
 
+    # --opportunity-number is an alias for --deal-id
+    effective_deal_id = opportunity_number or deal_id
+
     console.print(Panel.fit(
         "[bold]Manager OS — Workspace: Fetch Deal Docs[/bold]",
         box=rich_box.ROUNDED,
         border_style="cyan",
     ))
     console.print(f"  [dim]Date:[/dim]     {run_date}")
-    console.print(f"  [dim]Deal ID:[/dim]  {deal_id or '(all active deals)'}")
+    console.print(f"  [dim]Deal ID:[/dim]  {effective_deal_id or '(all active deals)'}")
     console.print(f"  [dim]Limit:[/dim]    {limit or 'none'}")
     console.print(f"  [dim]Timeout:[/dim]  {timeout}s")
     if dry_run:
@@ -5368,7 +5377,7 @@ def workspace_fetch_deal_docs(
     if print_prompt:
         # Print a sample prompt for inspection
         sample_prompt = build_drive_search_prompt(
-            deal_id=deal_id or "<OPP-NUMBER>",
+            deal_id=effective_deal_id or "<OPP-NUMBER>",
             deal_name="<Deal Name>",
             account="<Account>",
         )
@@ -5385,7 +5394,7 @@ def workspace_fetch_deal_docs(
         conn,
         snapshot_dir=snapshot_dir,
         target_date=run_date,
-        deal_id_filter=deal_id,
+        deal_id_filter=effective_deal_id,
         limit=limit,
         bin_path=settings.gemini_cli_bin,
         model=settings.gemini_cli_model,

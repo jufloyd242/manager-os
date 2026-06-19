@@ -743,9 +743,12 @@ with tabs[4]:
         st.session_state["project_search_results"] = results
     
     # Display results
+    search_performed = "project_search_results" in st.session_state
     results = st.session_state.get("project_search_results", [])
     
-    if not results:
+    if not search_performed:
+        st.info("🔍 Set search criteria above, then click **Search** to find projects.")
+    elif not results:
         st.info("No projects found. Try adjusting your search criteria or run `manager-os index-projects` to populate the index.")
     else:
         st.success(f"Found {len(results)} project(s)")
