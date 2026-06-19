@@ -249,7 +249,7 @@ class TestDemoResetSuccess:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def _demo_run(self, tmp_path_factory: pytest.TempPathFactory) -> None:
+    def _demo_run(self, request, tmp_path_factory: pytest.TempPathFactory) -> None:
         """Run demo-reset once so all tests in this class can inspect results."""
         tmp = tmp_path_factory.mktemp("demo_reset_success")
         runner = CliRunner()
@@ -258,7 +258,7 @@ class TestDemoResetSuccess:
             ["demo-reset", "--date", TARGET_DATE],
             env=_env(tmp),
         )
-        self.__class__._result = result
+        request.cls._result = result
 
     # ── Exit code ────────────────────────────────────────────────────────────
 
