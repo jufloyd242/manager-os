@@ -890,8 +890,8 @@ with tabs[6]:
                 st.caption("Attendees: " + ", ".join(chosen["attendees"]))
 
         with col2:
-            use_llm = st.checkbox("🤖 Enrich with LLM", value=False,
-                                  help="Requires OPENAI_API_KEY in your environment")
+            use_llm = st.checkbox("🤖 Enrich with Gemini CLI", value=False,
+                                  help="Requires MANAGER_OS_GEMINI_CLI_BIN env var. Optional, bounded context, 60s timeout.")
             gen_btn = st.button("🔄 Generate / Refresh Prep", type="primary")
 
         if gen_btn:
