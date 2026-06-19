@@ -162,8 +162,8 @@ class TestForecastAllocation:
         result = get_people_allocation_for_week(mem_conn, controlled_date)
         assert len(result) == 1
         assert result[0]["allocation_pct"] == 80.0
-        assert "Project X" in result[0]["projects"]
-        assert "Project Y" in result[0]["projects"]
+        assert "Acme / Project X" in result[0]["projects"]
+        assert "Acme / Project Y" in result[0]["projects"]
 
 
 # ===========================================================================
