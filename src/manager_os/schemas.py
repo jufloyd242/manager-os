@@ -29,7 +29,7 @@ def _today() -> date:
 # ---------------------------------------------------------------------------
 
 SeverityType = Literal["critical", "high", "medium", "low"]
-SignalStatusType = Literal["open", "acknowledged", "resolved", "dismissed"]
+SignalStatusType = Literal["open", "acknowledged", "resolved", "dismissed", "noisy", "stale", "wrong", "needs_context", "snoozed"]
 ActionItemStatusType = Literal[
     "open", "completed", "stale", "dismissed", "snoozed", "not_mine", "done"
 ]

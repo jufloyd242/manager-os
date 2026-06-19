@@ -105,7 +105,7 @@ with st.sidebar:
 # Tabs
 # ------------------------------------------------------------------
 
-tabs = st.tabs(["Today", "People", "Clients", "Deals", "Projects", "Forecast", "Meeting Prep"])
+tabs = st.tabs(["Today", "People", "Clients", "Deals", "Projects", "Forecast", "Meeting Prep", "Feedback Review"])
 
 # ------------------------------------------------------------------
 # Tab 1 — Today
@@ -123,7 +123,8 @@ with tabs[0]:
 
     @st.cache_data(ttl=300)
     def _today_signals(d, sev):
-        return get_today_signals(conn, target_date=d, min_severity=sev)
+        return get_today_signals(conn, target_date=d, min_severity=sev,
+                                 include_feedback_hidden=True)
 
     @st.cache_data(ttl=300)
     def _action_items(show_stale: bool = False, show_completed: bool = False):
@@ -142,7 +143,14 @@ with tabs[0]:
     _show_stale = st.session_state.get("ai_show_stale", False)
     _show_completed = st.session_state.get("ai_show_completed", False)
 
+    # Feedback visibility toggle
+    _show_feedback_hidden = st.session_state.get("show_feedback_hidden", False)
+
     signals = _today_signals(selected_date, min_severity)
+    # Apply feedback hidden filter
+    if not _show_feedback_hidden:
+        from manager_os.build.feedback_policy import HIDDEN_STATUSES
+        signals = [s for s in signals if s.status not in HIDDEN_STATUSES]
     action_items = _action_items(show_stale=_show_stale, show_completed=_show_completed)
     counts = _signal_counts()
 
@@ -160,6 +168,31 @@ with tabs[0]:
     if not signals:
         st.success("No open signals at this severity level. 🎉")
     else:
+        # Show hidden toggle
+        _toggle_cols = st.columns([3, 1])
+        with _toggle_cols[1]:
+            if st.checkbox("Show hidden feedback items", key="show_feedback_hidden"):
+                st.session_state["show_feedback_hidden"] = True
+            else:
+                st.session_state["show_feedback_hidden"] = False
+
+        # Feedback badge mapping
+        _FB_BADGE = {
+            "useful": "✅ useful",
+            "noisy": "🔇 noisy",
+            "stale": "🕰️ stale",
+            "wrong": "❌ wrong",
+            "missing-context": "🔍 needs context",
+        }
+        _STATUS_BADGE = {
+            "noisy": "🔇 noisy",
+            "stale": "🕰️ stale",
+            "wrong": "❌ wrong",
+            "needs_context": "🔍 needs context",
+            "acknowledged": "✓ acknowledged",
+            "dismissed": "✕ dismissed",
+        }
+
         # Group signals by type
         _SEVERITY_BADGE = {
             "critical": "🔴 CRITICAL",
@@ -203,6 +236,10 @@ with tabs[0]:
                 with st.expander(f"{badge} **{s.entity_name}** — {s.summary}", expanded=(s.severity == "critical")):
                     if s.why_it_matters:
                         st.markdown(f"*{s.why_it_matters}*")
+                    # Show feedback/status badge if applicable
+                    _status_badge = _STATUS_BADGE.get(s.status, "")
+                    if _status_badge:
+                        st.caption(f"Feedback status: {_status_badge}")
                     meta_cols = st.columns(4)
                     meta_cols[0].caption(f"Type: `{s.signal_type}`")
                     meta_cols[1].caption(f"Source: `{s.source}`")
@@ -232,12 +269,23 @@ with tabs[0]:
                                 _rating = fb_rating
 
                                 def _do_fb(c, *, _bid=_brief_id, _r=_rating,
-                                           _sp=_s_source, _en=_s_entity, _st=_s_type):
+                                           _sp=_s_source, _en=_s_entity, _st=_s_type,
+                                           _sid=_s_id):
                                     from manager_os.build.feedback import mark as fb_mark
+                                    from manager_os.build.feedback_policy import apply_signal_feedback_effect
                                     fb_mark(c, item_id=_bid, rating=_r,
                                             source_path=_sp,
                                             entity_name=_en,
                                             signal_type=_st)
+                                    apply_signal_feedback_effect(
+                                        c,
+                                        signal_id=_sid,
+                                        item_id=_bid,
+                                        rating=_r,
+                                        source_path=_sp,
+                                        entity_name=_en,
+                                        signal_type=_st,
+                                    )
                                 _with_write(_do_fb)
                             elif label.startswith("✓"):
                                 def _do_ack(c, *, _id=s.id):
@@ -884,4 +932,100 @@ with tabs[6]:
             st.markdown(prep_row[0])
         else:
             st.info("Click 'Generate / Refresh Prep' to build the prep document for this meeting.")
+
+# ------------------------------------------------------------------
+# Tab 8 — Feedback Review
+# ------------------------------------------------------------------
+
+with tabs[7]:
+    from manager_os.build.feedback import list_feedback, get_feedback_summary
+    from manager_os.build.feedback_policy import list_learning_candidates, update_learning_candidate_status
+
+    st.subheader("Feedback Review")
+
+    # Summary metrics
+    summary = get_feedback_summary(conn)
+    _fb_cols = st.columns(6)
+    _fb_cols[0].metric("Total Events", summary["total"])
+    _fb_cols[1].metric("✅ Useful", summary["counts_by_rating"].get("useful", 0))
+    _fb_cols[2].metric("🔇 Noisy", summary["counts_by_rating"].get("noisy", 0))
+    _fb_cols[3].metric("🕰️ Stale", summary["counts_by_rating"].get("stale", 0))
+    _fb_cols[4].metric("❌ Wrong", summary["counts_by_rating"].get("wrong", 0))
+    _fb_cols[5].metric("🔍 Missing Context", summary["counts_by_rating"].get("missing-context", 0))
+
+    st.divider()
+
+    # Recent events
+    st.markdown("### Recent Feedback Events")
+    recent = list_feedback(conn, limit=20)
+    if recent:
+        import pandas as _pd2
+        df_fb = _pd2.DataFrame([{
+            "Item": e["item_id"][:30],
+            "Rating": e["rating"],
+            "Entity": e.get("entity_name", "") or "—",
+            "Source": (e.get("source_path", "") or "")[:40],
+            "Type": e.get("signal_type", "") or "—",
+            "When": str(e.get("created_at", ""))[:19],
+        } for e in recent])
+        st.dataframe(df_fb, use_container_width=True, hide_index=True)
+    else:
+        st.info("No feedback events yet.")
+
+    st.divider()
+
+    # Top patterns
+    _pat_cols = st.columns(2)
+    with _pat_cols[0]:
+        st.markdown("**Top Wrong Source Paths**")
+        for path, n in summary.get("top_wrong_types", []):
+            st.markdown(f"- `{path}` ({n}x)")
+        if not summary.get("top_wrong_types"):
+            st.caption("None")
+
+    with _pat_cols[1]:
+        st.markdown("**Top Noisy Sources**")
+        for path, n in summary.get("top_noisy_sources", []):
+            st.markdown(f"- `{path}` ({n}x)")
+        if not summary.get("top_noisy_sources"):
+            st.caption("None")
+
+    st.divider()
+
+    # Learning candidates
+    st.markdown("### Learning Candidates")
+    candidates = list_learning_candidates(conn, status="open")
+    if candidates:
+        for cand in candidates:
+            with st.expander(
+                f"{'❌' if cand['rating'] == 'wrong' else '🔇' if cand['rating'] == 'noisy' else '🕰️'} "
+                f"**{cand['rating']}** — {cand['pattern_type']} ({cand['event_count']} events)",
+                expanded=False,
+            ):
+                st.caption(f"Pattern: {cand['pattern_type']}")
+                st.caption(f"Source: {cand.get('source_path', '—')}")
+                st.caption(f"Entity: {cand.get('entity_name', '—')}")
+                st.caption(f"Signal type: {cand.get('signal_type', '—')}")
+                st.markdown(f"**Suggested action:** {cand.get('suggested_action', '—')}")
+
+                import json as _json
+                examples = _json.loads(cand.get("example_item_ids", "[]")) if cand.get("example_item_ids") else []
+                if examples:
+                    st.caption(f"Examples: {', '.join(examples[:5])}")
+
+                _cand_cols = st.columns(3)
+                if _cand_cols[0].button("✅ Accept", key=f"cand_accept_{cand['id']}"):
+                    def _do_accept(c, *, _cid=cand["id"]):
+                        update_learning_candidate_status(c, _cid, "accepted")
+                    _with_write(_do_accept)
+                if _cand_cols[1].button("❌ Reject", key=f"cand_reject_{cand['id']}"):
+                    def _do_reject(c, *, _cid=cand["id"]):
+                        update_learning_candidate_status(c, _cid, "rejected")
+                    _with_write(_do_reject)
+                if _cand_cols[2].button("✓ Implemented", key=f"cand_impl_{cand['id']}"):
+                    def _do_impl(c, *, _cid=cand["id"]):
+                        update_learning_candidate_status(c, _cid, "implemented")
+                    _with_write(_do_impl)
+    else:
+        st.info("No open learning candidates. Click 'Wrong' on signals to generate candidates.")
 

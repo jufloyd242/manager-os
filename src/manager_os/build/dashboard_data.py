@@ -38,12 +38,22 @@ def get_today_signals(
     target_date: date | None = None,
     min_severity: str = "medium",
     statuses: list[str] | None = None,
+    include_feedback_hidden: bool = False,
 ) -> list[Signal]:
-    """Return open signals, filtered by severity threshold."""
+    """Return open signals, filtered by severity threshold.
+
+    By default excludes signals with feedback-hidden statuses
+    (noisy, stale, wrong, dismissed, acknowledged, snoozed).
+    Set include_feedback_hidden=True to show all statuses.
+    """
     if target_date is None:
         target_date = date.today()
     if statuses is None:
-        statuses = ["open"]
+        if include_feedback_hidden:
+            statuses = ["open", "needs_context", "noisy", "stale", "wrong",
+                        "dismissed", "acknowledged", "snoozed"]
+        else:
+            statuses = ["open", "needs_context"]
 
     min_rank = _severity_rank(min_severity)
     status_placeholders = ", ".join("?" * len(statuses))

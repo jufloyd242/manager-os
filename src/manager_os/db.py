@@ -377,6 +377,20 @@ CREATE TABLE IF NOT EXISTS feedback_events (
     created_at   TIMESTAMP NOT NULL,
     created_by   VARCHAR,
     metadata_json JSON
+);
+CREATE TABLE IF NOT EXISTS feedback_learning_candidates (
+    id VARCHAR PRIMARY KEY,
+    pattern_type VARCHAR NOT NULL,
+    source_path VARCHAR,
+    entity_name VARCHAR,
+    signal_type VARCHAR,
+    rating VARCHAR NOT NULL,
+    event_count INTEGER NOT NULL,
+    example_item_ids JSON,
+    suggested_action VARCHAR,
+    status VARCHAR NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP
 )
 """
 
@@ -401,6 +415,7 @@ _ALL_TABLES = [
     "feedback",
     "deal_documents",
     "feedback_events",
+    "feedback_learning_candidates",
 ]
 
 

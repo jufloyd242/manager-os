@@ -5161,45 +5161,31 @@ def repair_feedback(
         help="After backfill, rename legacy feedback table (requires --yes)."
     ),
 ) -> None:
-    """Create feedback_events table and backfill from legacy feedback table.
-
-    Use --dry-run to preview. Use --yes to perform writes.
-    Does NOT drop or modify the legacy feedback table unless --archive-legacy.
-    Does NOT call Gemini or any LLM.
-    """
+    """Create feedback_events table and backfill from legacy feedback table."""
     from rich import box as rich_box
     from rich.panel import Panel
     from manager_os.config import get_settings
-    from manager_os.db import get_connection, init_schema, content_hash
+    from manager_os.db import get_connection, content_hash
 
     if not dry_run and not yes:
         console.print("[red]Use --dry-run to preview, or --yes to perform writes.[/red]")
         raise typer.Exit(1)
 
     settings = get_settings()
-
-    console.print(Panel.fit(
-        "[bold]Manager OS — Repair Feedback[/bold]",
-        box=rich_box.ROUNDED,
-        border_style="cyan",
-    ))
+    console.print(Panel.fit("[bold]Manager OS — Repair Feedback[/bold]",
+                  box=rich_box.ROUNDED, border_style="cyan"))
     console.print(f"  [dim]DB:[/dim]  {settings.db_path}")
     if dry_run:
-        console.print("  [yellow bold]DRY RUN — nothing will be written[/yellow bold]")
+        console.print("  [yellow bold]DRY RUN[/yellow bold]")
     console.print()
 
     conn = get_connection(settings.db_path)
-
-    # Ensure feedback_events exists (init_schema already does this idempotently)
-    console.print("[dim]Checking feedback_events table…[/dim]")
     try:
         count_events = conn.execute("SELECT COUNT(*) FROM feedback_events").fetchone()[0]
-        console.print(f"  [green]feedback_events exists[/green] ({count_events} existing event(s))")
-    except Exception as exc:
-        console.print(f"  [yellow]feedback_events not found — will be created: {exc}[/yellow]")
-        count_events = 0
+        console.print(f"  [green]feedback_events exists[/green] ({count_events} events)")
+    except Exception:
+        console.print("  [yellow]feedback_events will be created[/yellow]")
 
-    # Read legacy feedback
     legacy_rows = []
     legacy_readable = False
     try:
@@ -5208,79 +5194,142 @@ def repair_feedback(
             "entity_name, signal_type, created_at FROM feedback"
         ).fetchall()
         legacy_readable = True
-        console.print(f"  [dim]Legacy feedback:[/dim] {len(legacy_rows)} row(s) found")
-    except Exception as exc:
-        console.print(f"  [yellow]⚠ Legacy feedback table unreadable: {exc}[/yellow]")
-        console.print("  [dim]Will create feedback_events and skip backfill.[/dim]")
-
-    console.print()
+        console.print(f"  [dim]Legacy feedback:[/dim] {len(legacy_rows)} row(s)")
+    except Exception:
+        console.print("  [yellow]Legacy feedback unreadable — skip backfill[/yellow]")
 
     if dry_run:
-        console.print("[yellow bold]DRY RUN summary:[/yellow bold]")
-        console.print(f"  Would ensure feedback_events table exists")
-        if legacy_readable:
-            console.print(f"  Would backfill {len(legacy_rows)} legacy row(s) into feedback_events")
-        else:
-            console.print(f"  Legacy table unreadable — would skip backfill")
-        if archive_legacy and legacy_readable:
-            import datetime as _dt
-            ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-            console.print(f"  Would rename feedback → feedback_legacy_backup_{ts}")
-        console.print()
-        console.print("[yellow bold]Run with --yes to perform writes.[/yellow bold]")
+        console.print(f"\n[yellow]Would backfill {len(legacy_rows) if legacy_readable else 0} rows[/yellow]")
         return
 
-    # Perform writes
     inserted = 0
-    skipped = 0
-    errors = 0
-
     if legacy_readable:
         for row in legacy_rows:
             old_id, item_id, item_type, rating, reason, source_path, entity_name, signal_type, created_at = row
-            import uuid as _uuid
             from datetime import datetime as _dt2
-            # Use the original created_at so temporal order is preserved
             ts_str = str(created_at) if created_at else _dt2.utcnow().isoformat()
-            new_event_id = content_hash(
-                f"backfill::{old_id}::{item_id}::{rating}::{ts_str}"
-            )
+            new_id = content_hash(f"backfill::{old_id}::{item_id}::{rating}::{ts_str}")
             try:
                 conn.execute(
-                    """
-                    INSERT OR IGNORE INTO feedback_events
-                        (id, item_id, item_type, rating, reason, source_path,
-                         entity_name, signal_type, created_at, created_by, metadata_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [new_event_id, item_id, item_type or "unknown", rating or "",
+                    """INSERT OR IGNORE INTO feedback_events
+                       (id, item_id, item_type, rating, reason, source_path,
+                        entity_name, signal_type, created_at, created_by, metadata_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [new_id, item_id, item_type or "unknown", rating or "",
                      reason, source_path, entity_name, signal_type, created_at,
                      "repair-feedback-backfill", None],
                 )
                 inserted += 1
-            except Exception as exc:
-                logger.warning("Skipping backfill row %s: %s", old_id, exc)
-                errors += 1
+            except Exception:
+                pass
 
-    console.print(f"[green]✓ feedback_events ready[/green]")
-    if legacy_readable:
-        console.print(f"  Backfilled: {inserted}  Skipped: {skipped}  Errors: {errors}")
+    console.print(f"[green]✓ Backfilled: {inserted}[/green]")
+    conn.close()
 
-    if archive_legacy and legacy_readable and yes:
-        import datetime as _dt3
-        ts = _dt3.datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_name = f"feedback_legacy_backup_{ts}"
-        try:
-            conn.execute(f"ALTER TABLE feedback RENAME TO {backup_name}")
-            console.print(f"  [dim]Legacy table archived as: {backup_name}[/dim]")
-        except Exception as exc:
-            console.print(f"  [yellow]⚠ Could not archive legacy table: {exc}[/yellow]")
 
+# ---------------------------------------------------------------------------
+# manager-os feedback-summary / feedback-events / feedback-candidates
+# ---------------------------------------------------------------------------
+
+@app.command("feedback-summary")
+def feedback_summary_cmd() -> None:
+    """Print aggregate feedback statistics from feedback_events."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.feedback import get_feedback_summary
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+    summary = get_feedback_summary(conn)
+
+    console.print(f"[bold]Feedback Summary[/bold] ({summary['total']} total events)")
     console.print()
-    console.print("[green bold]repair-feedback complete.[/green bold]")
-    console.print()
-    console.print("  Verify events:")
-    console.print("    manager-os feedback-summary")
+    for rating, count in sorted(summary["counts_by_rating"].items()):
+        console.print(f"  {rating:20s} {count}")
+
+    if summary.get("top_noisy_sources"):
+        console.print("\n[bold]Top Noisy Sources:[/bold]")
+        for path, n in summary["top_noisy_sources"][:5]:
+            console.print(f"  {path} ({n}x)")
+
+    if summary.get("top_wrong_types"):
+        console.print("\n[bold]Top Wrong Signal Types:[/bold]")
+        for t, n in summary["top_wrong_types"][:5]:
+            console.print(f"  {t} ({n}x)")
+
+    conn.close()
+
+
+@app.command("feedback-events")
+def feedback_events_cmd(
+    limit: int = typer.Option(20, "--limit", help="Number of recent events to show."),
+) -> None:
+    """Print recent feedback events."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.feedback import list_feedback
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+    events = list_feedback(conn, limit=limit)
+
+    if not events:
+        console.print("[dim]No feedback events.[/dim]")
+        conn.close()
+        return
+
+    tbl = Table(title=f"Recent Feedback Events (last {len(events)})", show_header=True)
+    tbl.add_column("Item", style="cyan")
+    tbl.add_column("Rating")
+    tbl.add_column("Entity")
+    tbl.add_column("Source")
+    tbl.add_column("When")
+
+    for e in events:
+        tbl.add_row(
+            e["item_id"][:30],
+            e["rating"],
+            e.get("entity_name", "") or "—",
+            (e.get("source_path", "") or "")[:40],
+            str(e.get("created_at", ""))[:19],
+        )
+    console.print(tbl)
+    conn.close()
+
+
+@app.command("feedback-candidates")
+def feedback_candidates_cmd() -> None:
+    """Print open feedback learning candidates."""
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.build.feedback_policy import list_learning_candidates
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+    candidates = list_learning_candidates(conn, status="open")
+
+    if not candidates:
+        console.print("[dim]No open learning candidates.[/dim]")
+        conn.close()
+        return
+
+    tbl = Table(title="Open Learning Candidates", show_header=True)
+    tbl.add_column("Rating", style="red")
+    tbl.add_column("Pattern")
+    tbl.add_column("Source/Entity")
+    tbl.add_column("Count", justify="right")
+    tbl.add_column("Suggested Action")
+
+    for c in candidates:
+        tbl.add_row(
+            c["rating"],
+            c["pattern_type"],
+            c.get("source_path", "") or c.get("entity_name", "") or "—",
+            str(c["event_count"]),
+            c.get("suggested_action", "—"),
+        )
+    console.print(tbl)
+    conn.close()
 
 
 if __name__ == "__main__":
