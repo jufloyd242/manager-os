@@ -1668,6 +1668,88 @@ def meeting_prep(
 
 
 # ---------------------------------------------------------------------------
+# manager-os meeting-prep-preview
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="meeting-prep-preview")
+def meeting_prep_preview(
+    preview_date: Optional[str] = typer.Option(None, "--date"),
+    meeting_id: Optional[str] = typer.Option(None, "--meeting-id", help="Meeting ID to preview"),
+    no_llm: bool = typer.Option(True, "--no-llm", help="Skip LLM enrichment (default)"),
+    llm: bool = typer.Option(False, "--llm", help="Enable LLM enrichment (requires Gemini CLI)"),
+    print_context: bool = typer.Option(False, "--print-context", help="Print scored context candidates"),
+) -> None:
+    """Preview meeting prep context scoring without generating full prep."""
+    from manager_os.config import get_settings, load_clients, load_deal_aliases, load_people
+    from manager_os.db import get_connection
+    from manager_os.extract.entities import EntityResolver
+    from manager_os.extract.meeting_prep import get_relevant_meeting_context
+    from manager_os.schemas import MeetingRecord
+    import json
+
+    settings = get_settings()
+    target_date = date.fromisoformat(preview_date) if preview_date else date.today()
+    conn = get_connection(settings.db_path)
+
+    try:
+        resolver = EntityResolver(load_people(settings), load_clients(settings), load_deal_aliases(settings))
+    except Exception:
+        resolver = None
+
+    # Fetch meeting
+    if meeting_id:
+        row = conn.execute(
+            "SELECT id, start_time, title, attendees, linked_entities, source, external_id, updated_at "
+            "FROM meetings WHERE id = ?",
+            [meeting_id],
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT id, start_time, title, attendees, linked_entities, source, external_id, updated_at "
+            "FROM meetings WHERE meeting_date = ? ORDER BY start_time NULLS LAST LIMIT 1",
+            [target_date],
+        ).fetchone()
+
+    if not row:
+        console.print(f"[yellow]No meeting found.[/yellow]")
+        raise typer.Exit(0)
+
+    mtg = MeetingRecord(
+        id=row[0], meeting_date=target_date, start_time=row[1] or "",
+        title=row[2],
+        attendees=json.loads(row[3]) if row[3] else [],
+        linked_entities=json.loads(row[4]) if row[4] else [],
+        source=row[5] or "", external_id=row[6] or "",
+    )
+
+    console.print(f"[bold]Meeting:[/bold] {mtg.title}")
+    console.print(f"[bold]Date:[/bold] {mtg.meeting_date}")
+    console.print(f"[bold]Attendees:[/bold] {', '.join(mtg.attendees) or 'None'}")
+    console.print(f"[bold]Linked Entities:[/bold] {mtg.linked_entities or 'None'}")
+    console.print()
+
+    # Get scored context
+    candidates = get_relevant_meeting_context(mtg, conn, resolver, limit=10)
+
+    if print_context:
+        console.print("[bold]Scored Context Candidates:[/bold]")
+        for i, c in enumerate(candidates, 1):
+            console.print(f"  {i}. [cyan]{c.title}[/cyan] (score: {c.score:.0f})")
+            console.print(f"     Source: {c.source_type} — {c.source_path or 'N/A'}")
+            console.print(f"     Entity: {c.entity_type}:{c.entity_name}")
+            console.print(f"     Reasons: {', '.join(c.reasons)}")
+            console.print(f"     Excerpt: {c.excerpt[:150]}...")
+            console.print()
+    else:
+        console.print(f"[green]Found {len(candidates)} context candidates.[/green]")
+        console.print("Use --print-context to see details.")
+
+    if llm and not no_llm:
+        console.print("[yellow]LLM enrichment requested but not implemented in preview mode.[/yellow]")
+
+
+# ---------------------------------------------------------------------------
 # manager-os closeout (stub — implemented in Issue #23)
 # ---------------------------------------------------------------------------
 
