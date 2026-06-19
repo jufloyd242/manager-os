@@ -495,6 +495,167 @@ class TestHoursBasedAllocation:
         assert rows[0]["allocation_pct"] == 0.0
 
 
+# ==================================================================
+# Canonical allocation math (People tab accuracy fix)
+# ==================================================================
+
+
+class TestCanonicalAllocationMath:
+    """allocation_pct = total_planned_hours / max(target_hours) * 100.
+
+    These tests pin the canonical rule that People tab and Forecast tab share.
+    """
+
+    def test_one_person_one_row_20_of_40_is_50_pct(self, conn) -> None:
+        today = date.today()
+        _seed_forecast(conn, "Solo Dev", today, alloc=50.0,
+                       fc_type="capacity",
+                       planned_hours=20.0, target_hours=40.0)
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        assert len(rows) == 1
+        assert rows[0]["planned_hours"] == 20.0
+        assert rows[0]["target_hours"] == 40.0
+        assert rows[0]["allocation_pct"] == 50.0
+
+    def test_two_project_rows_sum_planned_not_target(self, conn) -> None:
+        """One person, two project rows: 10 + 10 planned / 40 target = 50%."""
+        today = date.today()
+        _seed_forecast(conn, "Dual Dev", today, alloc=25.0, client="Acme",
+                       fc_type="capacity",
+                       planned_hours=10.0, target_hours=40.0)
+        _seed_forecast(conn, "Dual Dev", today, alloc=25.0, client="Beta",
+                       fc_type="capacity",
+                       planned_hours=10.0, target_hours=40.0)
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        assert len(rows) == 1
+        assert rows[0]["planned_hours"] == 20.0
+        # target must NOT be summed (would be 80) — use MAX
+        assert rows[0]["target_hours"] == 40.0
+        assert rows[0]["allocation_pct"] == 50.0
+        assert len(rows[0]["projects"]) == 2
+
+    def test_alias_rows_canonicalize_and_do_not_double_target(self, conn) -> None:
+        """Alias rows for the same canonical person must merge, not duplicate."""
+        today = date.today()
+        # Two raw names that canonicalize to the same person (no config →
+        # canonicalize returns the name unchanged, so we simulate merging by
+        # using identical raw names which is the duplicate-capacity scenario).
+        _seed_forecast(conn, "Merge Dev", today, alloc=50.0, client="Acme",
+                       fc_type="capacity",
+                       planned_hours=20.0, target_hours=40.0)
+        _seed_forecast(conn, "Merge Dev", today, alloc=50.0, client="Beta",
+                       fc_type="capacity",
+                       planned_hours=20.0, target_hours=40.0)
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        # Must be ONE entry, not two
+        assert len(rows) == 1
+        assert rows[0]["planned_hours"] == 40.0
+        assert rows[0]["target_hours"] == 40.0
+        assert rows[0]["allocation_pct"] == 100.0
+
+    def test_duplicate_capacity_rows_do_not_double_target(self, conn) -> None:
+        """Duplicate capacity rows (same person/week) must not double target."""
+        today = date.today()
+        # Seed two capacity rows for the same person with distinct projects
+        # so the content-hash PK differs.
+        for proj in ("projA", "projB"):
+            row_id = content_hash(f"Cap Dev::{today}::Acme::{proj}")
+            conn.execute(
+                """
+                INSERT INTO staffing_forecast
+                    (id, person_name, week_start, client, project, allocation_pct,
+                     forecast_type, ingested_at, planned_hours, target_hours)
+                VALUES (?, 'Cap Dev', ?, 'Acme', ?, 100.0, 'capacity',
+                        CURRENT_TIMESTAMP, 40.0, 40.0)
+                """,
+                [row_id, today.isoformat(), proj],
+            )
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        assert len(rows) == 1
+        # planned sums to 80, target stays 40 → 200% (overallocated, not 400%)
+        assert rows[0]["planned_hours"] == 80.0
+        assert rows[0]["target_hours"] == 40.0
+        assert rows[0]["allocation_pct"] == 200.0
+        assert rows[0]["warning"] is not None
+
+    def test_legacy_fallback_only_when_planned_target_missing(self, conn) -> None:
+        """Rows with no planned/target hours fall back to SUM(allocation_pct)."""
+        today = date.today()
+        # Legacy normalized row: alloc=80, no planned/target
+        _seed_forecast(conn, "Legacy Dev", today, alloc=80.0,
+                       fc_type="confirmed")
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        assert len(rows) == 1
+        assert rows[0]["allocation_pct"] == 80.0
+        assert rows[0]["planned_hours"] == 0.0
+        assert rows[0]["target_hours"] is None
+
+    def test_hours_present_ignores_stored_allocation_pct(self, conn) -> None:
+        """When planned/target exist, stored allocation_pct is ignored."""
+        today = date.today()
+        # Stored alloc=99 (wrong), but planned/target say 50%
+        _seed_forecast(conn, "Honest Dev", today, alloc=99.0,
+                       fc_type="capacity",
+                       planned_hours=20.0, target_hours=40.0)
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        assert rows[0]["allocation_pct"] == 50.0
+
+    def test_people_and_forecast_helpers_agree(self, conn) -> None:
+        """get_people_rows allocation must equal get_people_allocation_for_week."""
+        today = date.today()
+        _seed_note(conn, "Agree Dev", note_type="1on1")
+        _seed_forecast(conn, "Agree Dev", today, alloc=25.0, client="Acme",
+                       fc_type="capacity",
+                       planned_hours=10.0, target_hours=40.0)
+        _seed_forecast(conn, "Agree Dev", today, alloc=25.0, client="Beta",
+                       fc_type="capacity",
+                       planned_hours=10.0, target_hours=40.0)
+
+        people_rows = get_people_rows(conn, as_of=today)
+        alloc_rows = get_people_allocation_for_week(conn, week_start=today)
+
+        person = next(r for r in people_rows if r.name == "Agree Dev")
+        alloc = next(r for r in alloc_rows if r["person_name"] == "Agree Dev")
+        assert person.allocation_pct == alloc["allocation_pct"] == 50.0
+
+    def test_get_people_rows_accepts_settings_and_canonicalizes(self, conn) -> None:
+        """get_people_rows must accept a settings kwarg without error."""
+        today = date.today()
+        _seed_note(conn, "Settings Dev", note_type="1on1")
+        _seed_forecast(conn, "Settings Dev", today, alloc=60.0,
+                       fc_type="capacity",
+                       planned_hours=24.0, target_hours=40.0)
+        # settings=None must not raise; canonicalization degrades gracefully
+        rows = get_people_rows(conn, as_of=today, settings=None)
+        dev = next(r for r in rows if r.name == "Settings Dev")
+        assert dev.allocation_pct == 60.0
+
+    def test_output_is_json_serializable(self, conn) -> None:
+        """Allocation helper output must be JSON-serializable."""
+        import json
+        today = date.today()
+        _seed_forecast(conn, "Json Dev", today, alloc=50.0,
+                       fc_type="capacity",
+                       planned_hours=20.0, target_hours=40.0)
+        rows = get_people_allocation_for_week(conn, week_start=today)
+        # Must not raise
+        json.dumps(rows)
+
+
+class TestNoExternalCalls:
+    """Allocation helpers must not invoke LLMs, Gemini, or OpenAI."""
+
+    def test_no_llm_imports_in_dashboard_data(self) -> None:
+        import manager_os.build.dashboard_data as mod
+        import inspect
+        src = inspect.getsource(mod)
+        # Guard against accidental LLM coupling
+        assert "openai" not in src.lower()
+        assert "gemini" not in src.lower()
+        assert "import openai" not in src
+
+
+
 class TestPipelineRowsExcluded:
     """Pipeline/candidate demand rows must NOT count as engineer allocation."""
 

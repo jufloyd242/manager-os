@@ -363,13 +363,32 @@ with tabs[0]:
 # ------------------------------------------------------------------
 
 with tabs[1]:
-    from manager_os.build.dashboard_data import get_people_rows, get_signals_for_person
+    from manager_os.build.dashboard_data import (
+        get_people_allocation_for_week,
+        get_people_rows,
+        get_signals_for_person,
+    )
 
     @st.cache_data(ttl=300)
     def _people_rows(d):
-        return get_people_rows(conn, as_of=d)
+        settings = get_settings()
+        return get_people_rows(conn, as_of=d, settings=settings)
+
+    @st.cache_data(ttl=300)
+    def _people_alloc(d):
+        settings = get_settings()
+        from manager_os.build.dashboard_data import _nearest_forecast_week
+        nw = _nearest_forecast_week(conn, d)
+        if nw is None:
+            return None, []
+        return nw, get_people_allocation_for_week(conn, nw, settings=settings)
 
     people_rows = _people_rows(selected_date)
+    nearest_week, people_alloc = _people_alloc(selected_date)
+    people_alloc_by_name = {a["person_name"]: a for a in people_alloc}
+
+    if nearest_week:
+        st.caption(f"Allocation for nearest forecast week: **{nearest_week}**")
 
     if not people_rows:
         st.info("No people data found. Run `manager-os ingest` and `manager-os extract` first.")
@@ -399,11 +418,43 @@ with tabs[1]:
                 sev_flag = f"  {_SEV_BADGE.get(p.highest_severity, '')} {p.open_signal_count} signal(s)"
 
             with st.expander(header + sev_flag, expanded=(p.morale == "red")):
+                # Explainable allocation from canonical helper
+                alloc_detail = people_alloc_by_name.get(p.name)
+                if alloc_detail:
+                    planned_h = alloc_detail["planned_hours"]
+                    target_h = alloc_detail["target_hours"]
+                    pct = alloc_detail["allocation_pct"]
+                    if target_h and target_h > 0:
+                        alloc_str = f"{planned_h:.0f} / {target_h:.0f} hrs — {pct:.0f}%"
+                    else:
+                        alloc_str = f"{planned_h:.0f} hrs — {pct:.0f}%"
+                else:
+                    pct = p.allocation_pct
+                    alloc_str = f"{pct:.0f}%" if pct else "—"
+
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Days since 1:1", p.days_since_1on1 if p.days_since_1on1 is not None else "—")
                 c2.metric("Open signals", p.open_signal_count)
-                c3.metric("Allocation", f"{p.allocation_pct:.0f}%" if p.allocation_pct else "—")
+                c3.metric("Allocation", alloc_str)
                 c4.metric("Morale", p.morale.title())
+
+                # Allocation warnings + contributing projects
+                if alloc_detail:
+                    warn = alloc_detail.get("warning")
+                    if warn:
+                        if "overallocated" in warn or "dangerously" in warn:
+                            st.error(f"⚠️ {warn}")
+                        elif "no capacity" in warn:
+                            st.warning(f"⚠️ {warn}")
+                        else:
+                            st.warning(f"⚠️ {warn}")
+                    projects = alloc_detail.get("projects") or []
+                    if projects:
+                        st.caption("Contributing projects: " + ", ".join(projects))
+                    raw_names = alloc_detail.get("raw_names") or []
+                    alias_names = [n for n in raw_names if n and n != p.name]
+                    if alias_names:
+                        st.caption("Aliases merged: " + ", ".join(alias_names))
 
                 if p.blockers:
                     st.warning(f"🚧 Blockers: {p.blockers}")
@@ -741,7 +792,8 @@ with tabs[5]:
 
     @st.cache_data(ttl=300)
     def _week_alloc(week):
-        return get_people_allocation_for_week(conn, week_start=week)
+        settings = get_settings()
+        return get_people_allocation_for_week(conn, week_start=week, settings=settings)
 
     forecast_weeks = _forecast_weeks(selected_date)
     forecast_rows = _forecast_rows(selected_date)
