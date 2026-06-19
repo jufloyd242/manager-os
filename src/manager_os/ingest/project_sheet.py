@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from manager_os.db import content_hash
+from manager_os.utils import normalize_opp_id
 
 logger = logging.getLogger(__name__)
 
@@ -374,7 +375,7 @@ def parse_project_sheet(csv_path: str) -> ParseResult:
                     result.warnings.append(f"Row {row_idx}: Ignored extra cells beyond expected headers")
                 
                 # Safely extract all fields using _cell helper
-                opp_id = _cell(row, "OppID")
+                opp_id = normalize_opp_id(_cell(row, "OppID"))
                 customer = _cell(row, "Customer")
                 opp_name = _cell(row, "Opp Name")
                 
@@ -479,7 +480,7 @@ def upsert_projects(conn, projects: list[ProjectRecord], force: bool = False) ->
     updated = 0
     
     for project in projects:
-        project_id = f"project::{project.opportunity_number}"
+        project_id = f"project::{normalize_opp_id(project.opportunity_number)}"
         
         if force:
             # Use INSERT OR REPLACE - counts as insert

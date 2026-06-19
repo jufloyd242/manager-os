@@ -601,6 +601,26 @@ with tabs[4]:
     except Exception as e:
         st.warning(f"Could not check project index status: {e}")
     
+    # Project count and stats
+    try:
+        total_projects = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+        projects_with_docs = conn.execute(
+            "SELECT COUNT(DISTINCT project_id) FROM project_documents WHERE project_id IS NOT NULL"
+        ).fetchone()[0]
+        projects_with_summaries = conn.execute(
+            "SELECT COUNT(*) FROM projects WHERE summary IS NOT NULL AND summary != ''"
+        ).fetchone()[0]
+        
+        col_stat1, col_stat2, col_stat3 = st.columns(3)
+        with col_stat1:
+            st.metric("Total Projects", total_projects)
+        with col_stat2:
+            st.metric("With Documents", projects_with_docs)
+        with col_stat3:
+            st.metric("With Summaries", projects_with_summaries)
+    except Exception:
+        pass
+    
     # Search and filter controls
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
@@ -627,11 +647,30 @@ with tabs[4]:
     with col6:
         opp_number_filter = st.text_input("Filter by OppID", placeholder="e.g., OPP032106")
     
+    # More filters
+    col7, col8, col9 = st.columns(3)
+    with col7:
+        client_filter = st.text_input("Filter by client", placeholder="e.g., Acme Corp")
+    with col8:
+        technology_filter = st.text_input("Filter by technology", placeholder="e.g., Gemini, ADK")
+    with col9:
+        has_docs_filter = st.checkbox("Has documents only")
+    
+    col10, col11, col12 = st.columns(3)
+    with col10:
+        generated_summary_only = st.checkbox("Generated summary only")
+    with col11:
+        missing_tech_only = st.checkbox("Missing technologies")
+    with col12:
+        missing_type_only = st.checkbox("Missing project type")
+    
     # Execute search
     if st.button("🔍 Search", type="primary"):
         results = search_projects(
             conn,
             query=search_query,
+            client=client_filter if client_filter else None,
+            technology=technology_filter if technology_filter else None,
             project_type=project_type_filter if project_type_filter else None,
             industry=industry_filter if industry_filter else None,
             sales_rep=sales_rep_filter if sales_rep_filter else None,
@@ -639,6 +678,16 @@ with tabs[4]:
             opportunity_number=opp_number_filter if opp_number_filter else None,
             limit=100
         )
+        
+        # Apply additional filters
+        if has_docs_filter:
+            results = [r for r in results if r.get('related_documents')]
+        if generated_summary_only:
+            results = [r for r in results if r.get('summary_is_generated')]
+        if missing_tech_only:
+            results = [r for r in results if not r.get('technologies')]
+        if missing_type_only:
+            results = [r for r in results if not r.get('project_type')]
         
         st.session_state["project_search_results"] = results
     
