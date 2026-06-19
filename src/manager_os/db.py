@@ -304,46 +304,31 @@ CREATE TABLE IF NOT EXISTS project_documents (
     search_status VARCHAR,
     confidence FLOAT,
     why_matched VARCHAR,
-    error VARCHAR,
-    metadata_json JSON
+    error VARCHAR
 );
-
-CREATE TABLE IF NOT EXISTS project_index_runs (
+CREATE TABLE IF NOT EXISTS projects (
     id VARCHAR PRIMARY KEY,
-    source VARCHAR,
-    sheet_id VARCHAR,
-    gid VARCHAR,
-    source_url VARCHAR,
-    local_csv_path VARCHAR,
-    row_count INTEGER,
-    valid_project_count INTEGER,
-    skipped_row_count INTEGER,
-    warning_count INTEGER,
-    content_hash VARCHAR,
-    started_at TIMESTAMP NOT NULL,
-    finished_at TIMESTAMP,
+    project_name VARCHAR,
+    client VARCHAR,
+    opportunity_number VARCHAR,
+    deal_id VARCHAR,
     status VARCHAR,
-    error VARCHAR,
-    metadata_json JSON
+    start_date DATE,
+    end_date DATE,
+    technologies_json JSON,
+    skills_json JSON,
+    team_members_json JSON,
+    summary VARCHAR,
+    outcome VARCHAR,
+    lessons_learned VARCHAR,
+    risks_json JSON,
+    reusable_artifacts_json JSON,
+    source_urls_json JSON,
+    source_note_ids_json JSON,
+    source_doc_ids_json JSON,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
 );
-
--- Idempotent migrations to add any columns that may be missing on older DBs
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS source_system VARCHAR;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS source_sheet_url VARCHAR;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS source_sheet_gid VARCHAR;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS year INTEGER;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS month INTEGER;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS services_amount FLOAT;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS close_date DATE;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS sales_rep VARCHAR;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS services_delivery_team VARCHAR;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS solution_pillar VARCHAR;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS project_type VARCHAR;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS industry VARCHAR;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS short_description VARCHAR;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS source_row INTEGER;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS summary_is_generated BOOLEAN;
-ALTER TABLE project_documents ADD COLUMN IF NOT EXISTS metadata_json JSON;
 ALTER TABLE action_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;
 ALTER TABLE action_items ADD COLUMN IF NOT EXISTS feedback_rating VARCHAR;
 ALTER TABLE action_items ADD COLUMN IF NOT EXISTS feedback_reason VARCHAR;
@@ -379,7 +364,20 @@ CREATE TABLE IF NOT EXISTS deal_documents (
     error         VARCHAR
 );
 CREATE INDEX IF NOT EXISTS deal_documents_deal_id_idx ON deal_documents (deal_id);
-CREATE INDEX IF NOT EXISTS deal_documents_type_idx ON deal_documents (document_type)
+CREATE INDEX IF NOT EXISTS deal_documents_type_idx ON deal_documents (document_type);
+CREATE TABLE IF NOT EXISTS feedback_events (
+    id           VARCHAR PRIMARY KEY,
+    item_id      VARCHAR NOT NULL,
+    item_type    VARCHAR,
+    rating       VARCHAR NOT NULL,
+    reason       VARCHAR,
+    source_path  VARCHAR,
+    entity_name  VARCHAR,
+    signal_type  VARCHAR,
+    created_at   TIMESTAMP NOT NULL,
+    created_by   VARCHAR,
+    metadata_json JSON
+)
 """
 
 _ALL_TABLES = [
@@ -402,10 +400,7 @@ _ALL_TABLES = [
     "signal_status_log",
     "feedback",
     "deal_documents",
-    # Project index tables (NetSuite Closed-Won Opportunities)
-    "projects",
-    "project_documents",
-    "project_index_runs",
+    "feedback_events",
 ]
 
 

@@ -6,10 +6,9 @@ import logging
 import sys
 from datetime import date, datetime
 from pathlib import Path
+from typing import Callable
 
 import streamlit as st
-
-logger = logging.getLogger(__name__)
 
 # Ensure the src package is importable when run via streamlit
 _SRC = Path(__file__).parent.parent.parent.parent
@@ -18,6 +17,8 @@ if str(_SRC) not in sys.path:
 
 from manager_os.config import get_settings
 from manager_os.db import get_connection
+
+logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
 # Page config
@@ -35,33 +36,42 @@ st.set_page_config(
 # ------------------------------------------------------------------
 
 
-def _connect():
-    """Open a fresh DuckDB connection. Use for reads and writes."""
+@st.cache_resource
+def _get_conn():
     settings = get_settings()
     return get_connection(settings.db_path)
 
 
-def _with_write(fn):
-    """Execute a write function with a fresh connection, then clear cache and rerun."""
-    conn = _connect()
-    try:
-        fn(conn)
-    except Exception as exc:
-        logger.exception("Dashboard write error")
-        st.error(f"Write failed: {exc}")
-        return
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+conn = _get_conn()
 
-    st.cache_data.clear()
+
+def _connect():
+    """Open a fresh DuckDB connection for writes (never cached)."""
+    settings = get_settings()
+    return get_connection(settings.db_path)
+
+
+def _with_write(fn: Callable) -> bool:
+    """Execute *fn(conn)* with a fresh connection.
+
+    Clears cache and reruns on success.
+    Shows a visible error and logs on failure — does NOT rerun after failure.
+
+    Returns True on success, False on failure.
+    """
     try:
-        st.cache_resource.clear()
-    except Exception:
-        pass
-    st.rerun()
+        c = _connect()
+        try:
+            fn(c)
+        finally:
+            c.close()
+        st.cache_data.clear()
+        st.rerun()
+        return True
+    except Exception as exc:
+        logger.error("Dashboard write error: %s", exc, exc_info=True)
+        st.error(f"Write failed: {exc}")
+        return False
 
 # ------------------------------------------------------------------
 # Sidebar
@@ -79,15 +89,11 @@ with st.sidebar:
 
     # Extraction failure badge
     try:
-        _c = _connect()
-        try:
-            fail_count = _c.execute(
-                "SELECT COUNT(*) FROM extraction_failures WHERE status = 'pending_review'"
-            ).fetchone()[0]
-            if fail_count > 0:
-                st.warning(f"⚠️ {fail_count} extraction failure(s)")
-        finally:
-            _c.close()
+        fail_count = conn.execute(
+            "SELECT COUNT(*) FROM extraction_failures WHERE status = 'pending_review'"
+        ).fetchone()[0]
+        if fail_count > 0:
+            st.warning(f"⚠️ {fail_count} extraction failure(s)")
     except Exception:
         pass
 
@@ -117,32 +123,20 @@ with tabs[0]:
 
     @st.cache_data(ttl=300)
     def _today_signals(d, sev):
-        conn = _connect()
-        try:
-            return get_today_signals(conn, target_date=d, min_severity=sev)
-        finally:
-            conn.close()
+        return get_today_signals(conn, target_date=d, min_severity=sev)
 
     @st.cache_data(ttl=300)
     def _action_items(show_stale: bool = False, show_completed: bool = False):
-        conn = _connect()
-        try:
-            statuses = ["open"]
-            if show_stale:
-                statuses += ["stale", "not_mine"]
-            if show_completed:
-                statuses.append("completed")
-            return get_action_items_filtered(conn, statuses=statuses)
-        finally:
-            conn.close()
+        statuses = ["open"]
+        if show_stale:
+            statuses += ["stale", "not_mine"]
+        if show_completed:
+            statuses.append("completed")
+        return get_action_items_filtered(conn, statuses=statuses)
 
     @st.cache_data(ttl=300)
     def _signal_counts():
-        conn = _connect()
-        try:
-            return get_signal_counts(conn)
-        finally:
-            conn.close()
+        return get_signal_counts(conn)
 
     # Action item display filters (sidebar-like inline toggles)
     _show_stale = st.session_state.get("ai_show_stale", False)
@@ -157,14 +151,9 @@ with tabs[0]:
     col1.metric("🔴 Critical", counts.get("critical", 0))
     col2.metric("🟠 High", counts.get("high", 0))
     col3.metric("✅ Open Actions", len(action_items))
-    _c = _connect()
-    try:
-        meetings_today = _c.execute(
-            "SELECT COUNT(*) FROM meetings WHERE meeting_date = ?", [selected_date]
-        ).fetchone()[0]
-    finally:
-        _c.close()
-    col4.metric("📅 Meetings Today", meetings_today)
+    col4.metric("📅 Meetings Today", conn.execute(
+        "SELECT COUNT(*) FROM meetings WHERE meeting_date = ?", [selected_date]
+    ).fetchone()[0])
 
     st.divider()
 
@@ -235,23 +224,29 @@ with tabs[0]:
                         key = f"fb_{s.id}_{col_i}"
                         if fb_cols[col_i].button(label, key=key):
                             if fb_rating:
-                                def _do_fb(c):
+                                _s_id = s.id
+                                _s_source = s.source_path
+                                _s_entity = s.entity_name
+                                _s_type = s.signal_type
+                                _brief_id = brief_id
+                                _rating = fb_rating
+
+                                def _do_fb(c, *, _bid=_brief_id, _r=_rating,
+                                           _sp=_s_source, _en=_s_entity, _st=_s_type):
                                     from manager_os.build.feedback import mark as fb_mark
-                                    fb_mark(c, item_id=brief_id, rating=fb_rating,
-                                            source_path=s.source_path,
-                                            entity_name=s.entity_name,
-                                            signal_type=s.signal_type)
+                                    fb_mark(c, item_id=_bid, rating=_r,
+                                            source_path=_sp,
+                                            entity_name=_en,
+                                            signal_type=_st)
                                 _with_write(_do_fb)
                             elif label.startswith("✓"):
-                                def _do_ack(c):
-                                    update_signal_status(c, s.id, "acknowledged")
+                                def _do_ack(c, *, _id=s.id):
+                                    update_signal_status(c, _id, "acknowledged")
                                 _with_write(_do_ack)
                             else:
-                                def _do_dismiss(c):
-                                    update_signal_status(c, s.id, "dismissed")
+                                def _do_dismiss(c, *, _id=s.id):
+                                    update_signal_status(c, _id, "dismissed")
                                 _with_write(_do_dismiss)
-                            st.cache_data.clear()
-                            st.rerun()
 
     # Action items section
     st.divider()
@@ -294,21 +289,29 @@ with tabs[0]:
                 btn_cols = st.columns(len(_AI_FB_RATINGS) + 1)
                 for col_i, (lbl, new_status, fb_rating) in enumerate(_AI_FB_RATINGS):
                     if btn_cols[col_i].button(lbl, key=f"ai_{ai.id}_{col_i}"):
-                        def _do_update(c):
-                            update_action_item(
-                                c,
-                                ai.id,
-                                status=new_status,
-                                feedback_rating=fb_rating,
-                            )
-                        _with_write(_do_update)
+                        _ai_id = ai.id
+                        _ns = new_status
+                        _fbr = fb_rating
+
+                        def _do_ai(c, *, _id=_ai_id, _s=_ns, _fr=_fbr):
+                            update_action_item(c, _id, status=_s, feedback_rating=_fr)
+                        _with_write(_do_ai)
                 # Snooze button (last column)
                 if btn_cols[len(_AI_FB_RATINGS)].button("💤 Snooze 7d", key=f"ai_snooze_{ai.id}"):
-                    from datetime import timedelta
-                    snooze_to = date.today() + timedelta(days=7)
-                    def _do_snooze(c):
-                        update_action_item(c, ai.id, status="snoozed", snooze_until=snooze_to)
-                    _with_write(_do_snooze)
+                    _ai_id = ai.id
+
+                    def _do_snooze(c, *, _id=_ai_id):
+                        from datetime import timedelta as _td
+                        _with_write(lambda cc: update_action_item(
+                            cc, _id, status="snoozed",
+                            snooze_until=date.today() + _td(days=7)
+                        ))
+                    # Call directly — _with_write handles rerun
+                    def _snooze_fn(c, *, _id=_ai_id):
+                        from datetime import timedelta as _td
+                        update_action_item(c, _id, status="snoozed",
+                                           snooze_until=date.today() + _td(days=7))
+                    _with_write(_snooze_fn)
 
 # ------------------------------------------------------------------
 # Tab 2 — People
@@ -319,11 +322,7 @@ with tabs[1]:
 
     @st.cache_data(ttl=300)
     def _people_rows(d):
-        conn = _connect()
-        try:
-            return get_people_rows(conn, as_of=d)
-        finally:
-            conn.close()
+        return get_people_rows(conn, as_of=d)
 
     people_rows = _people_rows(selected_date)
 
@@ -366,11 +365,7 @@ with tabs[1]:
                 if p.growth_topic:
                     st.caption(f"Growth: {p.growth_topic}")
 
-                _c = _connect()
-                try:
-                    person_signals = get_signals_for_person(_c, p.name)
-                finally:
-                    _c.close()
+                person_signals = get_signals_for_person(conn, p.name)
                 if person_signals:
                     st.markdown("**Active signals:**")
                     for s in person_signals:
@@ -386,11 +381,7 @@ with tabs[2]:
 
     @st.cache_data(ttl=300)
     def _client_rows(d):
-        conn = _connect()
-        try:
-            return get_client_rows(conn, as_of=d)
-        finally:
-            conn.close()
+        return get_client_rows(conn, as_of=d)
 
     client_rows = _client_rows(selected_date)
 
@@ -434,11 +425,7 @@ with tabs[2]:
                     } for d in client_deals])
                     st.dataframe(df_deals, use_container_width=True, hide_index=True)
 
-                _c = _connect()
-                try:
-                    client_sigs = get_signals_for_client(_c, c["name"])
-                finally:
-                    _c.close()
+                client_sigs = get_signals_for_client(conn, c["name"])
                 if client_sigs:
                     st.markdown("**Active signals:**")
                     for s in client_sigs:
@@ -454,11 +441,7 @@ with tabs[3]:
 
     @st.cache_data(ttl=300)
     def _deal_rows(d):
-        conn = _connect()
-        try:
-            return get_deal_rows(conn, as_of=d)
-        finally:
-            conn.close()
+        return get_deal_rows(conn, as_of=d)
 
     deal_rows = _deal_rows(selected_date)
 
@@ -601,22 +584,18 @@ with tabs[4]:
     
     # Execute search
     if st.button("🔍 Search", type="primary"):
-        _c = _connect()
-        try:
-            results = search_projects(
-                _c,
-                query=search_query,
-                project_type=project_type_filter if project_type_filter else None,
-                industry=industry_filter if industry_filter else None,
-                sales_rep=sales_rep_filter if sales_rep_filter else None,
-                year=year_filter,
-                opportunity_number=opp_number_filter if opp_number_filter else None,
-                limit=100
-            )
-            
-            st.session_state["project_search_results"] = results
-        finally:
-            _c.close()
+        results = search_projects(
+            conn,
+            query=search_query,
+            project_type=project_type_filter if project_type_filter else None,
+            industry=industry_filter if industry_filter else None,
+            sales_rep=sales_rep_filter if sales_rep_filter else None,
+            year=year_filter,
+            opportunity_number=opp_number_filter if opp_number_filter else None,
+            limit=100
+        )
+        
+        st.session_state["project_search_results"] = results
     
     # Display results
     results = st.session_state.get("project_search_results", [])
@@ -705,35 +684,19 @@ with tabs[5]:
 
     @st.cache_data(ttl=300)
     def _forecast_weeks(d):
-        conn = _connect()
-        try:
-            return get_forecast_week_list(conn, as_of=d)
-        finally:
-            conn.close()
+        return get_forecast_week_list(conn, as_of=d)
 
     @st.cache_data(ttl=300)
     def _forecast_rows(d):
-        conn = _connect()
-        try:
-            return get_forecast_rows(conn, as_of=d)
-        finally:
-            conn.close()
+        return get_forecast_rows(conn, as_of=d)
 
     @st.cache_data(ttl=300)
     def _forecast_summary(d):
-        conn = _connect()
-        try:
-            return get_forecast_summary(conn, as_of=d)
-        finally:
-            conn.close()
+        return get_forecast_summary(conn, as_of=d)
 
     @st.cache_data(ttl=300)
     def _week_alloc(week):
-        conn = _connect()
-        try:
-            return get_people_allocation_for_week(conn, week_start=week)
-        finally:
-            conn.close()
+        return get_people_allocation_for_week(conn, week_start=week)
 
     forecast_weeks = _forecast_weeks(selected_date)
     forecast_rows = _forecast_rows(selected_date)
@@ -853,11 +816,7 @@ with tabs[6]:
 
     @st.cache_data(ttl=300)
     def _meetings(d):
-        conn = _connect()
-        try:
-            return get_meetings_for_date(conn, target_date=d)
-        finally:
-            conn.close()
+        return get_meetings_for_date(conn, target_date=d)
 
     today_meetings = _meetings(selected_date)
 
@@ -887,7 +846,7 @@ with tabs[6]:
 
         with col2:
             use_llm = st.checkbox("🤖 Enrich with LLM", value=False,
-                                  help="Requires MANAGER_OS_GEMINI_CLI_BIN in your environment")
+                                  help="Requires OPENAI_API_KEY in your environment")
             gen_btn = st.button("🔄 Generate / Refresh Prep", type="primary")
 
         if gen_btn:
@@ -907,27 +866,19 @@ with tabs[6]:
                 # Convert dict → MeetingRecord so generate_meeting_prep gets the
                 # object it expects (linked_entities, attendees, etc. as attributes).
                 meeting_record = meeting_dict_to_record(chosen)
-                _c = _connect()
-                try:
-                    prep = generate_meeting_prep(meeting_record, _c, resolver)
-                    if use_llm:
-                        prep = enrich_meeting_prep_with_llm(prep, _c)
-                finally:
-                    _c.close()
+                prep = generate_meeting_prep(meeting_record, conn, resolver)
+                if use_llm:
+                    prep = enrich_meeting_prep_with_llm(prep, conn)
                 st.cache_data.clear()
                 st.success("Prep generated!" + (" (LLM enriched)" if use_llm else ""))
             except Exception as exc:
                 st.error(f"Error generating prep: {exc}")
 
         # Show stored prep if available
-        _c = _connect()
-        try:
-            prep_row = _c.execute(
-                "SELECT content, generated_at FROM meeting_prep WHERE meeting_id = ?",
-                [chosen["id"]]
-            ).fetchone()
-        finally:
-            _c.close()
+        prep_row = conn.execute(
+            "SELECT content, generated_at FROM meeting_prep WHERE meeting_id = ?",
+            [chosen["id"]]
+        ).fetchone()
         if prep_row:
             st.caption(f"Generated at: {prep_row[1]}")
             st.markdown(prep_row[0])

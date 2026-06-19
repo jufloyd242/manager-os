@@ -3,8 +3,10 @@
 Supports marking any primary brief item (signal, action item, waiting-on,
 deal, decision) as useful / noisy / stale / wrong / missing-context.
 
-Feedback is stored in the local ``feedback`` DuckDB table so it survives
-re-runs.  The table is gitignored (it lives inside data/processed/).
+Feedback is stored append-only in the ``feedback_events`` DuckDB table.
+Each click creates a new event row — no update/delete/replace semantics.
+The legacy ``feedback`` table is preserved for backwards compatibility but
+is no longer written to by this module.
 
 Item ID format (stable across re-runs when the underlying source is the same):
     signal:<signal_db_id[:16]>     — a ranked signal
@@ -25,6 +27,7 @@ missing-context   Keep item but require better evidence before surfacing again.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime
 
 from manager_os.db import content_hash
@@ -53,16 +56,7 @@ _RATING_DELTA: dict[str, float] = {
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _feedback_id(item_id: str, rating: str) -> str:
-    """Stable dedup key — one feedback record per (item_id, rating)."""
-    return content_hash(f"feedback::{item_id}::{rating}")
-
-
-# ---------------------------------------------------------------------------
-# Write
+# Write (append-only)
 # ---------------------------------------------------------------------------
 
 def mark(
@@ -74,18 +68,24 @@ def mark(
     source_path: str | None = None,
     entity_name: str | None = None,
     signal_type: str | None = None,
-) -> None:
-    """Record a feedback rating for a brief item.
+) -> str:
+    """Record a feedback rating as an append-only event in ``feedback_events``.
+
+    Each call inserts exactly one new row. Repeated calls for the same
+    item/rating create multiple events — no conflict, no update, no delete.
 
     Args:
         conn: Open DuckDB connection.
-        item_id: Stable brief item ID (e.g. ``signal:abc123``, ``deal:OPP025010``).
+        item_id: Stable brief item ID (e.g. ``signal:abc123``).
         rating: One of ``useful``, ``noisy``, ``stale``, ``wrong``,
             ``missing-context``.
         reason: Optional free-text explanation.
         source_path: The file / source path of the underlying item.
         entity_name: The entity name for context matching.
         signal_type: The signal_type for context matching.
+
+    Returns:
+        The event_id of the inserted row.
 
     Raises:
         ValueError: If rating is not valid.
@@ -114,7 +114,7 @@ def mark(
             source_path = source_path or row[0] or ""
             entity_name = entity_name or row[1] or ""
             signal_type = signal_type or "action_item"
-            # Also persist feedback_rating on the action_item row itself
+            # Also persist feedback_rating on the action_item row itself (best-effort)
             from manager_os.build.dashboard_data import update_action_item
             try:
                 full_id_row = conn.execute(
@@ -129,25 +129,27 @@ def mark(
             except Exception:
                 pass
 
-    fid = _feedback_id(item_id, rating)
     now = datetime.utcnow()
-
-    # Determine item_type from the prefix
     item_type = item_id.split(":")[0] if ":" in item_id else "unknown"
 
-    # Use DELETE + INSERT to avoid DuckDB index corruption on UPDATE
-    conn.execute("DELETE FROM feedback WHERE id = ?", [fid])
+    # Unique event ID — includes timestamp + uuid so repeated clicks never conflict
+    event_id = content_hash(
+        f"feedback_event::{item_id}::{rating}::{now.isoformat()}::{uuid.uuid4().hex}"
+    )
+
     conn.execute(
         """
-        INSERT INTO feedback
+        INSERT INTO feedback_events
             (id, item_id, item_type, rating, reason, source_path, entity_name,
-             signal_type, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             signal_type, created_at, created_by, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        [fid, item_id, item_type, rating, reason, source_path, entity_name,
-         signal_type, now],
+        [event_id, item_id, item_type, rating, reason, source_path, entity_name,
+         signal_type, now, "dashboard", None],
     )
-    logger.info("Feedback: %s → %s (reason=%r)", item_id, rating, reason)
+
+    logger.info("Feedback event: %s → %s event=%s", item_id, rating, event_id)
+    return event_id
 
 
 # ---------------------------------------------------------------------------
@@ -155,12 +157,12 @@ def mark(
 # ---------------------------------------------------------------------------
 
 def list_feedback(conn, limit: int = 50) -> list[dict]:
-    """Return the most recent feedback entries."""
+    """Return the most recent feedback events from ``feedback_events``."""
     rows = conn.execute(
         """
         SELECT id, item_id, item_type, rating, reason, source_path,
                entity_name, signal_type, created_at
-        FROM feedback
+        FROM feedback_events
         ORDER BY created_at DESC
         LIMIT ?
         """,
@@ -183,7 +185,7 @@ def list_feedback(conn, limit: int = 50) -> list[dict]:
 
 
 def get_feedback_summary(conn) -> dict:
-    """Return aggregate feedback statistics.
+    """Return aggregate feedback statistics from ``feedback_events``.
 
     Returns a dict with:
         counts_by_rating   dict[str, int]
@@ -195,7 +197,7 @@ def get_feedback_summary(conn) -> dict:
     """
     # Counts by rating
     rating_rows = conn.execute(
-        "SELECT rating, COUNT(*) FROM feedback GROUP BY rating ORDER BY COUNT(*) DESC"
+        "SELECT rating, COUNT(*) FROM feedback_events GROUP BY rating ORDER BY COUNT(*) DESC"
     ).fetchall()
     counts_by_rating: dict[str, int] = {r: 0 for r in VALID_RATINGS}
     total = 0
@@ -208,7 +210,7 @@ def get_feedback_summary(conn) -> dict:
         return conn.execute(
             f"""
             SELECT {col}, COUNT(*) as n
-            FROM feedback
+            FROM feedback_events
             WHERE rating = ? AND {col} IS NOT NULL AND {col} != ''
             GROUP BY {col}
             ORDER BY n DESC
@@ -234,20 +236,23 @@ def get_feedback_summary(conn) -> dict:
 def load_feedback_index(conn) -> dict[str, str]:
     """Return a mapping of item_id → most-recent rating for use during ranking.
 
-    Also builds secondary indexes keyed by source_path and entity_name so
-    ranking can boost/demote similar items that haven't been directly rated.
+    Reads from ``feedback_events`` using a window function to pick the latest
+    rating per item_id.
     """
-    rows = conn.execute(
-        """
-        SELECT item_id, rating
-        FROM (
-            SELECT item_id, rating,
-                   ROW_NUMBER() OVER (PARTITION BY item_id ORDER BY created_at DESC) AS rn
-            FROM feedback
-        ) ranked
-        WHERE rn = 1
-        """
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            """
+            SELECT item_id, rating
+            FROM (
+                SELECT item_id, rating,
+                       ROW_NUMBER() OVER (PARTITION BY item_id ORDER BY created_at DESC) AS rn
+                FROM feedback_events
+            ) ranked
+            WHERE rn = 1
+            """
+        ).fetchall()
+    except Exception:
+        return {}
     return {r[0]: r[1] for r in rows}
 
 
@@ -257,7 +262,7 @@ def load_source_feedback_index(conn) -> dict[str, str]:
         rows = conn.execute(
             """
             SELECT source_path, rating, COUNT(*) as n
-            FROM feedback
+            FROM feedback_events
             WHERE source_path IS NOT NULL AND source_path != ''
             GROUP BY source_path, rating
             ORDER BY source_path, n DESC
