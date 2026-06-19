@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from manager_os.db import content_hash
+from manager_os.utils import normalize_opp_id
 
 logger = logging.getLogger(__name__)
 
@@ -274,36 +275,38 @@ def upsert_project_documents(
             [doc_id]
         ).fetchone()
         
-        if existing and not force:
-            updated += 1
-            # Update existing record
-            conn.execute(
-                """
-                UPDATE project_documents SET
-                    title = ?,
-                    confidence = ?,
-                    why_matched = ?,
-                    retrieved_at = ?,
-                    search_status = ?,
-                    metadata_json = ?
-                WHERE id = ?
-                """,
-                [
-                    doc.title,
-                    doc.confidence,
-                    doc.why_matched,
-                    doc.retrieved_at,
-                    doc.search_status,
-                    json.dumps(doc.metadata_json) if doc.metadata_json else None,
-                    doc_id,
-                ]
-            )
+        if existing:
+            if force:
+                updated += 1
+                # Update existing record (no DELETE/REPLACE)
+                conn.execute(
+                    """
+                    UPDATE project_documents SET
+                        title = ?,
+                        confidence = ?,
+                        why_matched = ?,
+                        retrieved_at = ?,
+                        search_status = ?,
+                        metadata_json = ?
+                    WHERE id = ?
+                    """,
+                    [
+                        doc.title,
+                        doc.confidence,
+                        doc.why_matched,
+                        doc.retrieved_at,
+                        doc.search_status,
+                        json.dumps(doc.metadata_json) if doc.metadata_json else None,
+                        doc_id,
+                    ]
+                )
+            # If not force and exists, skip (already up to date)
         else:
             inserted += 1
-            # Insert new record (or replace if force=True and exists)
+            # Insert new record only
             conn.execute(
                 """
-                INSERT OR REPLACE INTO project_documents (
+                INSERT INTO project_documents (
                     id, project_id, opportunity_number, client, project_name,
                     document_type, title, url, source, retrieved_at,
                     search_status, confidence, why_matched, error, metadata_json

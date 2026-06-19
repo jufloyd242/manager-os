@@ -8,8 +8,12 @@ from datetime import date, datetime
 from typing import Any
 
 from manager_os.db import content_hash
+from manager_os.utils import normalize_opp_id
 
 logger = logging.getLogger(__name__)
+
+# Re-export for backward compatibility
+__all__ = ["normalize_opp_id", "extract_projects_from_notes", "search_projects"]
 
 # Technology keyword map for deterministic extraction
 _TECH_KEYWORDS = {
@@ -21,65 +25,92 @@ _TECH_KEYWORDS = {
 
 
 def extract_projects_from_notes(conn, force: bool = False, limit: int | None = None) -> int:
-    """Extract project knowledge from notes and deals into the projects table."""
+    """Extract project context from notes and enrich existing canonical projects.
+    
+    Notes CANNOT create new canonical projects. They only enrich existing
+    Sheet-backed projects via the project_notes_context table.
+    """
+    import re
+    
     rows = conn.execute(
         """
-        SELECT id, title, body, entity_type, entity_name, tags, source_path
-        FROM notes
-        WHERE note_type IN ('client', 'deal', 'meeting') OR entity_type IN ('client', 'deal')
-        ORDER BY created_at DESC
+        SELECT n.id, n.title, n.body, n.entity_type, n.entity_name, n.tags, r.source_path
+        FROM notes n
+        LEFT JOIN raw_documents r ON n.raw_document_id = r.id
+        WHERE n.note_type IN ('client', 'deal', 'meeting') OR n.entity_type IN ('client', 'deal')
+        ORDER BY n.created_at DESC
         """ + (f" LIMIT {limit}" if limit else "")
     ).fetchall()
     
-    ingested = 0
+    enriched = 0
+    skipped = 0
     for row in rows:
         note_id, title, body, entity_type, entity_name, tags_raw, source_path = row
-        tags = json.loads(tags_raw) if tags_raw else []
         
         # Deterministic extraction
         technologies = [kw for kw in _TECH_KEYWORDS if kw.lower() in body.lower() or kw.lower() in title.lower()]
         
         # Simple heuristic for opportunity number
-        import re
         opp_match = re.search(r'(OPP-\d+|Opportunity\s*#?\s*\d+)', body, re.IGNORECASE)
-        opp_number = opp_match.group(1) if opp_match else ""
+        opp_number = normalize_opp_id(opp_match.group(1)) if opp_match else ""
         
-        project_id = content_hash(f"project::{entity_name}::{note_id}")
+        # Find matching canonical project by OppID, client name, or entity_name
+        project_id = None
+        if opp_number:
+            match = conn.execute(
+                "SELECT id FROM projects WHERE UPPER(TRIM(opportunity_number)) = ?",
+                [opp_number]
+            ).fetchone()
+            if match:
+                project_id = match[0]
         
-        # Check if exists
+        if not project_id and entity_name:
+            match = conn.execute(
+                "SELECT id FROM projects WHERE LOWER(TRIM(client)) = LOWER(TRIM(?))",
+                [entity_name]
+            ).fetchone()
+            if match:
+                project_id = match[0]
+        
+        if not project_id:
+            skipped += 1
+            logger.debug(f"No canonical project found for note {note_id} (entity={entity_name}, opp={opp_number})")
+            continue
+        
+        # Write to project_notes_context (enrichment only, never canonical)
+        context_id = content_hash(f"project_note_context::{project_id}::{note_id}")
+        
         if not force:
-            existing = conn.execute("SELECT id FROM projects WHERE id = ?", [project_id]).fetchone()
+            existing = conn.execute(
+                "SELECT id FROM project_notes_context WHERE id = ?", [context_id]
+            ).fetchone()
             if existing:
                 continue
-                
+        
+        context_type = "technology" if technologies else "general"
+        excerpt = body[:500] + "..." if len(body) > 500 else body
+        
         conn.execute(
             """
-            INSERT OR REPLACE INTO projects (
-                id, project_name, client, opportunity_number, deal_id, status,
-                technologies_json, skills_json, team_members_json, summary,
-                lessons_learned, source_urls_json, source_note_ids_json,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            INSERT INTO project_notes_context (
+                id, project_id, opportunity_number, source_note_id,
+                source_path, context_type, excerpt, confidence, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             [
+                context_id,
                 project_id,
-                title or entity_name or "Unknown Project",
-                entity_name if entity_type == 'client' else "",
                 opp_number,
-                note_id if entity_type == 'deal' else "",
-                "active" if "active" in body.lower() else "unknown",
-                json.dumps(technologies),
-                json.dumps([]), # skills
-                json.dumps([]), # team
-                body[:500] + "..." if len(body) > 500 else body, # summary
-                "", # lessons_learned
-                json.dumps([source_path] if source_path else []),
-                json.dumps([note_id]),
+                note_id,
+                source_path or "",
+                context_type,
+                excerpt,
+                0.8 if technologies else 0.5,
             ]
         )
-        ingested += 1
+        enriched += 1
         
-    return ingested
+    return enriched
 
 
 def search_projects(
@@ -177,8 +208,8 @@ def search_projects(
         params.append(close_before)
     
     if opportunity_number:
-        conditions.append("opportunity_number = ?")
-        params.append(opportunity_number)
+        conditions.append("UPPER(TRIM(opportunity_number)) = ?")
+        params.append(normalize_opp_id(opportunity_number))
     
     # Document type filter requires join with project_documents
     needs_doc_join = bool(document_type)
@@ -219,10 +250,15 @@ def search_projects(
     
     rows = conn.execute(query_sql, params).fetchall()
     
-    results = []
+    # Score and rank results
+    scored_results = []
     for row in rows:
-        # Get related documents for this project
         project_id = row[0]
+        project_name = row[1]
+        client_name = row[2]
+        opp_num = row[3]
+        
+        # Get related documents
         docs = conn.execute(
             """
             SELECT document_type, title, url, confidence, why_matched
@@ -233,7 +269,59 @@ def search_projects(
             [project_id]
         ).fetchall()
         
-        results.append({
+        # Calculate score and match reasons
+        score = 0
+        match_reasons = []
+        
+        # Exact OppID match (highest priority)
+        if opportunity_number and normalize_opp_id(opp_num) == normalize_opp_id(opportunity_number):
+            score += 100
+            match_reasons.append("exact opportunity number match")
+        
+        # Exact client match
+        if client and client_name and client.lower() == client_name.lower():
+            score += 50
+            match_reasons.append("exact client match")
+        
+        # Exact project type match
+        if project_type and row[17] and project_type.lower() == row[17].lower():
+            score += 40
+            match_reasons.append("exact project type match")
+        
+        # Exact technology match
+        if technology:
+            tech_list = json.loads(row[5]) if row[5] else []
+            if technology in tech_list:
+                score += 30
+                match_reasons.append(f"technology: {technology}")
+        
+        # Document title match
+        if query:
+            for doc in docs:
+                if doc[1] and query.lower() in doc[1].lower():
+                    score += 20
+                    match_reasons.append(f"document title match: {doc[1]}")
+                    break
+        
+        # Free text match scoring
+        if query:
+            query_lower = query.lower()
+            if project_name and query_lower in project_name.lower():
+                score += 15
+                match_reasons.append("project name match")
+            if row[18] and query_lower in row[18].lower():  # short_description
+                score += 10
+                match_reasons.append("short description match")
+            if row[7] and query_lower in row[7].lower():  # summary
+                score += 5
+                match_reasons.append("summary match")
+        
+        # If no specific filters matched, give base score for passing WHERE clause
+        if score == 0:
+            score = 1
+            match_reasons.append("matches filter criteria")
+        
+        scored_results.append({
             "id": row[0],
             "project_name": row[1],
             "client": row[2],
@@ -256,6 +344,8 @@ def search_projects(
             "short_description": row[19],
             "source_row": row[20],
             "summary_is_generated": row[21],
+            "score": score,
+            "match_reasons": match_reasons,
             "related_documents": [
                 {
                     "document_type": doc[0],
@@ -267,5 +357,12 @@ def search_projects(
                 for doc in docs
             ],
         })
+    
+    # Sort by score descending, then by close_date descending
+    scored_results.sort(key=lambda x: (-x["score"], x["close_date"] or ""), reverse=False)
+    scored_results.sort(key=lambda x: x["close_date"] or "", reverse=True)
+    scored_results.sort(key=lambda x: x["score"], reverse=True)
+    
+    return scored_results[:limit]
         
     return results

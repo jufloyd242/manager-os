@@ -304,7 +304,19 @@ CREATE TABLE IF NOT EXISTS project_documents (
     search_status VARCHAR,
     confidence FLOAT,
     why_matched VARCHAR,
-    error VARCHAR
+    error VARCHAR,
+    metadata_json JSON
+);
+CREATE TABLE IF NOT EXISTS project_notes_context (
+    id VARCHAR PRIMARY KEY,
+    project_id VARCHAR,
+    opportunity_number VARCHAR,
+    source_note_id VARCHAR,
+    source_path VARCHAR,
+    context_type VARCHAR,
+    excerpt VARCHAR,
+    confidence DOUBLE,
+    created_at TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS projects (
     id VARCHAR PRIMARY KEY,

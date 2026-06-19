@@ -2429,14 +2429,15 @@ If you cannot access the sheet, return:
         if not rows:
             raise RuntimeError("Gemini CLI returned no rows.")
             
-        # Write to CSV
+        # Write to CSV using StringIO to avoid write-then-read bug
+        from io import StringIO
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerows(rows)
+        csv_content = buffer.getvalue()
+        
         Path(local_csv).parent.mkdir(parents=True, exist_ok=True)
-        csv_content = ""
-        with open(local_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerows(rows)
-            f.seek(0)
-            csv_content = f.read()
+        Path(local_csv).write_text(csv_content, encoding="utf-8")
             
         content_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
         retrieved_at = result_data.get("retrieved_at", datetime.utcnow().isoformat())
@@ -2756,6 +2757,285 @@ def match_projects(
                 console.print(f"  Why: {m['why_it_matched']}")
                 if m['lessons_learned']:
                     console.print(f"  Lessons: {m['lessons_learned'][:100]}...")
+
+
+# ---------------------------------------------------------------------------
+# manager-os project-docs-fetch
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="project-docs-fetch")
+def project_docs_fetch(
+    opportunity_number: str = typer.Option("", "--opportunity-number", "-o", help="Opportunity number to fetch docs for."),
+    limit: int = typer.Option(10, "--limit", help="Max documents to fetch per project."),
+    timeout: int = typer.Option(120, "--timeout", help="Timeout in seconds for Gemini CLI."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be done without calling Gemini."),
+    print_prompt: bool = typer.Option(False, "--print-prompt", help="Print the Gemini prompt and exit."),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing documents."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output."),
+) -> None:
+    """Fetch Google Drive documents for a specific project.
+    
+    Searches Drive for SOWs, closure decks, retrospectives, etc.
+    Bounded: only fetches for the specified opportunity number.
+    """
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from manager_os.utils import normalize_opp_id
+    from manager_os.ingest.project_drive_docs import (
+        search_drive_for_project_docs,
+        upsert_project_documents,
+        _build_drive_search_prompt,
+    )
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+
+    if not opportunity_number:
+        console.print("[red]Please provide --opportunity-number.[/red]")
+        raise typer.Exit(1)
+
+    opp_id = normalize_opp_id(opportunity_number)
+
+    # Lookup project by normalized OppID
+    project = conn.execute(
+        """
+        SELECT id, project_name, client, opportunity_number
+        FROM projects
+        WHERE UPPER(TRIM(opportunity_number)) = ?
+        LIMIT 1
+        """,
+        [opp_id]
+    ).fetchone()
+
+    if not project:
+        # Show helpful diagnostics
+        project_count = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+        console.print(f"[red]Project not found for OppID: {opp_id}[/red]")
+        console.print(f"  Total projects in index: {project_count}")
+        
+        # Suggest fuzzy matches
+        all_opps = conn.execute(
+            "SELECT DISTINCT opportunity_number FROM projects WHERE opportunity_number != '' ORDER BY opportunity_number"
+        ).fetchall()
+        
+        if all_opps:
+            # Simple fuzzy match: find OppIDs with similar prefix
+            similar = [row[0] for row in all_opps if opp_id[:4] in row[0]][:5]
+            if similar:
+                console.print(f"  Nearest OppID matches: {', '.join(similar)}")
+        
+        console.print("\n[yellow]Suggestions:[/yellow]")
+        console.print(f"  1. Run: manager-os search-projects '' --opportunity-number {opp_id}")
+        console.print(f"  2. Run: manager-os index-projects --skip-fetch --skip-drive-enrichment --force --verbose")
+        raise typer.Exit(1)
+
+    project_id, project_name, client, stored_opp = project
+
+    if print_prompt:
+        prompt = _build_drive_search_prompt(stored_opp, client, project_name)
+        console.print("[bold]Gemini CLI Prompt:[/bold]")
+        console.print(prompt)
+        raise typer.Exit(0)
+
+    if dry_run:
+        console.print("[bold]Project Docs Fetch — Dry Run[/bold]")
+        console.print(f"  Project ID:       {project_id}")
+        console.print(f"  Opportunity #:    {stored_opp}")
+        console.print(f"  Project Name:     {project_name}")
+        console.print(f"  Client:           {client}")
+        console.print(f"  Limit:            {limit}")
+        console.print(f"  Timeout:          {timeout}s")
+        console.print(f"  Force:            {force}")
+        console.print("\n[dim]Would search Google Drive for documents related to this project.[/dim]")
+        raise typer.Exit(0)
+
+    console.print(f"[bold]Fetching Drive docs for {stored_opp} — {project_name}[/bold]")
+    
+    drive_result = search_drive_for_project_docs(
+        opportunity_number=stored_opp,
+        client=client,
+        project_name=project_name,
+        timeout=timeout,
+    )
+
+    if drive_result.errors:
+        for error in drive_result.errors:
+            console.print(f"[red]✗ {error}[/red]")
+
+    if drive_result.warnings and verbose:
+        for warning in drive_result.warnings:
+            console.print(f"[yellow]⚠ {warning}[/yellow]")
+
+    if not drive_result.documents:
+        console.print("[yellow]No documents found in Google Drive.[/yellow]")
+        raise typer.Exit(0)
+
+    # Set project_id on documents
+    for doc in drive_result.documents:
+        doc.project_id = project_id
+
+    # Limit documents
+    docs_to_upsert = drive_result.documents[:limit]
+
+    inserted, updated = upsert_project_documents(conn, docs_to_upsert, force=force)
+    
+    console.print(f"[green]✓ Found {len(drive_result.documents)} documents[/green]")
+    console.print(f"  Inserted: {inserted}, Updated: {updated}")
+    
+    if verbose:
+        for doc in docs_to_upsert:
+            console.print(f"  - [{doc.document_type}] {doc.title}")
+            console.print(f"    {doc.url}")
+
+
+# ---------------------------------------------------------------------------
+# manager-os project-memory-report
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="project-memory-report")
+def project_memory_report(
+    as_json: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """Report on project memory quality and completeness.
+    
+    Shows counts of projects with/without docs, summaries, technologies, etc.
+    No Gemini calls.
+    """
+    from manager_os.config import get_settings
+    from manager_os.db import get_connection
+    from datetime import datetime
+
+    settings = get_settings()
+    conn = get_connection(settings.db_path)
+
+    # Total projects
+    total = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+    
+    # Projects with docs
+    with_docs = conn.execute(
+        "SELECT COUNT(DISTINCT project_id) FROM project_documents WHERE project_id IS NOT NULL"
+    ).fetchone()[0]
+    
+    # Projects with summaries
+    with_summaries = conn.execute(
+        "SELECT COUNT(*) FROM projects WHERE summary IS NOT NULL AND summary != ''"
+    ).fetchone()[0]
+    
+    # Projects with generated summaries only
+    generated_only = conn.execute(
+        "SELECT COUNT(*) FROM projects WHERE summary_is_generated = TRUE"
+    ).fetchone()[0]
+    
+    # Projects missing technologies
+    missing_tech = conn.execute(
+        "SELECT COUNT(*) FROM projects WHERE technologies_json IS NULL OR technologies_json = '[]'"
+    ).fetchone()[0]
+    
+    # Projects missing project type
+    missing_type = conn.execute(
+        "SELECT COUNT(*) FROM projects WHERE project_type IS NULL OR project_type = ''"
+    ).fetchone()[0]
+    
+    # Projects by type
+    by_type = conn.execute(
+        """
+        SELECT project_type, COUNT(*) as count
+        FROM projects
+        WHERE project_type IS NOT NULL AND project_type != ''
+        GROUP BY project_type
+        ORDER BY count DESC
+        """
+    ).fetchall()
+    
+    # Projects by year
+    by_year = conn.execute(
+        """
+        SELECT year, COUNT(*) as count
+        FROM projects
+        WHERE year IS NOT NULL
+        GROUP BY year
+        ORDER BY year DESC
+        """
+    ).fetchall()
+    
+    # Top document types
+    doc_types = conn.execute(
+        """
+        SELECT document_type, COUNT(*) as count
+        FROM project_documents
+        GROUP BY document_type
+        ORDER BY count DESC
+        LIMIT 10
+        """
+    ).fetchall()
+    
+    # Project index freshness (from project_index_runs)
+    freshness = None
+    try:
+        latest_run = conn.execute(
+            """
+            SELECT finished_at, status, valid_project_count
+            FROM project_index_runs
+            ORDER BY finished_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if latest_run:
+            freshness = {
+                "retrieved_at": latest_run[0],
+                "status": latest_run[1],
+                "project_count": latest_run[2],
+            }
+    except Exception:
+        pass
+
+    report = {
+        "total_projects": total,
+        "projects_with_docs": with_docs,
+        "projects_with_summaries": with_summaries,
+        "projects_with_generated_summaries_only": generated_only,
+        "projects_missing_technologies": missing_tech,
+        "projects_missing_project_type": missing_type,
+        "projects_by_type": [{"type": row[0], "count": row[1]} for row in by_type],
+        "projects_by_year": [{"year": row[0], "count": row[1]} for row in by_year],
+        "top_document_types": [{"type": row[0], "count": row[1]} for row in doc_types],
+        "project_index_freshness": freshness,
+    }
+
+    if as_json:
+        import json
+        console.print(json.dumps(report, indent=2))
+    else:
+        console.print("[bold]Project Memory Report[/bold]\n")
+        console.print(f"  Total projects:                          {total}")
+        console.print(f"  Projects with docs:                      {with_docs}")
+        console.print(f"  Projects with summaries:                 {with_summaries}")
+        console.print(f"  Projects with generated summaries only:  {generated_only}")
+        console.print(f"  Projects missing technologies:           {missing_tech}")
+        console.print(f"  Projects missing project type:           {missing_type}")
+        
+        if by_type:
+            console.print("\n[bold]Projects by Type:[/bold]")
+            for row in by_type:
+                console.print(f"  {row[0]:30s} {row[1]:5d}")
+        
+        if by_year:
+            console.print("\n[bold]Projects by Year:[/bold]")
+            for row in by_year:
+                console.print(f"  {row[0]}    {row[1]:5d}")
+        
+        if doc_types:
+            console.print("\n[bold]Top Document Types:[/bold]")
+            for row in doc_types:
+                console.print(f"  {row[0]:30s} {row[1]:5d}")
+        
+        if freshness:
+            console.print("\n[bold]Project Index Freshness:[/bold]")
+            console.print(f"  Retrieved at:  {freshness['retrieved_at']}")
+            console.print(f"  Status:        {freshness['status']}")
+            console.print(f"  Project count: {freshness['project_count']}")
 
 
 # ---------------------------------------------------------------------------
