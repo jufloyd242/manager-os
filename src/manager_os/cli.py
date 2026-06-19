@@ -2619,11 +2619,20 @@ def project_docs_fetch(
 
     if opportunity_number:
         # Single project by opportunity number
+        # Try exact id match first
         project_id = f"project::{opportunity_number}"
         row = conn.execute(
             "SELECT id, opportunity_number, client, project_name FROM projects WHERE id = ?",
             [project_id]
         ).fetchone()
+        
+        # Fallback: search by opportunity_number field
+        if not row:
+            row = conn.execute(
+                "SELECT id, opportunity_number, client, project_name FROM projects WHERE opportunity_number = ?",
+                [opportunity_number]
+            ).fetchone()
+        
         if row:
             projects_to_process.append({
                 "project_id": row[0],
@@ -2632,7 +2641,8 @@ def project_docs_fetch(
                 "project_name": row[3],
             })
         else:
-            console.print(f"[red]Project not found: {project_id}[/red]")
+            console.print(f"[red]Project not found: opportunity_number={opportunity_number}[/red]")
+            console.print("[dim]Searched by id and opportunity_number field[/dim]")
             raise typer.Exit(1)
     elif project_id:
         # Single project by ID

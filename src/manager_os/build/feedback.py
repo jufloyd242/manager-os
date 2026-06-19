@@ -135,16 +135,33 @@ def mark(
     # Determine item_type from the prefix
     item_type = item_id.split(":")[0] if ":" in item_id else "unknown"
 
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO feedback
-            (id, item_id, item_type, rating, reason, source_path, entity_name,
-             signal_type, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [fid, item_id, item_type, rating, reason, source_path, entity_name,
-         signal_type, now],
-    )
+    # Check if feedback record exists to avoid INSERT OR REPLACE (causes index corruption)
+    existing = conn.execute(
+        "SELECT id FROM feedback WHERE id = ?", [fid]
+    ).fetchone()
+    
+    if existing:
+        conn.execute(
+            """
+            UPDATE feedback
+            SET item_id = ?, item_type = ?, rating = ?, reason = ?, 
+                source_path = ?, entity_name = ?, signal_type = ?, created_at = ?
+            WHERE id = ?
+            """,
+            [item_id, item_type, rating, reason, source_path, entity_name,
+             signal_type, now, fid],
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO feedback
+                (id, item_id, item_type, rating, reason, source_path, entity_name,
+                 signal_type, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [fid, item_id, item_type, rating, reason, source_path, entity_name,
+             signal_type, now],
+        )
     logger.info("Feedback: %s → %s (reason=%r)", item_id, rating, reason)
 
 

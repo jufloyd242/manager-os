@@ -161,9 +161,11 @@ def test_get_people_rows_morale_from_signal_severity(conn) -> None:
 
 def test_get_people_rows_allocation_from_forecast(conn) -> None:
     _seed_note(conn, "Alice Chen", note_type="1on1")
-    _seed_forecast(conn, "Alice Chen", date.today(), 80.0)
+    # Seed with planned_hours and target_hours (new format)
+    _seed_forecast(conn, "Alice Chen", date.today(), 0.0, planned_hours=32.0, target_hours=40.0)
     rows = get_people_rows(conn, as_of=date.today())
     alice = next(r for r in rows if r.name == "Alice Chen")
+    # 32/40 * 100 = 80.0
     assert alice.allocation_pct == 80.0
 
 
@@ -399,9 +401,9 @@ class TestPerWeekAllocation:
         """get_people_rows must not sum across multiple forecast weeks."""
         today = date.today()
         next_week = today + timedelta(days=7)
-        # Seed Alice on two different weeks
-        _seed_forecast(conn, "Alice Chen", today,      80.0, fc_type="confirmed")
-        _seed_forecast(conn, "Alice Chen", next_week, 100.0, fc_type="confirmed")
+        # Seed Alice on two different weeks with planned_hours/target_hours
+        _seed_forecast(conn, "Alice Chen", today,      0.0, fc_type="confirmed", planned_hours=32.0, target_hours=40.0)
+        _seed_forecast(conn, "Alice Chen", next_week, 0.0, fc_type="confirmed", planned_hours=40.0, target_hours=40.0)
         _seed_note(conn, "Alice Chen", note_type="1on1")
 
         rows = get_people_rows(conn, as_of=today)
@@ -415,7 +417,7 @@ class TestPerWeekAllocation:
         """When as_of falls between weeks, use the nearest week on or after as_of."""
         today = date.today()
         future_week = today + timedelta(days=3)
-        _seed_forecast(conn, "Bob Martinez", future_week, 60.0)
+        _seed_forecast(conn, "Bob Martinez", future_week, 0.0, planned_hours=24.0, target_hours=40.0)
         _seed_note(conn, "Bob Martinez", note_type="1on1")
 
         rows = get_people_rows(conn, as_of=today)

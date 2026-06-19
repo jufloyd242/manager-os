@@ -288,10 +288,10 @@ Start your response directly with:
 
 
 def enrich_meeting_prep_with_llm(prep: MeetingPrepRecord, conn) -> MeetingPrepRecord:
-    """Append an AI Synthesis section to a MeetingPrepRecord using an LLM.
+    """Append an AI Synthesis section to a MeetingPrepRecord using Gemini CLI.
 
-    Requires OPENAI_API_KEY to be set. Silently returns the original prep
-    if the API key is missing or the openai package is not installed.
+    Requires MANAGER_OS_GEMINI_CLI_BIN to be set. Silently returns the original prep
+    if the CLI binary is not configured or not found.
 
     Args:
         prep: An existing MeetingPrepRecord to enrich.
@@ -301,38 +301,48 @@ def enrich_meeting_prep_with_llm(prep: MeetingPrepRecord, conn) -> MeetingPrepRe
         Updated MeetingPrepRecord with AI Synthesis appended to content.
     """
     import os
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        logger.debug("OPENAI_API_KEY not set — skipping LLM meeting prep enrichment")
+    import subprocess
+    import tempfile
+    
+    cli_bin = os.environ.get("MANAGER_OS_GEMINI_CLI_BIN", "")
+    if not cli_bin:
+        logger.debug("MANAGER_OS_GEMINI_CLI_BIN not set — skipping LLM meeting prep enrichment")
         return prep
-
-    try:
-        import openai  # type: ignore[import]
-    except ImportError:
-        logger.debug("openai package not installed — skipping LLM enrichment")
-        return prep
-
-    base_url = os.environ.get("OPENAI_BASE_URL", "")
-    model = os.environ.get("MANAGER_OS_LLM_MODEL", "gpt-4o-mini")
-    client_kwargs: dict = {"api_key": api_key}
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    client = openai.OpenAI(**client_kwargs)
 
     # Cap context to avoid token limits
     context = prep.content[:4000]
+    full_prompt = _LLM_SYSTEM_PROMPT + "\n\n" + context
 
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _LLM_SYSTEM_PROMPT},
-                {"role": "user", "content": context},
-            ],
-            temperature=0.3,
-            max_tokens=600,
-        )
-        synthesis = (response.choices[0].message.content or "").strip()
+        # Write prompt to temp file to avoid shell escaping issues
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write(full_prompt)
+            prompt_file = f.name
+        
+        try:
+            cli_args = os.environ.get("MANAGER_OS_GEMINI_CLI_ARGS", "")
+            model = os.environ.get("MANAGER_OS_GEMINI_CLI_MODEL", "gemini-2.0-flash")
+            
+            cmd = [cli_bin]
+            if cli_args:
+                cmd.extend(cli_args.split())
+            cmd.extend(["--model", model, "--prompt-file", prompt_file])
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            
+            if result.returncode != 0:
+                logger.warning("Gemini CLI failed (exit %d): %s", result.returncode, result.stderr)
+                return prep
+            
+            synthesis = result.stdout.strip()
+        finally:
+            os.unlink(prompt_file)
+            
     except Exception as exc:
         logger.warning("LLM meeting prep enrichment failed: %s", exc)
         return prep
@@ -348,9 +358,20 @@ def enrich_meeting_prep_with_llm(prep: MeetingPrepRecord, conn) -> MeetingPrepRe
         generated_at=prep.generated_at,
     )
 
-    conn.execute(
-        "INSERT OR REPLACE INTO meeting_prep (id, meeting_id, content, generated_at) VALUES (?, ?, ?, ?)",
-        [updated_prep.id, updated_prep.meeting_id, updated_prep.content, updated_prep.generated_at],
-    )
+    # Check if record exists to avoid INSERT OR REPLACE
+    existing = conn.execute(
+        "SELECT id FROM meeting_prep WHERE id = ?", [updated_prep.id]
+    ).fetchone()
+    
+    if existing:
+        conn.execute(
+            "UPDATE meeting_prep SET content = ?, generated_at = ? WHERE id = ?",
+            [updated_prep.content, updated_prep.generated_at, updated_prep.id],
+        )
+    else:
+        conn.execute(
+            "INSERT INTO meeting_prep (id, meeting_id, content, generated_at) VALUES (?, ?, ?, ?)",
+            [updated_prep.id, updated_prep.meeting_id, updated_prep.content, updated_prep.generated_at],
+        )
 
     return updated_prep
