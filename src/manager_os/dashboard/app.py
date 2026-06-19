@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import date, datetime
 from pathlib import Path
 
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 # Ensure the src package is importable when run via streamlit
 _SRC = Path(__file__).parent.parent.parent.parent
@@ -43,18 +46,22 @@ def _with_write(fn):
     conn = _connect()
     try:
         fn(conn)
-        st.cache_data.clear()
-        st.rerun()
-    except Exception as e:
-        st.error(f"Write failed: {e}")
+    except Exception as exc:
         logger.exception("Dashboard write error")
-        if "invalidated" in str(e).lower():
-            st.error("DuckDB connection was invalidated. Refreshing dashboard connection. If this repeats, restart dashboard.")
-            st.cache_resource.clear()
-            st.cache_data.clear()
-            st.rerun()
+        st.error(f"Write failed: {exc}")
+        return
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    st.cache_data.clear()
+    try:
+        st.cache_resource.clear()
+    except Exception:
+        pass
+    st.rerun()
 
 # ------------------------------------------------------------------
 # Sidebar

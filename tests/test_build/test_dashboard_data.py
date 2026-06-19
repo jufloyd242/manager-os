@@ -528,7 +528,7 @@ class TestPipelineRowsExcluded:
     def test_pipeline_rows_dont_inflate_people_tab(self, conn) -> None:
         today = date.today()
         self._seed_pipeline(conn, today)
-        _seed_forecast(conn, "Real Engineer", today, alloc=80.0)
+        _seed_forecast(conn, "Real Engineer", today, alloc=80.0, planned_hours=32.0, target_hours=40.0)
         _seed_note(conn, "Real Engineer", note_type="1on1")
         rows = get_people_rows(conn, as_of=today)
         real = next((r for r in rows if r.name == "Real Engineer"), None)
