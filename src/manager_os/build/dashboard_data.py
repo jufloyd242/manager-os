@@ -459,7 +459,7 @@ def get_people_rows(conn, as_of: date | None = None, settings=None) -> list[Dash
     if nearest_week:
         fc_rows = conn.execute(
             """
-            SELECT person_name, SUM(planned_hours) / MAX(target_hours) * 100
+            SELECT person_name, SUM(allocation_pct)
             FROM staffing_forecast
             WHERE week_start = ?
             GROUP BY person_name
