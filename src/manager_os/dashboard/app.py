@@ -143,7 +143,7 @@ with tabs[0]:
     _show_stale = st.session_state.get("ai_show_stale", False)
     _show_completed = st.session_state.get("ai_show_completed", False)
 
-    # Feedback visibility toggle
+    # Feedback visibility toggle — read from session_state with default
     _show_feedback_hidden = st.session_state.get("show_feedback_hidden", False)
 
     signals = _today_signals(selected_date, min_severity)
@@ -168,13 +168,10 @@ with tabs[0]:
     if not signals:
         st.success("No open signals at this severity level. 🎉")
     else:
-        # Show hidden toggle
+        # Show hidden toggle — checkbox manages session_state automatically
         _toggle_cols = st.columns([3, 1])
         with _toggle_cols[1]:
-            if st.checkbox("Show hidden feedback items", key="show_feedback_hidden"):
-                st.session_state["show_feedback_hidden"] = True
-            else:
-                st.session_state["show_feedback_hidden"] = False
+            st.checkbox("Show hidden feedback items", key="show_feedback_hidden")
 
         # Feedback badge mapping
         _FB_BADGE = {
