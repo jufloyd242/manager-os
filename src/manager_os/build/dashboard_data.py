@@ -352,14 +352,10 @@ def get_people_rows(conn, as_of: date | None = None, settings=None) -> list[Dash
         as_of = date.today()
 
     # Build normalizer for alias resolution and track filtering
-    try:
-        from manager_os.build.people_normalization import PeopleNormalizer
-        normalizer = PeopleNormalizer.from_config(settings)
-    except Exception:
-        normalizer = None
+    normalizer = _get_people_normalizer(settings)
 
     def _canon(name: str) -> str:
-        return normalizer.canonicalize(name) if normalizer else name
+        return normalizer.canonicalize(name) if normalizer else (name or "")
 
     def _is_tracked(name: str) -> bool:
         return normalizer.is_tracked(name) if normalizer else True
@@ -452,35 +448,13 @@ def get_people_rows(conn, as_of: date | None = None, settings=None) -> list[Dash
 
     # Current-week allocation per person.
     # Use the NEAREST forecast week on or after as_of (not a sum across weeks).
-    # For wide-format rows (forecast_type='capacity'), allocation_pct is already
-    # planned_hours / target_hours * 100.  For normalized rows it's already a
-    # percentage.  Either way we want the single-week value for the current week.
-    nearest_week_row = conn.execute(
-        """
-        SELECT MIN(week_start)
-        FROM staffing_forecast
-        WHERE week_start >= ?
-        """,
-        [as_of],
-    ).fetchone()
-    nearest_week = nearest_week_row[0] if nearest_week_row and nearest_week_row[0] else None
+    # Reuse the canonical allocation helper so People tab and Forecast tab agree.
+    nearest_week = _nearest_forecast_week(conn, as_of)
 
     fc_map: dict[str, float] = {}
     if nearest_week:
-        fc_rows = conn.execute(
-            """
-            SELECT person_name, SUM(allocation_pct)
-            FROM staffing_forecast
-            WHERE week_start = ?
-            GROUP BY person_name
-            """,
-            [nearest_week],
-        ).fetchall()
-        for r in fc_rows:
-            if r[0]:
-                canon = _canon(r[0])
-                # Sum within the same canonical person (e.g. multiple alias rows)
-                fc_map[canon] = fc_map.get(canon, 0.0) + float(r[1] or 0.0)
+        for entry in get_people_allocation_for_week(conn, nearest_week, settings=settings):
+            fc_map[entry["person_name"]] = entry["allocation_pct"]
 
     result = []
     for name, p in sorted(people_map.items()):
@@ -553,47 +527,134 @@ def get_forecast_week_list(conn, as_of: date | None = None, limit: int = 12) -> 
     return result
 
 
+def _get_people_normalizer(settings=None):
+    """Build a PeopleNormalizer from config, or return None on failure."""
+    try:
+        from manager_os.build.people_normalization import PeopleNormalizer
+        return PeopleNormalizer.from_config(settings)
+    except Exception:
+        return None
+
+
+def _nearest_forecast_week(conn, as_of: date) -> date | None:
+    """Return the earliest forecast week on or after *as_of*, or None."""
+    row = conn.execute(
+        "SELECT MIN(week_start) FROM staffing_forecast WHERE week_start >= ?",
+        [as_of],
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    ws = row[0]
+    return ws if isinstance(ws, date) else date.fromisoformat(str(ws))
+
+
 def get_people_allocation_for_week(
     conn,
     week_start: date,
+    settings=None,
 ) -> list[dict]:
     """Return per-person allocation detail for a single forecast week.
 
+    Canonical allocation math (single source of truth for People + Forecast tabs):
+
+        allocation_pct = total_planned_hours / max(target_hours) * 100
+
+    Rules:
+      * Person names are canonicalized via PeopleNormalizer.from_config(settings).
+      * planned_hours are SUMmed across project rows for the same canonical person.
+      * target_hours use MAX per canonical person/week (never summed — capacity rows
+        are often duplicated per project).
+      * When planned_hours AND target_hours are present, the stored allocation_pct
+        is ignored.
+      * Legacy rows with no planned/target hours fall back to SUM(allocation_pct).
+      * Hours and percentages are never mixed in one SUM.
+
     Each entry has:
-        person_name   str
-        planned_hours float   (0.0 if not set)
+        person_name   str           (canonical name)
+        planned_hours float         (0.0 if not set)
         target_hours  float | None
-        allocation_pct float  (planned/target*100, or 0 when no target)
-        projects      list[str]
-        warning       str | None   (set when allocation_pct > 150% or target missing)
+        allocation_pct float        (planned/target*100, or legacy fallback)
+        projects      list[str]     ("Client / Project" entries)
+        warning       str | None
+        raw_names     list[str]     (distinct raw names that mapped to this person)
     """
+    normalizer = _get_people_normalizer(settings)
+
+    def _canon(name: str) -> str:
+        return normalizer.canonicalize(name) if normalizer else (name or "")
+
+    # Pull raw rows for the week. We aggregate in Python so we can canonicalize
+    # names and keep hours/percentages separate.
     rows = conn.execute(
         """
-        SELECT person_name,
-               SUM(COALESCE(planned_hours, allocation_pct)) AS planned,
-               MAX(target_hours)                            AS target,
-               SUM(allocation_pct)                         AS alloc_pct_sum,
-               STRING_AGG(DISTINCT project, ', ')          AS projects
+        SELECT person_name, client, project,
+               allocation_pct, planned_hours, target_hours
         FROM staffing_forecast
         WHERE week_start = ?
           AND forecast_type IN ('capacity', 'confirmed', 'likely')
-        GROUP BY person_name
-        ORDER BY person_name
         """,
         [week_start],
     ).fetchall()
 
-    result = []
-    for person_name, planned, target, alloc_pct_sum, projects in rows:
-        planned = float(planned or 0.0)
-        target_val = float(target) if target is not None else None
+    # Per canonical person accumulators
+    agg: dict[str, dict] = {}
+    for person_name, client, project, alloc_pct, planned_h, target_h in rows:
+        if not person_name:
+            continue
+        canon = _canon(person_name)
+        bucket = agg.setdefault(canon, {
+            "planned_hours_sum": 0.0,
+            "has_planned": False,
+            "target_hours_max": None,
+            "has_target": False,
+            "alloc_pct_sum": 0.0,
+            "has_alloc_pct": False,
+            "projects": [],
+            "raw_names": set(),
+        })
+        # planned_hours
+        if planned_h is not None:
+            bucket["planned_hours_sum"] += float(planned_h)
+            bucket["has_planned"] = True
+        # target_hours — MAX, never sum (capacity rows duplicate target per project)
+        if target_h is not None:
+            th = float(target_h)
+            if not bucket["has_target"] or th > bucket["target_hours_max"]:
+                bucket["target_hours_max"] = th
+            bucket["has_target"] = True
+        # stored allocation_pct — only used as legacy fallback
+        if alloc_pct is not None:
+            bucket["alloc_pct_sum"] += float(alloc_pct)
+            bucket["has_alloc_pct"] = True
+        # project label
+        client_s = (client or "").strip()
+        project_s = (project or "").strip()
+        if project_s and client_s:
+            label = f"{client_s} / {project_s}"
+        elif project_s:
+            label = project_s
+        elif client_s:
+            label = client_s
+        else:
+            label = ""
+        if label and label not in bucket["projects"]:
+            bucket["projects"].append(label)
+        # raw name
+        if person_name and person_name != canon:
+            bucket["raw_names"].add(person_name)
+        bucket["raw_names"].add(person_name)
 
-        # Prefer explicit planned_hours / target_hours ratio;
-        # fall back to stored allocation_pct sum for normalized rows.
-        if target_val is not None and target_val > 0:
+    result = []
+    for canon, b in sorted(agg.items()):
+        planned = b["planned_hours_sum"] if b["has_planned"] else 0.0
+        target_val = b["target_hours_max"] if b["has_target"] else None
+
+        # Canonical math: prefer planned/target ratio when both present.
+        if b["has_planned"] and b["has_target"] and target_val and target_val > 0:
             alloc_pct = (planned / target_val) * 100.0
-        elif alloc_pct_sum is not None:
-            alloc_pct = float(alloc_pct_sum)
+        elif b["has_alloc_pct"]:
+            # Legacy fallback: rows with no planned/target hours.
+            alloc_pct = b["alloc_pct_sum"]
         else:
             alloc_pct = 0.0
 
@@ -604,14 +665,17 @@ def get_people_allocation_for_week(
             warning = f"{alloc_pct:.0f}% — dangerously overallocated"
         elif alloc_pct > 100:
             warning = f"{alloc_pct:.0f}% — overallocated"
+        elif alloc_pct < 50:
+            warning = f"{alloc_pct:.0f}% — underallocated"
 
         result.append({
-            "person_name":    person_name,
-            "planned_hours":  planned,
-            "target_hours":   target_val,
+            "person_name":    canon,
+            "planned_hours":  round(planned, 2),
+            "target_hours":   round(target_val, 2) if target_val is not None else None,
             "allocation_pct": round(alloc_pct, 1),
-            "projects":       [p.strip() for p in (projects or "").split(",") if p.strip()],
+            "projects":       b["projects"],
             "warning":        warning,
+            "raw_names":      sorted(n for n in b["raw_names"] if n),
         })
     return result
 
