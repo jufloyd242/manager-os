@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from manager_os.db import content_hash
+from manager_os.ingest.workspace_gemini import _run_gemini_retrieval, _parse_retrieval_json
 from manager_os.utils import normalize_opp_id
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,134 @@ Search by OPP#, client, or name. Need: SOW, deal sheet, project plan, architectu
 Return ONLY JSON:
 {{"ok":true,"source":"google_drive_project_docs","retrieved_at":"{retrieved_at}","documents":[{{"document_type":"sow|deal_sheet|project_plan|architecture|runbook|other","title":"str","url":"str","confidence":0.9,"why_matched":"str"}}]}}
 Fail: {{"ok":false,"source":"google_drive_project_docs","error":"str"}}"""
+
+
+def _build_batch_drive_search_prompt(projects: list[dict]) -> str:
+    """Build a single Gemini CLI prompt that searches Drive docs for multiple projects.
+
+    Amortizes the read-only/metadata-only/JSON-schema boilerplate across all
+    projects in the batch instead of paying for it once per project.
+    """
+    project_lines = "\n".join(
+        f"- {normalize_opp_id(p.get('opportunity_number', ''))} | {p.get('client', '')} | {p.get('project_name', '')}"
+        for p in projects
+    )
+    return f"""[Read-only. Metadata only]
+Find Drive docs for these projects (OPP | client | name):
+{project_lines}
+
+Need: SOW, deal sheet, project plan, architecture, runbook, proposal/LOE.
+
+Return ONLY JSON mapping each OPP to its docs:
+{{"ok":true,"retrieved_at":"ISO8601","results":{{"OPP123":[{{"document_type":"sow|deal_sheet|project_plan|architecture|runbook|other","title":"str","url":"str","confidence":0.9,"why_matched":"str"}}]}}}}
+Fail: {{"ok":false,"error":"str","results":{{}}}}"""
+
+
+def _doc_data_to_project_document(
+    doc_data: dict,
+    opportunity_number: str,
+    client: str,
+    project_name: str,
+    retrieved_at: str,
+) -> ProjectDocument:
+    """Map a single document dict from a Gemini response to a ProjectDocument."""
+    doc_type = doc_data.get("document_type", "other")
+    title = doc_data.get("title", "")
+    url = doc_data.get("url", "")
+    if doc_type == "other" or not doc_type:
+        doc_type = detect_document_type(title, url)
+    return ProjectDocument(
+        project_id="",
+        opportunity_number=opportunity_number,
+        client=client,
+        project_name=project_name,
+        document_type=doc_type,
+        title=title,
+        url=url,
+        source="google_drive",
+        retrieved_at=retrieved_at,
+        search_status="success",
+        confidence=float(doc_data.get("confidence", 0.0)),
+        why_matched=doc_data.get("why_matched", ""),
+        metadata_json=doc_data.get("metadata", {}),
+    )
+
+
+def batch_search_drive_for_projects(
+    projects: list[dict],
+    *,
+    batch_size: int = 5,
+    use_yolo: bool = True,
+    timeout: int = 300,
+    dry_run: bool = False,
+) -> dict[str, "DriveSearchResult"]:
+    """Search Google Drive for documents for multiple projects in as few Gemini
+    CLI calls as possible, bounded by *batch_size* per call.
+
+    Every requested opportunity number is guaranteed to appear in the
+    returned dict, even if Gemini found no documents (or omitted it from its
+    response entirely, in which case a warning is attached).
+
+    Read-only safety comes from `_run_gemini_retrieval`, which always
+    prepends `_READ_ONLY_PREFIX` before sending to the Gemini CLI.
+    """
+    if not projects:
+        return {}
+
+    normalized = [
+        {
+            "opportunity_number": normalize_opp_id(p.get("opportunity_number", "")),
+            "client": p.get("client", ""),
+            "project_name": p.get("project_name", ""),
+        }
+        for p in projects
+    ]
+
+    chunks = [
+        normalized[i : i + batch_size] for i in range(0, len(normalized), batch_size)
+    ]
+
+    results_map: dict[str, DriveSearchResult] = {}
+
+    if dry_run:
+        for chunk in chunks:
+            prompt = _build_batch_drive_search_prompt(chunk)
+            for project in chunk:
+                result = DriveSearchResult()
+                result.warnings.append(f"dry_run: would search via batch prompt ({len(prompt)} chars)")
+                results_map[project["opportunity_number"]] = result
+        return results_map
+
+    for chunk in chunks:
+        prompt = _build_batch_drive_search_prompt(chunk)
+        raw, _cmd = _run_gemini_retrieval(prompt, use_yolo=use_yolo, timeout=timeout)
+        data = _parse_retrieval_json(raw)
+
+        if not data.get("ok"):
+            raise RuntimeError(f"Batch Drive search failed: {data.get('error', 'unknown error')}")
+
+        retrieved_at = data.get("retrieved_at", datetime.utcnow().isoformat())
+        chunk_results = data.get("results", {})
+
+        for project in chunk:
+            opp_id = project["opportunity_number"]
+            result = DriveSearchResult()
+            if opp_id in chunk_results:
+                for doc_data in chunk_results[opp_id]:
+                    result.documents.append(
+                        _doc_data_to_project_document(
+                            doc_data,
+                            opp_id,
+                            project["client"],
+                            project["project_name"],
+                            retrieved_at,
+                        )
+                    )
+            else:
+                result.warnings.append(f"OPP {opp_id} omitted from batch Drive search response")
+            results_map[opp_id] = result
+
+    return results_map
 
 
 def search_drive_for_project_docs(

@@ -178,3 +178,149 @@ def test_drive_search_prompt_is_compressed_and_safe():
     assert "metadata" in prompt.lower()
     assert "ONLY JSON" in prompt or "Return ONLY" in prompt
     assert "Return metadata only. Do not download full documents." not in prompt
+
+
+# ------------------------------------------------------------------
+# Task 3: batch_search_drive_for_projects
+# ------------------------------------------------------------------
+
+
+def test_batch_search_empty_projects_returns_empty_dict():
+    from manager_os.ingest.project_drive_docs import batch_search_drive_for_projects
+
+    with patch("manager_os.ingest.project_drive_docs._run_gemini_retrieval") as mock_run:
+        result = batch_search_drive_for_projects([], dry_run=False)
+
+    assert result == {}
+    mock_run.assert_not_called()
+
+
+@patch("manager_os.ingest.project_drive_docs._run_gemini_retrieval")
+def test_batch_search_dry_run_does_not_call_runtime_retrieval(mock_run):
+    from manager_os.ingest.project_drive_docs import batch_search_drive_for_projects
+
+    results = batch_search_drive_for_projects(
+        [{"opportunity_number": "OPP1", "client": "C1", "project_name": "P1"}],
+        dry_run=True,
+    )
+
+    mock_run.assert_not_called()
+    assert set(results.keys()) == {"OPP1"}
+    assert results["OPP1"].documents == []
+    assert any("dry" in w.lower() for w in results["OPP1"].warnings)
+
+
+@patch("manager_os.ingest.project_drive_docs._run_gemini_retrieval")
+def test_batch_search_drive_for_projects_parses_results(mock_run):
+    from manager_os.ingest.project_drive_docs import batch_search_drive_for_projects
+
+    mock_run.return_value = (
+        json.dumps(
+            {
+                "ok": True,
+                "retrieved_at": "2026-06-18T00:00:00Z",
+                "results": {
+                    "OPP1": [
+                        {
+                            "document_type": "sow",
+                            "title": "SOW1",
+                            "url": "http://1",
+                            "confidence": 0.9,
+                            "why_matched": "matched",
+                        }
+                    ],
+                    "OPP2": [],
+                },
+            }
+        ),
+        "cmd",
+    )
+
+    projects = [
+        {"opportunity_number": "OPP1", "client": "C1", "project_name": "P1"},
+        {"opportunity_number": "OPP2", "client": "C2", "project_name": "P2"},
+    ]
+
+    results = batch_search_drive_for_projects(projects, dry_run=False)
+
+    assert set(results.keys()) == {"OPP1", "OPP2"}
+    assert len(results["OPP1"].documents) == 1
+    assert results["OPP1"].documents[0].document_type == "sow"
+    assert len(results["OPP2"].documents) == 0
+    mock_run.assert_called_once()
+
+
+@patch("manager_os.ingest.project_drive_docs._run_gemini_retrieval")
+def test_batch_search_missing_opp_in_response_returns_empty_with_warning(mock_run):
+    from manager_os.ingest.project_drive_docs import batch_search_drive_for_projects
+
+    mock_run.return_value = (
+        json.dumps(
+            {
+                "ok": True,
+                "retrieved_at": "2026-06-18T00:00:00Z",
+                "results": {"OPP1": []},
+            }
+        ),
+        "cmd",
+    )
+
+    projects = [
+        {"opportunity_number": "OPP1", "client": "C1", "project_name": "P1"},
+        {"opportunity_number": "OPP2", "client": "C2", "project_name": "P2"},
+    ]
+
+    results = batch_search_drive_for_projects(projects, dry_run=False)
+
+    assert set(results.keys()) == {"OPP1", "OPP2"}
+    assert results["OPP2"].documents == []
+    assert any("omitted" in w.lower() or "missing" in w.lower() for w in results["OPP2"].warnings)
+
+
+@patch("manager_os.ingest.project_drive_docs._run_gemini_retrieval")
+def test_batch_search_chunks_by_batch_size(mock_run):
+    from manager_os.ingest.project_drive_docs import batch_search_drive_for_projects
+
+    mock_run.return_value = (
+        json.dumps({"ok": True, "retrieved_at": "2026-06-18T00:00:00Z", "results": {}}),
+        "cmd",
+    )
+
+    projects = [
+        {"opportunity_number": f"OPP{i}", "client": "C", "project_name": "P"}
+        for i in range(3)
+    ]
+
+    results = batch_search_drive_for_projects(projects, batch_size=2, dry_run=False)
+
+    assert mock_run.call_count == 2
+    assert set(results.keys()) == {"OPP0", "OPP1", "OPP2"}
+
+
+@patch("manager_os.ingest.project_drive_docs._run_gemini_retrieval")
+def test_batch_search_does_not_swallow_parse_errors(mock_run):
+    from manager_os.ingest.project_drive_docs import batch_search_drive_for_projects
+
+    mock_run.return_value = ("not json", "cmd")
+
+    with pytest.raises(Exception):
+        batch_search_drive_for_projects(
+            [{"opportunity_number": "OPP1", "client": "C1", "project_name": "P1"}],
+            dry_run=False,
+        )
+
+
+@patch("manager_os.ingest.project_drive_docs._run_gemini_retrieval")
+def test_batch_search_raises_on_ok_false(mock_run):
+    from manager_os.ingest.project_drive_docs import batch_search_drive_for_projects
+
+    mock_run.return_value = (
+        json.dumps({"ok": False, "error": "boom", "results": {}}),
+        "cmd",
+    )
+
+    with pytest.raises(RuntimeError):
+        batch_search_drive_for_projects(
+            [{"opportunity_number": "OPP1", "client": "C1", "project_name": "P1"}],
+            dry_run=False,
+        )
