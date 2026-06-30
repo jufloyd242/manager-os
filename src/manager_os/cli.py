@@ -2860,11 +2860,17 @@ def project_docs_fetch(
     print_prompt: bool = typer.Option(False, "--print-prompt", help="Print the Gemini prompt and exit."),
     force: bool = typer.Option(False, "--force", help="Overwrite existing documents."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output."),
+    batch: bool = typer.Option(False, "--batch", help="Search docs for multiple projects in one Gemini call instead of a single --opportunity-number."),
+    limit_projects: int = typer.Option(5, "--limit-projects", help="Max projects to include in --batch mode (bounded)."),
 ) -> None:
     """Fetch Google Drive documents for a specific project.
     
     Searches Drive for SOWs, closure decks, retrospectives, etc.
     Bounded: only fetches for the specified opportunity number.
+
+    Use --batch to search docs for up to --limit-projects projects (that do
+    not already have documents, unless --force) in one Gemini call instead of
+    one call per project.
     """
     from manager_os.config import get_settings
     from manager_os.db import get_connection
@@ -2873,13 +2879,77 @@ def project_docs_fetch(
         search_drive_for_project_docs,
         upsert_project_documents,
         _build_drive_search_prompt,
+        _build_batch_drive_search_prompt,
+        batch_search_drive_for_projects,
     )
 
     settings = get_settings()
     conn = get_connection(settings.db_path)
 
+    if batch:
+        force_clause = "" if force else "AND p.id NOT IN (SELECT DISTINCT project_id FROM project_documents)"
+        rows = conn.execute(
+            f"""
+            SELECT p.id, p.project_name, p.client, p.opportunity_number
+            FROM projects p
+            WHERE p.opportunity_number != ''
+            {force_clause}
+            ORDER BY p.opportunity_number
+            LIMIT ?
+            """,
+            [limit_projects],
+        ).fetchall()
+
+        if not rows:
+            console.print("[yellow]No projects found needing Drive doc search.[/yellow]")
+            raise typer.Exit(0)
+
+        projects = [
+            {"opportunity_number": r[3], "client": r[2], "project_name": r[1]}
+            for r in rows
+        ]
+        project_id_by_opp = {normalize_opp_id(r[3]): r[0] for r in rows}
+
+        if print_prompt:
+            prompt = _build_batch_drive_search_prompt(projects)
+            console.print("[bold]Gemini CLI Batch Prompt:[/bold]")
+            console.print(prompt)
+            raise typer.Exit(0)
+
+        if dry_run:
+            console.print("[bold]Project Docs Fetch — Batch Dry Run[/bold]")
+            console.print(f"  Projects selected: {len(projects)} (limit {limit_projects})")
+            for p in projects:
+                console.print(f"  - {p['opportunity_number']} — {p['project_name']} ({p['client']})")
+            console.print("\n[dim]Would search Google Drive for documents for these projects in one batch.[/dim]")
+            raise typer.Exit(0)
+
+        console.print(f"[bold]Batch-fetching Drive docs for {len(projects)} project(s)[/bold]")
+
+        results = batch_search_drive_for_projects(projects, timeout=timeout)
+
+        total_inserted = 0
+        total_updated = 0
+        for opp_id, drive_result in results.items():
+            if drive_result.warnings and verbose:
+                for warning in drive_result.warnings:
+                    console.print(f"[yellow]⚠ {opp_id}: {warning}[/yellow]")
+            if not drive_result.documents:
+                continue
+            project_id = project_id_by_opp.get(opp_id, "")
+            for doc in drive_result.documents:
+                doc.project_id = project_id
+            docs_to_upsert = drive_result.documents[:limit]
+            inserted, updated = upsert_project_documents(conn, docs_to_upsert, force=force)
+            total_inserted += inserted
+            total_updated += updated
+            console.print(f"[green]✓ {opp_id}: {len(drive_result.documents)} document(s)[/green]")
+
+        console.print(f"[bold]Done.[/bold] Inserted: {total_inserted}, Updated: {total_updated}")
+        raise typer.Exit(0)
+
     if not opportunity_number:
-        console.print("[red]Please provide --opportunity-number.[/red]")
+        console.print("[red]Please provide --opportunity-number (or use --batch).[/red]")
         raise typer.Exit(1)
 
     opp_id = normalize_opp_id(opportunity_number)
