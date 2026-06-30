@@ -194,18 +194,11 @@ def _write_snapshot(
 # ------------------------------------------------------------------
 
 FORECAST_PROMPT_TEMPLATE = """\
-Retrieve the latest people/staffing forecast for the AI/ML team.
-
-{read_only}
-
-Return strict JSON only with:
-  ok: boolean
-  source_title: string
-  source_url: string (Google Sheets URL if available)
-  retrieved_at: ISO timestamp
-  rows: array of objects with person, week_start, allocation_pct, project, client
-
-Query hint: {query_hint}
+[Read-only] Get latest AI/ML forecast.
+Query: {query_hint}
+Return ONLY JSON:
+{{"ok":true,"source_title":"str","source_url":"str","retrieved_at":"ISO8601","rows":[{{"person":"str","week_start":"YYYY-MM-DD","allocation_pct":100,"project":"str","client":"str"}}]}}
+Fail: {{"ok":false,"error":"str"}}
 """
 
 
@@ -220,17 +213,22 @@ def retrieve_forecast(
     """Retrieve latest forecasting data from Google Workspace via Gemini CLI.
 
     Use *query_hint* to guide Gemini to a specific spreadsheet name or URL.
+
+    Note: this template no longer injects ``_READ_ONLY_PREFIX`` directly —
+    ``_run_gemini_retrieval`` already prepends it for every live call, so
+    injecting it here too would pay for it twice. The dry-run preview below
+    is composed the same way so ``--print-prompt`` stays representative of
+    what is actually sent live.
     """
     effective_hint = query_hint or FORECAST_QUERY or "Find the latest people/staffing forecast for AI ML team."
     prompt = FORECAST_PROMPT_TEMPLATE.format(
-        read_only=_READ_ONLY_PREFIX,
         query_hint=effective_hint,
     )
 
     result = RetrievalResult(dry_run=dry_run)
 
     if dry_run:
-        result.json_text = prompt
+        result.json_text = f"{_READ_ONLY_PREFIX}\n\n{prompt}"
         return result
 
     try:
@@ -258,23 +256,10 @@ def retrieve_forecast(
 # ------------------------------------------------------------------
 
 CALENDAR_PROMPT_TEMPLATE = """\
-Retrieve calendar events for {target_date} with lookback {lookback_days} days
-and lookahead {lookahead_days} days.
-
-{read_only}
-
-Return strict JSON only with:
-  ok: boolean
-  source: "google_calendar_gemini"
-  retrieved_at: ISO timestamp
-  events: array of objects with:
-    - title: string
-    - start_time: ISO timestamp
-    - end_time: ISO timestamp
-    - attendees: array of email strings (if available)
-    - location/meet_link: string (if available)
-    - description_summary: string (brief, max 200 chars)
-    - external_id: string (calendar event id if available)
+[Read-only] Get calendar for {target_date}; lookback={lookback_days}d ahead={lookahead_days}d.
+Return ONLY JSON:
+{{"ok":true,"source":"google_calendar_gemini","retrieved_at":"ISO8601","events":[{{"title":"str","start_time":"ISO","end_time":"ISO","attendees":["str"],"location":"str","description_summary":"str","external_id":"str"}}]}}
+Fail: {{"ok":false,"error":"str"}}
 """
 
 
@@ -287,18 +272,21 @@ def retrieve_calendar(
     lookback_days: int | None = None,
     lookahead_days: int | None = None,
 ) -> RetrievalResult:
-    """Retrieve calendar events from Google Workspace via Gemini CLI."""
+    """Retrieve calendar events from Google Workspace via Gemini CLI.
+
+    Note: see ``retrieve_forecast`` docstring re: ``_READ_ONLY_PREFIX`` no
+    longer being double-injected.
+    """
     prompt = CALENDAR_PROMPT_TEMPLATE.format(
         target_date=target_date.isoformat(),
         lookback_days=lookback_days or CALENDAR_LOOKBACK_DAYS,
         lookahead_days=lookahead_days or CALENDAR_LOOKAHEAD_DAYS,
-        read_only=_READ_ONLY_PREFIX,
     )
 
     result = RetrievalResult(dry_run=dry_run)
 
     if dry_run:
-        result.json_text = prompt
+        result.json_text = f"{_READ_ONLY_PREFIX}\n\n{prompt}"
         return result
 
     try:
@@ -330,49 +318,11 @@ Do not send, edit, delete, or modify any Chat messages or Google Workspace data.
 Open this Google Chat space/app URL:
 {chat_url}
 
-This space contains daily summarized workspace activity and action items.
+Retrieve the daily activity summary and action items for {target_date} (or the most recent within {lookback_days} day(s) if not available).
 
-For target date {target_date}, retrieve the daily activity summary and action items.
-If an exact date is not available, retrieve the most recent summary within {lookback_days} day(s).
-
-Return strict JSON only with:
-{{
-  "ok": true,
-  "source": "google_chat_activity_summary",
-  "source_url": "{chat_url}",
-  "retrieved_at": "...",
-  "summary_date": "YYYY-MM-DD",
-  "summary": "concise summary",
-  "items": [
-    {{
-      "type": "action_item|mention|doc_update|calendar_change|deal_update|staffing_update|other",
-      "title": "...",
-      "description": "...",
-      "source_url": "...",
-      "requires_attention": true,
-      "assigned_to": "manager|person name|unknown",
-      "due_date": "YYYY-MM-DD|null",
-      "entity_type": "person|client|deal|team|workspace|unknown",
-      "entity_name": "...",
-      "confidence": 0.0-1.0
-    }}
-  ],
-  "action_items": [
-    {{
-      "description": "...",
-      "assigned_to": "manager|person name|unknown",
-      "due_date": "YYYY-MM-DD|null",
-      "source_url": "...",
-      "entity_type": "...",
-      "entity_name": "...",
-      "confidence": 0.0-1.0
-    }}
-  ]
-}}
-
-If the Chat source cannot be read, return:
-{{"ok": false, "source": "google_chat_activity_summary", "error": "..."}}
-
+Return ONLY JSON:
+{{"ok":true,"source":"google_chat_activity_summary","source_url":"{chat_url}","retrieved_at":"ISO8601","summary_date":"YYYY-MM-DD","summary":"str","items":[{{"type":"action_item|mention|doc_update|other","title":"str","description":"str","source_url":"str","requires_attention":true,"assigned_to":"str","due_date":"YYYY-MM-DD|null","entity_type":"str","entity_name":"str","confidence":1.0}}],"action_items":[]}}
+Fail: {{"ok":false,"source":"google_chat_activity_summary","error":"str"}}
 Do not guess.
 """
 
