@@ -91,59 +91,14 @@ def _build_drive_search_prompt(
     project_name: str,
 ) -> str:
     """Build the Gemini CLI prompt for searching Google Drive."""
-    return f"""You are operating in read-only mode.
-Do not create, edit, delete, move, send, or modify anything.
+    retrieved_at = datetime.utcnow().isoformat()
+    return f"""[Read-only. Metadata only]
+Find Drive docs for OPP={opportunity_number}; client={client}; project={project_name}.
+Search by OPP#, client, or name. Need: SOW, deal sheet, project plan, architecture, runbook, proposal/LOE.
 
-Search Google Drive for documents related to this project:
-Opportunity Number: {opportunity_number}
-Customer: {client}
-Opportunity Name: {project_name}
-
-Search primarily by exact opportunity number.
-Also consider customer and opportunity name.
-
-Return metadata only. Do not download full documents.
-
-Find documents such as:
-- SOW / INT SOW
-- Deal Sheet
-- Project Closure Presentation / Closure Deck
-- Retrospective
-- Project Plan
-- Architecture / Design Doc
-- Runbook / Handoff
-- Proposal / LOE / Estimate
-
-Return strict JSON only with:
-{{
-  "ok": true,
-  "source": "google_drive_project_docs",
-  "retrieved_at": "{datetime.utcnow().isoformat()}",
-  "documents": [
-    {{
-      "document_type": "sow|deal_sheet|closure_presentation|retro|project_plan|architecture|design_doc|runbook|handoff|proposal|loe|other",
-      "title": "...",
-      "url": "...",
-      "confidence": 0.0-1.0,
-      "why_matched": "matched exact OPP number / customer / opportunity name"
-    }}
-  ]
-}}
-
-If you cannot find any documents, return:
-{{
-  "ok": true,
-  "source": "google_drive_project_docs",
-  "retrieved_at": "{datetime.utcnow().isoformat()}",
-  "documents": []
-}}
-
-If you encounter an error, return:
-{{
-  "ok": false,
-  "source": "google_drive_project_docs",
-  "error": "..."
-}}"""
+Return ONLY JSON:
+{{"ok":true,"source":"google_drive_project_docs","retrieved_at":"{retrieved_at}","documents":[{{"document_type":"sow|deal_sheet|project_plan|architecture|runbook|other","title":"str","url":"str","confidence":0.9,"why_matched":"str"}}]}}
+Fail: {{"ok":false,"source":"google_drive_project_docs","error":"str"}}"""
 
 
 def search_drive_for_project_docs(

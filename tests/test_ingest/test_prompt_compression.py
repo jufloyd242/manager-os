@@ -158,3 +158,23 @@ def test_activity_compressed_json_parses_and_prompt_budget(mock_run):
 
     assert len(dry_result.json_text) < 1000
     assert "ONLY JSON" in dry_result.json_text or "Return ONLY" in dry_result.json_text
+
+
+# ------------------------------------------------------------------
+# Task 2: project_drive_docs.py _build_drive_search_prompt compression
+# ------------------------------------------------------------------
+
+
+def test_drive_search_prompt_is_compressed_and_safe():
+    from manager_os.ingest.project_drive_docs import _build_drive_search_prompt
+
+    prompt = _build_drive_search_prompt("OPP123", "Acme", "Project X")
+
+    assert len(prompt) < 700
+    assert "OPP123" in prompt
+    assert "Acme" in prompt
+    assert "Project X" in prompt
+    assert "read-only" in prompt.lower()
+    assert "metadata" in prompt.lower()
+    assert "ONLY JSON" in prompt or "Return ONLY" in prompt
+    assert "Return metadata only. Do not download full documents." not in prompt
