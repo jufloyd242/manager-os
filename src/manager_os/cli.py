@@ -1077,6 +1077,92 @@ def daily(
     console.print()
 
     # ------------------------------------------------------------------
+    # Daily Operating Loop (local DB only — no live Gemini/Workspace calls)
+    # ------------------------------------------------------------------
+    from manager_os.build.daily_operating_loop import build_daily_operating_loop
+
+    console.print(Panel.fit(
+        "[bold]📋 Daily Operating Loop[/bold]",
+        box=rich_box.ROUNDED,
+        border_style="magenta",
+    ))
+    # Read-only: never creates the DB file as a side effect (would otherwise
+    # break Phase 3's "no existing database yet" first-run dry-run behavior).
+    _dol_conn = _dry_run_open_ro(settings.db_path)
+    if _dol_conn is None:
+        loop = {
+            "people_staffing": [], "meetings": [], "projects_deals": [],
+            "document_gaps": [], "feedback_learning": [], "recommended_actions": [],
+            "warnings": ["No existing database found yet — run ingest first."],
+        }
+    else:
+        try:
+            loop = build_daily_operating_loop(_dol_conn, run_date, settings=settings)
+        except Exception as exc:
+            loop = {
+                "people_staffing": [], "meetings": [], "projects_deals": [],
+                "document_gaps": [], "feedback_learning": [], "recommended_actions": [],
+                "warnings": [f"daily_operating_loop: {exc}"],
+            }
+        finally:
+            _dol_conn.close()
+
+    console.print("[bold]People / Staffing[/bold]")
+    if loop["people_staffing"]:
+        for p in loop["people_staffing"]:
+            console.print(f"  ⚠ {p['person_name']}: {p['allocation_pct']:.0f}% — {p.get('warning') or ''}")
+    else:
+        console.print("  [dim]No staffing concerns.[/dim]")
+    console.print()
+
+    console.print("[bold]Meetings[/bold]")
+    if loop["meetings"]:
+        for m in loop["meetings"]:
+            when = f" at {m['start_time']}" if m.get("start_time") else ""
+            console.print(f"  • {m['title']}{when} — {m['reason']}")
+    else:
+        console.print("  [dim]No meetings needing prep.[/dim]")
+    console.print()
+
+    console.print("[bold]Projects / Deals[/bold]")
+    if loop["projects_deals"]:
+        for d in loop["projects_deals"]:
+            console.print(f"  ⚠ [{d['severity']}] {d['entity_name']}: {d['summary']}")
+    else:
+        console.print("  [dim]No open project/deal risk signals.[/dim]")
+    console.print()
+
+    console.print("[bold]Project Documents / Document Gaps[/bold]")
+    if loop["document_gaps"]:
+        for g in loop["document_gaps"]:
+            console.print(f"  • {g['opportunity_number']} — {g['project_name']} ({g['client']}): {g['suggested_command']}")
+    else:
+        console.print("  [dim]No document gaps.[/dim]")
+    console.print()
+
+    if loop["feedback_learning"]:
+        console.print("[bold]Feedback Learning[/bold]")
+        for f in loop["feedback_learning"]:
+            console.print(
+                f"  • {f['pattern_type']} — {f['entity_name']} ({f['rating']}, x{f['event_count']}): {f['suggested_action']}"
+            )
+        console.print()
+
+    console.print("[bold]Recommended Actions[/bold]")
+    if loop["recommended_actions"]:
+        for a in loop["recommended_actions"]:
+            cmd_str = f" → {a['command']}" if a.get("command") else ""
+            console.print(f"  [{a['priority']}] {a['title']} ({a['reason']}){cmd_str}")
+    else:
+        console.print("  [dim]Nothing urgent.[/dim]")
+    console.print()
+
+    if loop["warnings"]:
+        for w in loop["warnings"]:
+            console.print(f"[yellow]⚠ {w}[/yellow]")
+        console.print()
+
+    # ------------------------------------------------------------------
     # Phase 1: Workspace fetch
     # ------------------------------------------------------------------
     workspace_results: dict[str, bool] = {}
