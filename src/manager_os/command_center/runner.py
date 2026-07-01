@@ -1,4 +1,7 @@
-"""Validates CommandRunRequests against the registry and builds safe argv lists.
+"""Validates CommandRunRequests against the registry, builds safe argv lists,
+and (for a narrow phase-1 allowlist of local, read-only commands) actually
+executes them via subprocess — persisting a `command_runs` row for every
+attempted run.
 
 Safety invariants enforced here:
 - Blocked commands are rejected before any argument validation or argv
@@ -9,19 +12,21 @@ Safety invariants enforced here:
   never a joined/interpolated shell string, never `shell=True`.
 - Bounded parameters (e.g. --limit, --limit-projects) are hard-rejected when
   they exceed the command's declared `max_scope`, never silently clamped.
-
-This module intentionally does NOT execute anything via subprocess — it only
-validates requests and constructs the argv that a caller *could* run. See
-the module docstring in this package's __init__ for what's stubbed.
+- `execute_command` only ever calls `subprocess.run` for command_ids in the
+  phase-1 `_EXECUTABLE_COMMAND_IDS` allowlist below — every other registered
+  command (blocked risk_level, or external_bounded/external_high_risk not in
+  the allowlist) is rejected with status="blocked", regardless of
+  `confirm`, and never reaches subprocess.
 """
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from manager_os.command_center import registry
+from manager_os.command_center import history, registry
 from manager_os.command_center.errors import (
     CommandBlockedError,
     ConfirmationRequiredError,
@@ -288,3 +293,166 @@ def build_argv(
         )
 
     return [sys.executable, "-m", "manager_os.cli", *builder(validated)]
+
+
+# ---------------------------------------------------------------------------
+# execute_command — phase-1 execution: actually run the narrow allowlist of
+# local, read-only commands via subprocess, persisting a command_runs row
+# for every attempted run.
+# ---------------------------------------------------------------------------
+
+# Only these command_ids may ever reach subprocess.run in this phase. Every
+# other registered command_id — including risk_level=blocked commands AND
+# any external_bounded/external_high_risk command not listed here (e.g.
+# project_docs_fetch_live_single, project_docs_fetch_batch_live_bounded) —
+# is rejected with status="blocked", regardless of `confirm`.
+_EXECUTABLE_COMMAND_IDS: frozenset[str] = frozenset(
+    {
+        "daily_dry_run",
+        "project_docs_fetch_dry_run",
+        "project_docs_fetch_print_prompt",
+        "project_memory_report",
+        "feedback_summary",
+        "people_audit",
+        "search_projects",
+    }
+)
+
+
+def _decode(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
+
+
+def _run_result(row: dict[str, Any], *, argv: Optional[list[str]]) -> dict[str, Any]:
+    return {
+        "run_id": row["id"],
+        "command_id": row["command_id"],
+        "status": row["status"],
+        "argv": argv,
+        "stdout": row["stdout"],
+        "stderr": row["stderr"],
+        "error": row["error"],
+        "estimated_input_tokens": row["estimated_input_tokens"],
+        "estimated_output_tokens": row["estimated_output_tokens"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+    }
+
+
+def execute_command(
+    conn: Any,
+    command_id: str,
+    params: Optional[dict[str, Any]] = None,
+    *,
+    confirm: bool = False,
+    timeout: Optional[int] = None,
+) -> dict[str, Any]:
+    """Execute a registered command via subprocess and persist a
+    `command_runs` row recording the attempt.
+
+    Returns a JSON-serializable dict:
+        {
+          "run_id", "command_id", "status" ("success"|"failed"|"blocked"|"timeout"),
+          "argv", "stdout", "stderr", "error",
+          "estimated_input_tokens", "estimated_output_tokens",
+          "started_at", "finished_at",
+        }
+
+    Raises:
+    - CommandNotFoundError if command_id isn't registered (nothing is
+      persisted — there's no valid spec to record against).
+    - InvalidArgumentError / ScopeExceededError if the command is in the
+      phase-1 allowlist but its arguments fail validation (e.g. missing a
+      required parameter, or an unregistered/raw parameter) — a "failed"
+      row is persisted first so there's still an audit trail, then the
+      original exception is re-raised.
+
+    Never raises for a command that's simply not executable in this phase
+    (blocked risk_level, or any external_bounded/external_high_risk command
+    not in `_EXECUTABLE_COMMAND_IDS`, or a confirm=False live command) —
+    those return status="blocked" instead, with a persisted row, and
+    subprocess.run is never called. `confirm` has no effect on this
+    allowlist in this phase — it exists for forward-compatibility with a
+    future phase that permits confirmed external_bounded execution.
+    """
+    params = params or {}
+    spec = registry.get(command_id)  # raises CommandNotFoundError; nothing persisted yet
+
+    history.ensure_command_runs_table(conn)
+
+    if command_id not in _EXECUTABLE_COMMAND_IDS:
+        error = (
+            f"Command {command_id!r} (risk_level={spec.risk_level.value}) is not "
+            "executable in this phase. Only these command_ids may execute: "
+            f"{sorted(_EXECUTABLE_COMMAND_IDS)}."
+        )
+        run_id = history.insert_command_run_started(
+            conn,
+            command_id=command_id,
+            risk_level=spec.risk_level.value,
+            external_call_risk=spec.external_call_risk.value,
+            dry_run=spec.supports_dry_run,
+            argv=None,
+            estimated_input_tokens=spec.estimated_input_tokens,
+        )
+        history.update_command_run_finished(conn, run_id, status="blocked", error=error)
+        row = history.get_command_run(conn, run_id)
+        return _run_result(row, argv=None)
+
+    try:
+        argv = build_argv(command_id, params)
+    except (InvalidArgumentError, ScopeExceededError) as exc:
+        run_id = history.insert_command_run_started(
+            conn,
+            command_id=command_id,
+            risk_level=spec.risk_level.value,
+            external_call_risk=spec.external_call_risk.value,
+            dry_run=spec.supports_dry_run,
+            argv=None,
+            estimated_input_tokens=spec.estimated_input_tokens,
+        )
+        history.update_command_run_finished(conn, run_id, status="failed", error=str(exc))
+        raise
+
+    run_timeout = timeout if timeout is not None else spec.default_timeout_seconds
+    run_id = history.insert_command_run_started(
+        conn,
+        command_id=command_id,
+        risk_level=spec.risk_level.value,
+        external_call_risk=spec.external_call_risk.value,
+        dry_run=spec.supports_dry_run,
+        argv=argv,
+        estimated_input_tokens=spec.estimated_input_tokens,
+    )
+
+    try:
+        proc = subprocess.run(
+            argv, shell=False, capture_output=True, text=True, timeout=run_timeout
+        )
+    except subprocess.TimeoutExpired as exc:
+        history.update_command_run_finished(
+            conn,
+            run_id,
+            status="timeout",
+            stdout=_decode(exc.stdout),
+            stderr=_decode(exc.stderr),
+            error=f"Command {command_id!r} timed out after {run_timeout}s.",
+        )
+        row = history.get_command_run(conn, run_id)
+        return _run_result(row, argv=argv)
+    except OSError as exc:
+        history.update_command_run_finished(conn, run_id, status="failed", error=str(exc))
+        row = history.get_command_run(conn, run_id)
+        return _run_result(row, argv=argv)
+
+    status = "success" if proc.returncode == 0 else "failed"
+    error = None if status == "success" else f"Command exited with code {proc.returncode}."
+    history.update_command_run_finished(
+        conn, run_id, status=status, stdout=proc.stdout, stderr=proc.stderr, error=error
+    )
+    row = history.get_command_run(conn, run_id)
+    return _run_result(row, argv=argv)

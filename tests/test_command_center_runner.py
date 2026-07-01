@@ -1,5 +1,7 @@
 """Tests for the command runner: validation, confirmation gating, bounded scope,
-blocked-command rejection, and safe (non-shell) argv construction.
+blocked-command rejection, safe (non-shell) argv construction, and (execution
+phase) actually running allowlisted commands via subprocess with persisted
+history.
 
 Invariants covered (see task spec):
 5. No arbitrary shell text accepted — unknown params rejected.
@@ -10,15 +12,37 @@ Invariants covered (see task spec):
 10. Dry-run commands don't require confirmation.
 11. Unknown parameter names are rejected.
 12. Unknown command_id gives a clear error.
+
+Execution-phase invariants (execute_command):
+E1. Safe command executes through subprocess.run with shell=False and a
+    list[str] argv (never a joined shell string).
+E2. stdout/stderr/status are captured in the returned result.
+E3. A command_runs row is created for a successful run.
+E4. A command_runs row is created for a failed run.
+E5. A blocked command_id cannot execute (subprocess.run not called), but a
+    row IS persisted recording the blocked attempt.
+E6. An unknown command_id cannot execute — clear error, nothing persisted.
+E7. A raw "shell text" param is rejected before argv construction.
+E8. Timeout is enforced and persisted as status="timeout".
+E9. A live/external command (not in the phase-1 allowlist) is rejected
+    regardless of confirm, and never reaches subprocess.run.
+E10. project_docs_fetch_dry_run requires opportunity_number.
+E11. project_docs_fetch_batch_live_bounded is not executable in this phase
+     regardless of otherwise-valid params.
+E12. One real, unmocked subprocess execution proves the wiring actually works.
 """
 
 from __future__ import annotations
 
+import subprocess
 import sys
+import time
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from manager_os.command_center import registry, runner
+from manager_os.command_center import history, registry, runner
 from manager_os.command_center.errors import (
     CommandBlockedError,
     CommandNotFoundError,
@@ -27,6 +51,10 @@ from manager_os.command_center.errors import (
     InvalidArgumentError,
     ScopeExceededError,
 )
+from manager_os.command_center.runner import execute_command
+from manager_os.db import get_connection
+
+REPO_ROOT = Path(__file__).parent.parent
 
 
 def test_dry_run_allowed_without_confirmation():
@@ -179,3 +207,193 @@ def test_build_argv_never_contains_a_joined_multi_flag_string():
     for part in argv:
         assert not part.startswith("manager-os ")
         assert "--" not in part or part.startswith("--")
+
+
+# ---------------------------------------------------------------------------
+# execute_command — actually running allowlisted commands via subprocess,
+# with persisted history for every attempted run.
+# ---------------------------------------------------------------------------
+
+
+def _mock_completed(returncode=0, stdout="ok\n", stderr=""):
+    proc = MagicMock()
+    proc.returncode = returncode
+    proc.stdout = stdout
+    proc.stderr = stderr
+    return proc
+
+
+@pytest.fixture()
+def cc_conn():
+    conn = get_connection(":memory:")
+    yield conn
+    conn.close()
+
+
+def test_execute_safe_command_calls_subprocess_with_list_and_shell_false(cc_conn):
+    with patch("manager_os.command_center.runner.subprocess.run", return_value=_mock_completed()) as mock_run:
+        execute_command(cc_conn, "daily_dry_run", {})
+
+    assert mock_run.call_count == 1
+    args, kwargs = mock_run.call_args
+    called_argv = args[0]
+    assert isinstance(called_argv, list)
+    assert all(isinstance(part, str) for part in called_argv)
+    assert kwargs.get("shell", False) is False
+
+
+def test_execute_captures_stdout_stderr_status(cc_conn):
+    with patch(
+        "manager_os.command_center.runner.subprocess.run",
+        return_value=_mock_completed(returncode=0, stdout="hello\n", stderr="warn\n"),
+    ):
+        result = execute_command(cc_conn, "daily_dry_run", {})
+
+    assert result["status"] == "success"
+    assert result["stdout"] == "hello\n"
+    assert result["stderr"] == "warn\n"
+
+
+def test_execute_success_persists_command_runs_row(cc_conn):
+    with patch("manager_os.command_center.runner.subprocess.run", return_value=_mock_completed()):
+        result = execute_command(cc_conn, "daily_dry_run", {})
+
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row is not None
+    assert row["status"] == "success"
+    assert row["command_id"] == "daily_dry_run"
+    assert row["started_at"] is not None
+    assert row["finished_at"] is not None
+
+
+def test_execute_failure_persists_command_runs_row(cc_conn):
+    with patch(
+        "manager_os.command_center.runner.subprocess.run",
+        return_value=_mock_completed(returncode=1, stdout="", stderr="boom"),
+    ):
+        result = execute_command(cc_conn, "daily_dry_run", {})
+
+    assert result["status"] == "failed"
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["stderr"] == "boom"
+    assert row["error"] is not None
+
+
+def test_execute_blocked_command_never_calls_subprocess_but_is_persisted(cc_conn):
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(cc_conn, "retrieve_forecast", {})
+
+    mock_run.assert_not_called()
+    assert result["status"] == "blocked"
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row is not None
+    assert row["status"] == "blocked"
+    assert row["command_id"] == "retrieve_forecast"
+
+
+def test_execute_batch_live_bounded_blocked_regardless_of_valid_params(cc_conn):
+    spec = registry.get("project_docs_fetch_batch_live_bounded")
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(
+            cc_conn,
+            "project_docs_fetch_batch_live_bounded",
+            {"limit_projects": spec.max_scope},
+            confirm=True,
+        )
+
+    mock_run.assert_not_called()
+    assert result["status"] == "blocked"
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row is not None and row["status"] == "blocked"
+
+
+def test_execute_live_single_confirm_false_blocked_regardless(cc_conn):
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(
+            cc_conn,
+            "project_docs_fetch_live_single",
+            {"opportunity_number": "OPP1"},
+            confirm=False,
+        )
+
+    mock_run.assert_not_called()
+    assert result["status"] == "blocked"
+
+
+def test_execute_live_single_confirm_true_still_blocked_in_this_phase(cc_conn):
+    # Only the 7 named phase-1 commands may execute, regardless of confirm=True.
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(
+            cc_conn,
+            "project_docs_fetch_live_single",
+            {"opportunity_number": "OPP1"},
+            confirm=True,
+        )
+
+    mock_run.assert_not_called()
+    assert result["status"] == "blocked"
+
+
+def test_execute_unknown_command_raises_and_persists_nothing(cc_conn):
+    before = len(history.list_command_runs(cc_conn, limit=1000))
+
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        with pytest.raises(CommandNotFoundError):
+            execute_command(cc_conn, "does_not_exist", {})
+
+    mock_run.assert_not_called()
+    after = len(history.list_command_runs(cc_conn, limit=1000))
+    assert after == before
+
+
+def test_execute_raw_shell_param_rejected_before_subprocess(cc_conn):
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        with pytest.raises(InvalidArgumentError):
+            execute_command(cc_conn, "daily_dry_run", {"__raw__": "; rm -rf /"})
+
+    mock_run.assert_not_called()
+
+
+def test_execute_project_docs_fetch_dry_run_missing_opportunity_number_rejected(cc_conn):
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        with pytest.raises(InvalidArgumentError):
+            execute_command(cc_conn, "project_docs_fetch_dry_run", {})
+
+    mock_run.assert_not_called()
+
+
+def test_execute_timeout_is_enforced_and_persisted(cc_conn):
+    with patch(
+        "manager_os.command_center.runner.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=["x"], timeout=5),
+    ):
+        result = execute_command(cc_conn, "daily_dry_run", {}, timeout=5)
+
+    assert result["status"] == "timeout"
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row is not None
+    assert row["status"] == "timeout"
+
+
+def test_execute_daily_dry_run_end_to_end_real_subprocess(tmp_path, monkeypatch):
+    # No mocking here: proves the wiring truly works. Uses a dedicated temp
+    # DB path for the *subprocess's* own DB access (never the real DB), and
+    # a separate in-memory connection for this test's own command_runs
+    # bookkeeping (avoids any DuckDB file-lock contention between the two
+    # separate processes touching the same file).
+    sub_db_path = str(tmp_path / "subprocess_test.duckdb")
+    monkeypatch.setenv("MANAGER_OS_DB_PATH", sub_db_path)
+    monkeypatch.setenv("MANAGER_OS_WORKSPACE_RETRIEVAL_ENABLED", "false")
+
+    conn = get_connection(":memory:")
+    start = time.monotonic()
+    result = execute_command(conn, "daily_dry_run", {}, timeout=60)
+    elapsed = time.monotonic() - start
+    conn.close()
+
+    assert elapsed < 60, "daily_dry_run should be fast/local (took %.1fs)" % elapsed
+    assert result["status"] == "success", result["stderr"]
+    assert result["argv"][0] == sys.executable
+    assert "DRY RUN" in (result["stdout"] or "")

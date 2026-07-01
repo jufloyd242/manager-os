@@ -1,12 +1,12 @@
-"""Command run history: in-memory recording of command runs, plus (designed
-and implemented, but not yet wired into any caller) DB persistence.
+"""Command run history: in-memory recording of command runs, plus durable
+DB persistence via the `command_runs` table.
 
-Status: `CommandRunRecord` + `CommandHistory` (in-memory) are fully
-implemented and usable today. `persist_run`/`load_recent_runs` against the
-`command_runs` DB table are also implemented, but nothing in this pass calls
-them yet — no CLI/API/runner code writes to the DB. That wiring is the next
-integration step once a caller (e.g. the API layer) actually executes
-commands and wants durable history.
+`CommandRunRecord` + `CommandHistory` (in-memory) remain available for
+lightweight, non-persisted tracking. `persist_run`/`load_recent_runs` and the
+newer `ensure_command_runs_table`/`insert_command_run_started`/
+`update_command_run_finished`/`list_command_runs`/`get_command_run` helpers
+are used by `runner.execute_command` to durably record every attempted run
+(success, failure, blocked, timeout) as it happens.
 """
 
 from __future__ import annotations
@@ -140,3 +140,91 @@ def load_recent_runs(
             [limit],
         ).fetchall()
     return [dict(zip(_RUN_RECORD_COLUMNS, row)) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Execution-phase helpers: used by runner.execute_command to record every
+# attempted run (success, failure, blocked, timeout) as it happens.
+# ---------------------------------------------------------------------------
+
+
+def ensure_command_runs_table(conn: Any) -> None:
+    """Idempotently ensure the command_runs table (and the rest of the
+    schema) exists on `conn`. Safe to call on any DuckDB connection, not
+    just ones opened via `manager_os.db.get_connection` (which already runs
+    this as part of its own init_schema call) — re-running is a no-op
+    thanks to `CREATE TABLE IF NOT EXISTS`.
+    """
+    from manager_os.db import init_schema
+
+    init_schema(conn)
+
+
+def insert_command_run_started(
+    conn: Any,
+    *,
+    command_id: str,
+    risk_level: str,
+    external_call_risk: str,
+    dry_run: bool,
+    argv: Optional[list[str]],
+    estimated_input_tokens: Optional[int] = None,
+    affected_tables: Optional[list[str]] = None,
+) -> str:
+    """Insert a new command_runs row with status="running" and return its id.
+
+    `argv` may be None (e.g. for blocked commands, or commands whose args
+    failed validation before argv could be built) — persisted as an empty
+    JSON array in that case.
+    """
+    record = CommandRunRecord.create(
+        command_id=command_id,
+        risk_level=risk_level,
+        external_call_risk=external_call_risk,
+        dry_run=dry_run,
+        argv=argv or [],
+        estimated_input_tokens=estimated_input_tokens,
+        affected_tables=affected_tables,
+    )
+    persist_run(conn, record)
+    return record.id
+
+
+def update_command_run_finished(
+    conn: Any,
+    run_id: str,
+    *,
+    status: str,
+    stdout: Optional[str] = None,
+    stderr: Optional[str] = None,
+    error: Optional[str] = None,
+) -> datetime:
+    """Update an existing command_runs row in place with its final status,
+    captured output, and finished_at timestamp. Returns the finished_at
+    timestamp that was written."""
+    finished_at = datetime.utcnow()
+    conn.execute(
+        """
+        UPDATE command_runs
+        SET status = ?, stdout = ?, stderr = ?, error = ?, finished_at = ?
+        WHERE id = ?
+        """,
+        [status, stdout, stderr, error, finished_at, run_id],
+    )
+    return finished_at
+
+
+def list_command_runs(conn: Any, limit: int = 50) -> list[dict]:
+    """List the most recent command_runs rows, across all command_ids."""
+    return load_recent_runs(conn, limit=limit)
+
+
+def get_command_run(conn: Any, run_id: str) -> Optional[dict]:
+    """Fetch a single command_runs row by id, or None if not found."""
+    col_list = ", ".join(_RUN_RECORD_COLUMNS)
+    row = conn.execute(
+        f"SELECT {col_list} FROM command_runs WHERE id = ?", [run_id]
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(zip(_RUN_RECORD_COLUMNS, row))
