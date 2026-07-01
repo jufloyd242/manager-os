@@ -191,7 +191,8 @@ function CommandRow({
             </p>
           )}
           <p>
-            <span className="font-semibold">argv preview:</span> {validateResult.argv_preview.join(' ')}
+            <span className="font-semibold">argv preview:</span>{' '}
+            {validateResult.argv_preview ? validateResult.argv_preview.join(' ') : 'n/a (blocked)'}
           </p>
           <p>
             <span className="font-semibold">estimated input tokens:</span>{' '}

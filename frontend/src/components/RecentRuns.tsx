@@ -51,7 +51,7 @@ export function RecentRuns({ refreshKey }: RecentRunsProps) {
     }
     try {
       const result = await getRunLogs(run.run_id)
-      setLogs({ stdout: result.data.stdout, stderr: result.data.stderr })
+      setLogs({ stdout: result.data.stdout ?? '', stderr: result.data.stderr ?? '' })
       setLogsMock(result.isMock)
     } catch {
       setLogs({ stdout: '', stderr: 'Failed to load logs.' })

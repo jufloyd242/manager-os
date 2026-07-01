@@ -300,9 +300,9 @@ export function mockRunLogs(runId: string): Promise<RunLogs> {
   const run = mockRecentRuns.find((r) => r.run_id === runId)
   return delay(
     {
-      run_id: runId,
       stdout: run?.stdout ?? '[mock] no stdout captured for this run.',
       stderr: run?.stderr ?? '',
+      error: null,
     },
     100,
   )

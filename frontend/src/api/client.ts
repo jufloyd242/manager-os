@@ -100,7 +100,7 @@ export interface CommandSpec {
 /** Response shape for `POST /api/commands/{id}/validate`. */
 export interface ValidateResponse {
   ok: boolean
-  argv_preview: string[]
+  argv_preview: string[] | null
   risk_level: RiskLevel
   external_call_risk: ExternalCallRisk
   estimated_input_tokens: number | null
@@ -135,9 +135,9 @@ export interface RunRecord {
 
 /** Response shape for `GET /api/runs/{run_id}/logs`. */
 export interface RunLogs {
-  run_id: string
-  stdout: string
-  stderr: string
+  stdout: string | null
+  stderr: string | null
+  error: string | null
 }
 
 /** The most recent token-cost estimate shown by `TokenBudgetPanel`. */
@@ -279,10 +279,14 @@ export function runCommand(
 
 // --- Run history -------------------------------------------------------------
 
+interface RawRunListResponse {
+  runs: RunRecord[]
+}
+
 export function getRuns(limit?: number): Promise<ApiResult<RunRecord[]>> {
   const query = typeof limit === 'number' ? `?limit=${limit}` : ''
   return withMockFallback(
-    () => requestJson<RunRecord[]>(`/api/runs${query}`),
+    async () => (await requestJson<RawRunListResponse>(`/api/runs${query}`)).runs,
     () => mockRecentRuns,
   )
 }
