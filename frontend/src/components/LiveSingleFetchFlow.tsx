@@ -2,14 +2,22 @@ import { useState } from 'react'
 import type { CommandSpec, RunRecord, RunResponse, TokenEstimate, ValidateResponse } from '../api/client'
 import { runCommand, validateCommand } from '../api/client'
 
-// Command id of the local, no-external-call dry-run companion command that
-// this flow's "Run Dry Run" step calls before allowing a live run.
-const DRY_RUN_COMMAND_ID = 'project_docs_fetch_dry_run'
+// Fallback command id of the local, no-external-call dry-run companion
+// command, used only if the command spec doesn't declare
+// `related_dry_run_command` (kept for back-compat with older registries).
+const FALLBACK_DRY_RUN_COMMAND_ID = 'project_docs_fetch_dry_run'
 
-const DEFAULT_LIMIT = 3
-const MAX_LIMIT = 5
-const DEFAULT_TIMEOUT = 60
-const MAX_TIMEOUT = 120
+// Fallback numeric bounds, used only if the command spec's `parameters`
+// don't declare a `default`/`maximum` for `limit`/`timeout` (kept for
+// back-compat with older registries that predate these fields).
+const FALLBACK_DEFAULT_LIMIT = 3
+const FALLBACK_MAX_LIMIT = 5
+const FALLBACK_DEFAULT_TIMEOUT = 60
+const FALLBACK_MAX_TIMEOUT = 120
+
+function numberOrFallback(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
 
 export interface LiveSingleFetchFlowProps {
   command: CommandSpec
@@ -28,9 +36,18 @@ export interface LiveSingleFetchFlowProps {
  * the dry run's run_id).
  */
 export function LiveSingleFetchFlow({ command, onRunRecorded, onEstimate }: LiveSingleFetchFlowProps) {
+  const dryRunCommandId = command.related_dry_run_command ?? FALLBACK_DRY_RUN_COMMAND_ID
+
+  const limitParam = command.parameters.find((p) => p.name === 'limit')
+  const timeoutParam = command.parameters.find((p) => p.name === 'timeout')
+  const defaultLimit = numberOrFallback(limitParam?.default, FALLBACK_DEFAULT_LIMIT)
+  const maxLimit = numberOrFallback(limitParam?.maximum, FALLBACK_MAX_LIMIT)
+  const defaultTimeout = numberOrFallback(timeoutParam?.default, FALLBACK_DEFAULT_TIMEOUT)
+  const maxTimeout = numberOrFallback(timeoutParam?.maximum, FALLBACK_MAX_TIMEOUT)
+
   const [opportunityNumber, setOpportunityNumber] = useState('')
-  const [limitInput, setLimitInput] = useState(String(DEFAULT_LIMIT))
-  const [timeoutInput, setTimeoutInput] = useState(String(DEFAULT_TIMEOUT))
+  const [limitInput, setLimitInput] = useState(String(defaultLimit))
+  const [timeoutInput, setTimeoutInput] = useState(String(defaultTimeout))
 
   const [validateResult, setValidateResult] = useState<ValidateResponse | null>(null)
   const [validateMock, setValidateMock] = useState(false)
@@ -51,8 +68,8 @@ export function LiveSingleFetchFlow({ command, onRunRecorded, onEstimate }: Live
   const opportunityNumberValid = opportunityNumber.trim().length > 0
   const limitNumber = Number.parseInt(limitInput, 10)
   const timeoutNumber = Number.parseInt(timeoutInput, 10)
-  const limitValid = Number.isFinite(limitNumber) && limitNumber > 0 && limitNumber <= MAX_LIMIT
-  const timeoutValid = Number.isFinite(timeoutNumber) && timeoutNumber > 0 && timeoutNumber <= MAX_TIMEOUT
+  const limitValid = Number.isFinite(limitNumber) && limitNumber > 0 && limitNumber <= maxLimit
+  const timeoutValid = Number.isFinite(timeoutNumber) && timeoutNumber > 0 && timeoutNumber <= maxTimeout
   const formValid = opportunityNumberValid && limitValid && timeoutValid
 
   const validated = validateResult?.ok === true
@@ -94,7 +111,7 @@ export function LiveSingleFetchFlow({ command, onRunRecorded, onEstimate }: Live
     setBusy(true)
     setDryRunError(null)
     try {
-      const result = await runCommand(DRY_RUN_COMMAND_ID, buildParams(), false)
+      const result = await runCommand(dryRunCommandId, buildParams(), false)
       setDryRunResult(result.data)
       setDryRunRunId(result.data.run_id)
     } catch {
@@ -148,6 +165,15 @@ export function LiveSingleFetchFlow({ command, onRunRecorded, onEstimate }: Live
         confirmation are required before running live.
       </p>
 
+      {(command.related_dry_run_command || command.related_print_prompt_command) && (
+        <p className="mt-1 text-xs text-slate-500" data-testid="related-commands">
+          Related:{' '}
+          {command.related_dry_run_command && `Run dry-run first (${command.related_dry_run_command})`}
+          {command.related_dry_run_command && command.related_print_prompt_command && ' or '}
+          {command.related_print_prompt_command && `preview the prompt (${command.related_print_prompt_command})`}.
+        </p>
+      )}
+
       <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
         <label className="text-xs text-slate-600">
           opportunity_number *
@@ -165,11 +191,11 @@ export function LiveSingleFetchFlow({ command, onRunRecorded, onEstimate }: Live
           )}
         </label>
         <label className="text-xs text-slate-600">
-          limit (max {MAX_LIMIT})
+          limit (max {maxLimit})
           <input
             type="number"
             value={limitInput}
-            max={MAX_LIMIT}
+            max={maxLimit}
             min={1}
             onChange={(e) => setLimitInput(e.target.value)}
             aria-label={`${command.label} parameter limit`}
@@ -177,16 +203,16 @@ export function LiveSingleFetchFlow({ command, onRunRecorded, onEstimate }: Live
           />
           {!limitValid && (
             <span className="mt-0.5 block text-red-600" data-testid="limit-error">
-              Limit must be between 1 and {MAX_LIMIT}.
+              Limit must be between 1 and {maxLimit}.
             </span>
           )}
         </label>
         <label className="text-xs text-slate-600">
-          timeout (max {MAX_TIMEOUT})
+          timeout (max {maxTimeout})
           <input
             type="number"
             value={timeoutInput}
-            max={MAX_TIMEOUT}
+            max={maxTimeout}
             min={1}
             onChange={(e) => setTimeoutInput(e.target.value)}
             aria-label={`${command.label} parameter timeout`}
@@ -194,7 +220,7 @@ export function LiveSingleFetchFlow({ command, onRunRecorded, onEstimate }: Live
           />
           {!timeoutValid && (
             <span className="mt-0.5 block text-red-600" data-testid="timeout-error">
-              Timeout must be between 1 and {MAX_TIMEOUT}.
+              Timeout must be between 1 and {maxTimeout}.
             </span>
           )}
         </label>

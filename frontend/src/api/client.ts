@@ -77,6 +77,9 @@ export interface ParameterSpec {
   default: unknown
   allowed_values: unknown[] | null
   help: string
+  /** Optional upper bound for numeric params (e.g. `limit` max=5, `timeout` max=120).
+   * Optional so existing entries that don't declare a bound continue to type-check. */
+  maximum?: number | null
 }
 
 /**
@@ -95,6 +98,12 @@ export interface CommandSpec {
   requires_confirmation: boolean
   dry_run_required_before_live: boolean
   parameters: ParameterSpec[]
+  /** Companion command ids surfaced by the registry for guarded flows (e.g.
+   * `project_docs_fetch_live_single` points at its dry-run/print-prompt
+   * companions). Optional so existing entries without these continue to
+   * type-check. */
+  related_dry_run_command?: string | null
+  related_print_prompt_command?: string | null
 }
 
 /** Response shape for `POST /api/commands/{id}/validate`.

@@ -174,8 +174,8 @@ export const mockCommandRegistry: CommandSpec[] = [
     dry_run_required_before_live: false,
     parameters: [
       { name: 'opportunity_number', type: 'str', required: true, default: null, allowed_values: null, help: 'e.g. OPP-ACME-002' },
-      { name: 'limit', type: 'int', required: false, default: 3, allowed_values: null, help: 'Max documents (up to 5)' },
-      { name: 'timeout', type: 'int', required: false, default: 60, allowed_values: null, help: 'Timeout seconds (up to 120)' },
+      { name: 'limit', type: 'int', required: false, default: 3, maximum: 5, allowed_values: null, help: 'Max documents (up to 5)' },
+      { name: 'timeout', type: 'int', required: false, default: 60, maximum: 120, allowed_values: null, help: 'Timeout seconds (up to 120)' },
     ],
   },
   {
@@ -185,14 +185,16 @@ export const mockCommandRegistry: CommandSpec[] = [
     category: 'workspace',
     risk_level: 'external_bounded',
     external_call_risk: 'likely',
-    supports_dry_run: true,
+    supports_dry_run: false,
     supports_print_prompt: false,
     requires_confirmation: true,
     dry_run_required_before_live: true,
+    related_dry_run_command: 'project_docs_fetch_dry_run',
+    related_print_prompt_command: 'project_docs_fetch_print_prompt',
     parameters: [
       { name: 'opportunity_number', type: 'str', required: true, default: null, allowed_values: null, help: 'e.g. OPP-ACME-002' },
-      { name: 'limit', type: 'int', required: false, default: 3, allowed_values: null, help: 'Max documents (up to 5)' },
-      { name: 'timeout', type: 'int', required: false, default: 60, allowed_values: null, help: 'Timeout seconds (up to 120)' },
+      { name: 'limit', type: 'int', required: false, default: 3, maximum: 5, allowed_values: null, help: 'Max documents (up to 5)' },
+      { name: 'timeout', type: 'int', required: false, default: 60, maximum: 120, allowed_values: null, help: 'Timeout seconds (up to 120)' },
     ],
   },
   {

@@ -183,4 +183,111 @@ describe('project_docs_fetch_live_single guarded flow', () => {
 
     expect(await within(row).findByTestId('validate-error')).toBeInTheDocument()
   })
+
+  it('defaults the limit input to 3 and the timeout input to 60', async () => {
+    render(<CommandCenter />)
+    const row = await screen.findByTestId(`command-row-${LIVE_SINGLE_ID}`)
+
+    const limitInput = within(row).getByLabelText(/parameter limit/i) as HTMLInputElement
+    const timeoutInput = within(row).getByLabelText(/parameter timeout/i) as HTMLInputElement
+
+    expect(limitInput.value).toBe('3')
+    expect(timeoutInput.value).toBe('60')
+  })
+
+  it('enforces max=5 on the limit input and max=120 on the timeout input', async () => {
+    render(<CommandCenter />)
+    const row = await screen.findByTestId(`command-row-${LIVE_SINGLE_ID}`)
+
+    const limitInput = within(row).getByLabelText(/parameter limit/i) as HTMLInputElement
+    const timeoutInput = within(row).getByLabelText(/parameter timeout/i) as HTMLInputElement
+
+    expect(limitInput.max).toBe('5')
+    expect(timeoutInput.max).toBe('120')
+  })
+
+  it('shows the dry-run-required message before any dry run has completed', async () => {
+    render(<CommandCenter />)
+    const row = await screen.findByTestId(`command-row-${LIVE_SINGLE_ID}`)
+
+    expect(within(row).getByTestId('dry-run-required-message')).toBeInTheDocument()
+  })
+
+  it('shows the confirmation-required checkbox once the dry run succeeds', async () => {
+    vi.mocked(validateCommand).mockResolvedValue({ data: VALIDATE_SUCCESS, isMock: false })
+    vi.mocked(runCommand).mockResolvedValue({ data: DRY_RUN_SUCCESS, isMock: false })
+    const user = userEvent.setup()
+    render(<CommandCenter />)
+    const row = await screen.findByTestId(`command-row-${LIVE_SINGLE_ID}`)
+
+    await fillOpportunityNumber(row, user)
+    await user.click(within(row).getByRole('button', { name: 'Validate' }))
+    await within(row).findByText(/argv preview/i)
+    await user.click(within(row).getByRole('button', { name: 'Run Dry Run' }))
+
+    const toggle = await within(row).findByTestId('confirm-live-run-toggle')
+    expect(toggle).toBeInTheDocument()
+    expect(toggle).toHaveTextContent(/contact external services/i)
+    expect(within(row).queryByTestId('dry-run-required-message')).not.toBeInTheDocument()
+  })
+
+  it('renders the related dry-run and print-prompt command names from the command spec', async () => {
+    render(<CommandCenter />)
+    const row = await screen.findByTestId(`command-row-${LIVE_SINGLE_ID}`)
+
+    const related = within(row).getByTestId('related-commands')
+    expect(related).toHaveTextContent('project_docs_fetch_dry_run')
+    expect(related).toHaveTextContent('project_docs_fetch_print_prompt')
+  })
+
+  it('shows a client-side validation error and does not call runCommand when limit=6 is entered', async () => {
+    const user = userEvent.setup()
+    render(<CommandCenter />)
+    const row = await screen.findByTestId(`command-row-${LIVE_SINGLE_ID}`)
+
+    await fillOpportunityNumber(row, user)
+    const limitInput = within(row).getByLabelText(/parameter limit/i)
+    await user.clear(limitInput)
+    await user.type(limitInput, '6')
+
+    expect(within(row).getByTestId('limit-error')).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: 'Validate' })).toBeDisabled()
+
+    await user.click(within(row).getByRole('button', { name: 'Validate' }))
+    expect(validateCommand).not.toHaveBeenCalled()
+    expect(runCommand).not.toHaveBeenCalled()
+  })
+
+  it('shows a client-side validation error and does not call runCommand when timeout=121 is entered', async () => {
+    const user = userEvent.setup()
+    render(<CommandCenter />)
+    const row = await screen.findByTestId(`command-row-${LIVE_SINGLE_ID}`)
+
+    await fillOpportunityNumber(row, user)
+    const timeoutInput = within(row).getByLabelText(/parameter timeout/i)
+    await user.clear(timeoutInput)
+    await user.type(timeoutInput, '121')
+
+    expect(within(row).getByTestId('timeout-error')).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: 'Validate' })).toBeDisabled()
+
+    await user.click(within(row).getByRole('button', { name: 'Validate' }))
+    expect(validateCommand).not.toHaveBeenCalled()
+    expect(runCommand).not.toHaveBeenCalled()
+  })
+
+  it('shows a visible dry-run error without crashing when the backend dry run fails', async () => {
+    vi.mocked(validateCommand).mockResolvedValue({ data: VALIDATE_SUCCESS, isMock: false })
+    vi.mocked(runCommand).mockRejectedValueOnce(new Error('network error'))
+    const user = userEvent.setup()
+    render(<CommandCenter />)
+    const row = await screen.findByTestId(`command-row-${LIVE_SINGLE_ID}`)
+
+    await fillOpportunityNumber(row, user)
+    await user.click(within(row).getByRole('button', { name: 'Validate' }))
+    await within(row).findByText(/argv preview/i)
+    await user.click(within(row).getByRole('button', { name: 'Run Dry Run' }))
+
+    expect(await within(row).findByTestId('dry-run-error')).toBeInTheDocument()
+  })
 })
