@@ -26,6 +26,7 @@ from manager_os.build.dashboard_data import (
     get_people_allocation_for_week,
     get_today_signals,
 )
+from manager_os.command_center import registry
 
 
 def _people_staffing(conn, target_date: date, settings, warnings: list[str]) -> list[dict]:
@@ -140,6 +141,62 @@ def _feedback_learning(conn, warnings: list[str]) -> list[dict]:
         return []
 
 
+def _registry_param_default(command_id: str, param_name: str) -> Any:
+    """Look up a registered command's parameter default value.
+
+    Reads directly from the command_center registry so recommended-action
+    defaults (e.g. project_docs_fetch_live_single's limit/timeout) can never
+    drift from what the registry/runner actually enforce.
+    """
+    spec = registry.get(command_id)
+    return next(p.default for p in spec.parameters if p.name == param_name)
+
+
+def build_document_gap_action(gap: dict) -> dict:
+    """Build a document-gap recommended action that is both human-readable
+    (existing title/reason/command/priority fields) and machine-actionable
+    (new structured fields backed by real command_center registry
+    command_ids).
+
+    Pure — no DB calls, only shapes the given gap dict plus known registry
+    command_ids/param defaults.
+    """
+    opp = gap["opportunity_number"]
+    live_limit = _registry_param_default("project_docs_fetch_live_single", "limit")
+    live_timeout = _registry_param_default("project_docs_fetch_live_single", "timeout")
+
+    return {
+        # Existing, human-readable fields — unchanged for backward compatibility.
+        "title": f"Fetch docs for {opp} — no project documents indexed.",
+        "reason": "0 documents in project_documents",
+        "command": gap["suggested_command"],
+        "priority": "medium",
+        # New, machine-actionable fields.
+        "id": f"document_gap:{opp}",
+        "source": "document_gaps",
+        "entity_type": "project",
+        "entity_id": opp,
+        "primary_command": {
+            "command_id": "project_docs_fetch_dry_run",
+            "params": {"opportunity_number": opp},
+        },
+        "secondary_commands": [
+            {
+                "label": "Print Prompt",
+                "command_id": "project_docs_fetch_print_prompt",
+                "params": {"opportunity_number": opp},
+            },
+            {
+                "label": "Run Live Fetch",
+                "command_id": "project_docs_fetch_live_single",
+                "params": {"opportunity_number": opp, "limit": live_limit, "timeout": live_timeout},
+                "requires_confirmation": True,
+                "requires_successful_dry_run": True,
+            },
+        ],
+    }
+
+
 def _recommended_actions(
     people_staffing: list[dict],
     meetings: list[dict],
@@ -167,12 +224,7 @@ def _recommended_actions(
         })
 
     for g in document_gaps:
-        actions.append({
-            "title": f"Fetch docs for {g['opportunity_number']} — no project documents indexed.",
-            "reason": "0 documents in project_documents",
-            "command": g["suggested_command"],
-            "priority": "medium",
-        })
+        actions.append(build_document_gap_action(g))
 
     return actions
 
