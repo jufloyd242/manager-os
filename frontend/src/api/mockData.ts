@@ -65,6 +65,40 @@ export const mockDailyOperatingLoop: DailyOperatingLoop = {
       command: 'manager-os project-docs-fetch --opportunity-number OPP-ACME-002',
       priority: 'high',
     },
+    // Document-gap-sourced action: extends the base RecommendedAction shape
+    // with the structured command_center fields (contract: id/source/
+    // entity_type/entity_id/primary_command/secondary_commands). Wired to
+    // real command_center command ids with prefilled params so
+    // RecommendedActionCard can render Dry Run Fetch / Print Prompt / Run
+    // Live Fetch buttons for it.
+    {
+      id: 'doc-gap-initech-discovery-sow',
+      title: 'Fetch missing SOW for Initech — Discovery',
+      reason: 'Document gap: SOW missing for Initech — Discovery',
+      command: 'manager-os project-docs-fetch --opportunity-number OPP-INITECH-004',
+      priority: 'medium',
+      source: 'document_gaps',
+      entity_type: 'project',
+      entity_id: 'OPP-INITECH-004',
+      primary_command: {
+        command_id: 'project_docs_fetch_dry_run',
+        params: { opportunity_number: 'OPP-INITECH-004' },
+      },
+      secondary_commands: [
+        {
+          label: 'Print Prompt',
+          command_id: 'project_docs_fetch_print_prompt',
+          params: { opportunity_number: 'OPP-INITECH-004' },
+        },
+        {
+          label: 'Run Live Fetch',
+          command_id: 'project_docs_fetch_live_single',
+          params: { opportunity_number: 'OPP-INITECH-004' },
+          requires_confirmation: true,
+          requires_successful_dry_run: true,
+        },
+      ],
+    },
     {
       title: 'Schedule 1:1 with Jordan Lee',
       reason: 'No 1:1 recorded in 18 days',
@@ -169,6 +203,23 @@ export const mockCommandRegistry: CommandSpec[] = [
     risk_level: 'local_safe',
     external_call_risk: 'none',
     supports_dry_run: true,
+    supports_print_prompt: true,
+    requires_confirmation: false,
+    dry_run_required_before_live: false,
+    parameters: [
+      { name: 'opportunity_number', type: 'str', required: true, default: null, allowed_values: null, help: 'e.g. OPP-ACME-002' },
+      { name: 'limit', type: 'int', required: false, default: 3, maximum: 5, allowed_values: null, help: 'Max documents (up to 5)' },
+      { name: 'timeout', type: 'int', required: false, default: 60, maximum: 120, allowed_values: null, help: 'Timeout seconds (up to 120)' },
+    ],
+  },
+  {
+    command_id: 'project_docs_fetch_print_prompt',
+    label: 'Fetch Project Documents (Print Prompt)',
+    description: 'Print the Drive search prompt for a single project without calling Gemini CLI.',
+    category: 'workspace',
+    risk_level: 'local_safe',
+    external_call_risk: 'none',
+    supports_dry_run: false,
     supports_print_prompt: true,
     requires_confirmation: false,
     dry_run_required_before_live: false,

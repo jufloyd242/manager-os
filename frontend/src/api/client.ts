@@ -46,11 +46,38 @@ export interface StatusCardData {
   count?: number
 }
 
+/** A single command reference used inside a `RecommendedAction`'s
+ * `primary_command` field: the command to run and its prefilled params. */
+export interface RecommendedActionCommand {
+  command_id: string
+  params: Record<string, unknown>
+}
+
+/** One of the follow-up commands offered alongside a recommended action's
+ * primary command (e.g. "Print Prompt", "Run Live Fetch"). */
+export interface RecommendedActionSecondaryCommand {
+  label: string
+  command_id: string
+  params: Record<string, unknown>
+  requires_confirmation?: boolean
+  requires_successful_dry_run?: boolean
+}
+
 export interface RecommendedAction {
   title: string
   reason: string
+  /** Existing human-readable command string, kept for back-compat. */
   command: string
   priority: Priority
+  /** Extended structured-action fields (optional — informational-only
+   * actions, e.g. people_staffing/meeting-prep signals, omit these and
+   * continue to render as plain text with no buttons). */
+  id?: string
+  source?: string
+  entity_type?: string
+  entity_id?: string
+  primary_command?: RecommendedActionCommand
+  secondary_commands?: RecommendedActionSecondaryCommand[]
 }
 
 /**

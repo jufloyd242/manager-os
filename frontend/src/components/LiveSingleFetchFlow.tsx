@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { CommandSpec, RunRecord, RunResponse, TokenEstimate, ValidateResponse } from '../api/client'
 import { runCommand, validateCommand } from '../api/client'
+import { ConfirmLiveRunToggle, DryRunRequiredMessage, ExternalCallWarning } from './GuardedExternalCallNotice'
 
 // Fallback command id of the local, no-external-call dry-run companion
 // command, used only if the command spec doesn't declare
@@ -157,13 +158,7 @@ export function LiveSingleFetchFlow({ command, onRunRecorded, onEstimate }: Live
 
   return (
     <div>
-      <p
-        className="mt-2 rounded-md border border-orange-300 bg-orange-50 px-2 py-1.5 text-xs font-medium text-orange-800"
-        data-testid="external-call-warning"
-      >
-        This will contact Google Drive via Gemini CLI. A successful dry run and explicit
-        confirmation are required before running live.
-      </p>
+      <ExternalCallWarning />
 
       {(command.related_dry_run_command || command.related_print_prompt_command) && (
         <p className="mt-1 text-xs text-slate-500" data-testid="related-commands">
@@ -264,18 +259,9 @@ export function LiveSingleFetchFlow({ command, onRunRecorded, onEstimate }: Live
         </button>
       </div>
 
-      {!dryRunDone && (
-        <p className="mt-2 text-xs font-medium text-amber-700" data-testid="dry-run-required-message">
-          Dry run required first — run a dry run before confirming a live run.
-        </p>
-      )}
+      {!dryRunDone && <DryRunRequiredMessage />}
 
-      {dryRunDone && (
-        <label className="mt-3 flex items-center gap-2 text-xs text-slate-700" data-testid="confirm-live-run-toggle">
-          <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
-          I understand this will contact external services (Google Drive via Gemini CLI).
-        </label>
-      )}
+      {dryRunDone && <ConfirmLiveRunToggle checked={confirmed} onChange={setConfirmed} />}
 
       {validateError && (
         <p className="mt-2 text-xs font-medium text-red-600" data-testid="validate-error">

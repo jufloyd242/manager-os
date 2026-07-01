@@ -1,4 +1,5 @@
-import type { RecommendedAction } from '../api/client'
+import type { RecommendedAction, RunRecord } from '../api/client'
+import { DailyActionButtons } from './DailyActionButtons'
 
 const PRIORITY_STYLES: Record<RecommendedAction['priority'], string> = {
   high: 'border-l-4 border-red-500',
@@ -6,7 +7,12 @@ const PRIORITY_STYLES: Record<RecommendedAction['priority'], string> = {
   low: 'border-l-4 border-slate-300',
 }
 
-export function RecommendedActionCard({ action }: { action: RecommendedAction }) {
+export interface RecommendedActionCardProps {
+  action: RecommendedAction
+  onRunRecorded?: (run: RunRecord) => void
+}
+
+export function RecommendedActionCard({ action, onRunRecorded }: RecommendedActionCardProps) {
   return (
     <div className={`rounded-lg bg-white p-3 shadow-sm ${PRIORITY_STYLES[action.priority]}`}>
       <div className="flex items-center justify-between gap-2">
@@ -19,6 +25,7 @@ export function RecommendedActionCard({ action }: { action: RecommendedAction })
       <code className="mt-2 block truncate rounded bg-slate-50 px-2 py-1 text-xs text-slate-600">
         {action.command}
       </code>
+      {action.primary_command && <DailyActionButtons action={action} onRunRecorded={onRunRecorded} />}
     </div>
   )
 }
