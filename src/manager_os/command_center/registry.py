@@ -47,6 +47,19 @@ _PROJECT_DOCS_SINGLE_PARAMS = (
     ParameterSpec(name="project_name", type="str", required=False, default="", help="Project name (for prompt context)."),
     ParameterSpec(name="limit", type="int", required=False, default=10, help="Max documents to fetch per project."),
     ParameterSpec(name="timeout", type="int", required=False, default=120, help="Timeout in seconds for Gemini CLI."),
+    # Declared (but not yet enforced by the runner) so API callers can pass a
+    # dry-run-first attestation without tripping "unknown parameter"
+    # validation. Real dry-run-first enforcement (checking this references a
+    # prior successful project_docs_fetch_dry_run run for the same OppID) is
+    # not yet implemented — see command_center/runner.py's execute_command
+    # docstring and the API layer's report for this delta.
+    ParameterSpec(
+        name="dry_run_run_id",
+        type="str",
+        required=False,
+        default=None,
+        help="Optional run_id of a prior successful dry-run for the same OppID (not yet enforced).",
+    ),
 )
 
 _COMMANDS: tuple[CommandSpec, ...] = (

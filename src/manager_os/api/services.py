@@ -13,7 +13,7 @@ import duckdb
 
 from manager_os.build.dashboard_data import get_meetings_for_date, get_people_rows
 from manager_os.build.project_index import search_projects
-from manager_os.command_center import history, registry
+from manager_os.command_center import history, registry, token_estimator
 from manager_os.command_center.errors import CommandBlockedError
 from manager_os.command_center.runner import build_argv, execute_command
 from manager_os.config import Settings
@@ -143,6 +143,12 @@ def validate_command(command_id: str, params: dict) -> dict:
     risk_level=blocked command_id does NOT raise here — it returns
     ok=False with a warning, since that's a structural property of the
     command, not a caller mistake.
+
+    `estimated_input_tokens` uses `token_estimator.estimate_for_command`
+    (real prompt built from supplied params when possible) rather than the
+    spec's static placeholder, so the preview reflects the actual call.
+    `estimated_output_tokens` is always None today — no output-token
+    estimator exists yet.
     """
     spec = registry.get(command_id)
     warnings: list[str] = []
@@ -154,14 +160,19 @@ def validate_command(command_id: str, params: dict) -> dict:
         ok = False
         warnings.append(str(exc))
 
+    _, estimated_input_tokens = token_estimator.estimate_for_command(command_id, params)
+
     return {
         "ok": ok,
+        "command_id": command_id,
         "argv_preview": argv,
         "risk_level": spec.risk_level.value,
         "external_call_risk": spec.external_call_risk.value,
-        "estimated_input_tokens": spec.estimated_input_tokens,
+        "estimated_input_tokens": estimated_input_tokens,
+        "estimated_output_tokens": None,
         "warnings": warnings,
         "requires_confirmation": spec.requires_confirmation,
+        "dry_run_required_before_live": spec.dry_run_required_before_live,
     }
 
 

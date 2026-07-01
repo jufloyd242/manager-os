@@ -86,12 +86,15 @@ class CommandRunRequestBody(BaseModel):
 
 class CommandValidateResponse(BaseModel):
     ok: bool
+    command_id: str | None = None
     argv_preview: list[str] | None = None
     risk_level: str
     external_call_risk: str
     estimated_input_tokens: int | None = None
+    estimated_output_tokens: int | None = None
     warnings: list[str] = []
     requires_confirmation: bool = False
+    dry_run_required_before_live: bool = False
 
 
 class CommandRunResponse(BaseModel):
