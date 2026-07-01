@@ -6,6 +6,9 @@ import type {
   ValidateResponse,
   RunResponse,
   RunLogs,
+  RecommendedAction,
+  ActionGroup,
+  ActionSummary,
 } from './client'
 
 export const mockSystemStatus: StatusCardData[] = [
@@ -38,6 +41,186 @@ export const mockSystemStatus: StatusCardData[] = [
   },
 ]
 
+// --- Recommended actions (shared between the flat `recommended_actions`
+// list and the grouped `action_groups` view below, so titles/ids stay in
+// sync rather than drifting between two hand-maintained copies) -----------
+
+const SOW_REVIEW_ACTION: RecommendedAction = {
+  title: 'Review Acme Corp SOW before Friday deadline',
+  reason: 'SOW deadline in 3 days with no reviewer assigned',
+  command: 'manager-os project-docs-fetch --opportunity-number OPP-ACME-002',
+  priority: 'high',
+  source: 'projects_deals',
+}
+
+// Document-gap-sourced action: extends the base RecommendedAction shape
+// with the structured command_center fields (contract: id/source/
+// entity_type/entity_id/primary_command/secondary_commands). Wired to
+// real command_center command ids with prefilled params so
+// RecommendedActionCard can render Dry Run Fetch / Print Prompt / Run
+// Live Fetch buttons for it.
+const INITECH_DOC_GAP_ACTION: RecommendedAction = {
+  id: 'doc-gap-initech-discovery-sow',
+  title: 'Fetch missing SOW for Initech — Discovery',
+  reason: 'Document gap: SOW missing for Initech — Discovery',
+  command: 'manager-os project-docs-fetch --opportunity-number OPP-INITECH-004',
+  priority: 'medium',
+  source: 'document_gaps',
+  entity_type: 'project',
+  entity_id: 'OPP-INITECH-004',
+  primary_command: {
+    command_id: 'project_docs_fetch_dry_run',
+    params: { opportunity_number: 'OPP-INITECH-004' },
+  },
+  secondary_commands: [
+    {
+      label: 'Print Prompt',
+      command_id: 'project_docs_fetch_print_prompt',
+      params: { opportunity_number: 'OPP-INITECH-004' },
+    },
+    {
+      label: 'Run Live Fetch',
+      command_id: 'project_docs_fetch_live_single',
+      params: { opportunity_number: 'OPP-INITECH-004' },
+      requires_confirmation: true,
+      requires_successful_dry_run: true,
+    },
+  ],
+}
+
+const SCHEDULE_1_1_ACTION: RecommendedAction = {
+  title: 'Schedule 1:1 with Jordan Lee',
+  reason: 'No 1:1 recorded in 18 days',
+  command: 'manager-os meeting-prep --meeting jordan-lee-1-1',
+  priority: 'medium',
+  source: 'people_staffing',
+}
+
+const OVERALLOCATION_ACTION: RecommendedAction = {
+  title: 'Investigate Priya Nair overallocation',
+  reason: '128% allocation over next 2 weeks',
+  command: 'manager-os extract --entity person',
+  priority: 'high',
+  source: 'people_staffing',
+}
+
+const GLOBEX_FOLLOWUP_ACTION: RecommendedAction = {
+  title: 'Follow up on Globex renewal',
+  reason: 'Deal stalled with no activity in 21 days',
+  command: 'manager-os brief --date 2026-06-30',
+  priority: 'low',
+  source: 'projects_deals',
+}
+
+// Additional generated document-gap actions purely to give the Action Inbox
+// a realistic "overflow" group (45 total) to exercise the "show top 5,
+// expand" behavior. Deterministic and side-effect free.
+const EXTRA_DOC_GAP_CLIENTS = [
+  'Acme Corp', 'Initech', 'Globex', 'Contoso', 'Umbrella Inc',
+  'Stark Industries', 'Wayne Enterprises', 'Wonka Industries', 'Hooli', 'Soylent Corp',
+]
+const EXTRA_DOC_GAP_MISSING = ['Closure deck', 'SOW', 'Discovery notes', 'Architecture doc', 'Runbook']
+
+function buildGeneratedDocGapAction(n: number): RecommendedAction {
+  const client = EXTRA_DOC_GAP_CLIENTS[n % EXTRA_DOC_GAP_CLIENTS.length]
+  const missing = EXTRA_DOC_GAP_MISSING[n % EXTRA_DOC_GAP_MISSING.length]
+  const opp = `OPP-DOCGAP-${String(n + 1).padStart(3, '0')}`
+  const project = `${client} — Project ${n + 1}`
+  return {
+    id: `document_gap:${opp}`,
+    title: `Fetch missing ${missing} for ${project}`,
+    reason: `Document gap: ${missing} missing for ${project}`,
+    command: `manager-os project-docs-fetch --opportunity-number ${opp}`,
+    priority: n % 5 === 0 ? 'high' : 'medium',
+    source: 'document_gaps',
+    entity_type: 'project',
+    entity_id: opp,
+    primary_command: {
+      command_id: 'project_docs_fetch_dry_run',
+      params: { opportunity_number: opp },
+    },
+    secondary_commands: [
+      {
+        label: 'Print Prompt',
+        command_id: 'project_docs_fetch_print_prompt',
+        params: { opportunity_number: opp },
+      },
+      {
+        label: 'Run Live Fetch',
+        command_id: 'project_docs_fetch_live_single',
+        params: { opportunity_number: opp },
+        requires_confirmation: true,
+        requires_successful_dry_run: true,
+      },
+    ],
+  }
+}
+
+const DOCUMENT_GAP_GROUP_ACTIONS: RecommendedAction[] = [
+  INITECH_DOC_GAP_ACTION,
+  ...Array.from({ length: 44 }, (_, i) => buildGeneratedDocGapAction(i + 1)),
+]
+const PEOPLE_STAFFING_GROUP_ACTIONS: RecommendedAction[] = [SCHEDULE_1_1_ACTION, OVERALLOCATION_ACTION]
+const PROJECTS_DEALS_GROUP_ACTIONS: RecommendedAction[] = [SOW_REVIEW_ACTION, GLOBEX_FOLLOWUP_ACTION]
+
+// Mirrors `_is_executable` in `manager_os.build.daily_action_groups`: an
+// action counts as executable if it has a primary_command OR any
+// secondary_commands, not just primary_command alone.
+function isExecutable(action: RecommendedAction): boolean {
+  return Boolean(action.primary_command) || Boolean(action.secondary_commands && action.secondary_commands.length > 0)
+}
+
+function computeActionSummary(groups: ActionGroup[]): ActionSummary {
+  const allActions = groups.flatMap((g) => g.actions)
+  const by_source: Record<string, number> = {}
+  const by_priority = { high: 0, medium: 0, low: 0 }
+  let executable = 0
+  let informational = 0
+  for (const action of allActions) {
+    const source = action.source ?? 'other'
+    by_source[source] = (by_source[source] ?? 0) + 1
+    by_priority[action.priority] += 1
+    if (isExecutable(action)) executable += 1
+    else informational += 1
+  }
+  return { total: allActions.length, by_source, by_priority, executable, informational }
+}
+
+export const mockActionGroups: ActionGroup[] = [
+  {
+    id: 'document_gaps',
+    title: 'Document Gaps',
+    source: 'document_gaps',
+    count: DOCUMENT_GAP_GROUP_ACTIONS.length,
+    priority: 'high',
+    summary: `${DOCUMENT_GAP_GROUP_ACTIONS.length} projects missing required documents — review and fetch via Drive search`,
+    default_visible_count: 5,
+    actions: DOCUMENT_GAP_GROUP_ACTIONS,
+  },
+  {
+    id: 'people_staffing',
+    title: 'People / Staffing',
+    source: 'people_staffing',
+    count: PEOPLE_STAFFING_GROUP_ACTIONS.length,
+    priority: 'medium',
+    summary: `${PEOPLE_STAFFING_GROUP_ACTIONS.length} staffing signals need attention`,
+    default_visible_count: 5,
+    actions: PEOPLE_STAFFING_GROUP_ACTIONS,
+  },
+  {
+    id: 'projects_deals',
+    title: 'Projects / Deals',
+    source: 'projects_deals',
+    count: PROJECTS_DEALS_GROUP_ACTIONS.length,
+    priority: 'high',
+    summary: `${PROJECTS_DEALS_GROUP_ACTIONS.length} project/deal signals need follow-up`,
+    default_visible_count: 5,
+    actions: PROJECTS_DEALS_GROUP_ACTIONS,
+  },
+]
+
+export const mockActionSummary: ActionSummary = computeActionSummary(mockActionGroups)
+
 // Mirrors the exact shape of Python's build_daily_operating_loop() dict.
 export const mockDailyOperatingLoop: DailyOperatingLoop = {
   date: '2026-06-30',
@@ -59,65 +242,14 @@ export const mockDailyOperatingLoop: DailyOperatingLoop = {
   ],
   feedback_learning: [{ note: '3 open feedback candidates awaiting review' }],
   recommended_actions: [
-    {
-      title: 'Review Acme Corp SOW before Friday deadline',
-      reason: 'SOW deadline in 3 days with no reviewer assigned',
-      command: 'manager-os project-docs-fetch --opportunity-number OPP-ACME-002',
-      priority: 'high',
-    },
-    // Document-gap-sourced action: extends the base RecommendedAction shape
-    // with the structured command_center fields (contract: id/source/
-    // entity_type/entity_id/primary_command/secondary_commands). Wired to
-    // real command_center command ids with prefilled params so
-    // RecommendedActionCard can render Dry Run Fetch / Print Prompt / Run
-    // Live Fetch buttons for it.
-    {
-      id: 'doc-gap-initech-discovery-sow',
-      title: 'Fetch missing SOW for Initech — Discovery',
-      reason: 'Document gap: SOW missing for Initech — Discovery',
-      command: 'manager-os project-docs-fetch --opportunity-number OPP-INITECH-004',
-      priority: 'medium',
-      source: 'document_gaps',
-      entity_type: 'project',
-      entity_id: 'OPP-INITECH-004',
-      primary_command: {
-        command_id: 'project_docs_fetch_dry_run',
-        params: { opportunity_number: 'OPP-INITECH-004' },
-      },
-      secondary_commands: [
-        {
-          label: 'Print Prompt',
-          command_id: 'project_docs_fetch_print_prompt',
-          params: { opportunity_number: 'OPP-INITECH-004' },
-        },
-        {
-          label: 'Run Live Fetch',
-          command_id: 'project_docs_fetch_live_single',
-          params: { opportunity_number: 'OPP-INITECH-004' },
-          requires_confirmation: true,
-          requires_successful_dry_run: true,
-        },
-      ],
-    },
-    {
-      title: 'Schedule 1:1 with Jordan Lee',
-      reason: 'No 1:1 recorded in 18 days',
-      command: 'manager-os meeting-prep --meeting jordan-lee-1-1',
-      priority: 'medium',
-    },
-    {
-      title: 'Investigate Priya Nair overallocation',
-      reason: '128% allocation over next 2 weeks',
-      command: 'manager-os extract --entity person',
-      priority: 'high',
-    },
-    {
-      title: 'Follow up on Globex renewal',
-      reason: 'Deal stalled with no activity in 21 days',
-      command: 'manager-os brief --date 2026-06-30',
-      priority: 'low',
-    },
+    SOW_REVIEW_ACTION,
+    INITECH_DOC_GAP_ACTION,
+    SCHEDULE_1_1_ACTION,
+    OVERALLOCATION_ACTION,
+    GLOBEX_FOLLOWUP_ACTION,
   ],
+  action_summary: mockActionSummary,
+  action_groups: mockActionGroups,
   warnings: [],
 }
 

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Layout } from './components/Layout'
 import { StatusCard } from './components/StatusCard'
 import { DailySection } from './components/DailySection'
-import { RecommendedActionCard } from './components/RecommendedActionCard'
+import { ActionInbox } from './components/ActionInbox'
 import { CommandCenter } from './components/CommandCenter'
 import { RecentRuns } from './components/RecentRuns'
 import { TokenBudgetPanel } from './components/TokenBudgetPanel'
@@ -106,11 +106,12 @@ function App() {
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">
             Recommended Actions
           </h2>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            {loop.recommended_actions.map((action) => (
-              <RecommendedActionCard key={action.id ?? action.title} action={action} onRunRecorded={handleRunRecorded} />
-            ))}
-          </div>
+          <ActionInbox
+            actionSummary={loop.action_summary}
+            actionGroups={loop.action_groups}
+            recommendedActions={loop.recommended_actions}
+            onRunRecorded={handleRunRecorded}
+          />
         </section>
       )}
 

@@ -80,6 +80,32 @@ export interface RecommendedAction {
   secondary_commands?: RecommendedActionSecondaryCommand[]
 }
 
+/** Aggregate counts over the full set of recommended actions, used to render
+ * the Action Inbox header. Optional on `DailyOperatingLoop` — an older
+ * backend that doesn't compute this yet simply omits the field. */
+export interface ActionSummary {
+  total: number
+  by_source: Record<string, number>
+  by_priority: { high: number; medium: number; low: number }
+  executable: number
+  informational: number
+}
+
+/** A named, pre-grouped bucket of recommended actions (e.g. all document-gap
+ * actions), used to render a collapsible card in the Action Inbox instead of
+ * one long flat list. Optional on `DailyOperatingLoop` — when absent, the UI
+ * falls back to grouping `recommended_actions` client-side by `source`. */
+export interface ActionGroup {
+  id: string
+  title: string
+  source: string
+  count: number
+  priority: string
+  summary: string
+  default_visible_count: number
+  actions: RecommendedAction[]
+}
+
 /**
  * Mirrors the exact shape of Python's `build_daily_operating_loop()` dict
  * (see `src/manager_os/build/daily_operating_loop.py`) / the `/api/daily`
@@ -94,6 +120,10 @@ export interface DailyOperatingLoop {
   feedback_learning: unknown[]
   recommended_actions: RecommendedAction[]
   warnings: string[]
+  /** Optional — grouped/summarized view of `recommended_actions` for the
+   * Action Inbox. Absent on older backends; the UI degrades gracefully. */
+  action_summary?: ActionSummary
+  action_groups?: ActionGroup[]
 }
 
 /** A single typed parameter declared on a command (from the command registry). */
