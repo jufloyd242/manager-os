@@ -403,6 +403,23 @@ CREATE TABLE IF NOT EXISTS feedback_learning_candidates (
     status VARCHAR NOT NULL,
     created_at TIMESTAMP NOT NULL,
     updated_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS command_runs (
+    id                      VARCHAR PRIMARY KEY,
+    command_id              VARCHAR NOT NULL,
+    status                  VARCHAR NOT NULL,
+    risk_level              VARCHAR NOT NULL,
+    external_call_risk      VARCHAR NOT NULL,
+    dry_run                 BOOLEAN NOT NULL,
+    argv_json               JSON,
+    estimated_input_tokens  INTEGER,
+    estimated_output_tokens INTEGER,
+    started_at              TIMESTAMP,
+    finished_at             TIMESTAMP,
+    stdout                  VARCHAR,
+    stderr                  VARCHAR,
+    error                   VARCHAR,
+    affected_tables_json    JSON
 )
 """
 
@@ -428,6 +445,7 @@ _ALL_TABLES = [
     "deal_documents",
     "feedback_events",
     "feedback_learning_candidates",
+    "command_runs",
 ]
 
 
