@@ -26,6 +26,7 @@ from manager_os.build.dashboard_data import (
     get_people_allocation_for_week,
     get_today_signals,
 )
+from manager_os.build.daily_action_groups import build_action_groups, build_action_summary
 from manager_os.command_center import registry
 
 
@@ -212,6 +213,7 @@ def _recommended_actions(
             "reason": p.get("warning") or f"{pct:.0f}% allocation",
             "command": None,
             "priority": "high" if pct > 150 else "medium",
+            "source": "people_staffing",
         })
 
     for m in meetings:
@@ -221,6 +223,7 @@ def _recommended_actions(
             "reason": m["reason"],
             "command": None,
             "priority": "high",
+            "source": "meetings",
         })
 
     for g in document_gaps:
@@ -242,6 +245,8 @@ def build_daily_operating_loop(conn, target_date: date, settings=None) -> dict[s
     document_gaps = _document_gaps(conn, warnings)
     feedback_learning = _feedback_learning(conn, warnings)
     recommended_actions = _recommended_actions(people_staffing, meetings, document_gaps)
+    action_summary = build_action_summary(recommended_actions)
+    action_groups = build_action_groups(recommended_actions)
 
     return {
         "date": target_date.isoformat(),
@@ -251,5 +256,7 @@ def build_daily_operating_loop(conn, target_date: date, settings=None) -> dict[s
         "document_gaps": document_gaps,
         "feedback_learning": feedback_learning,
         "recommended_actions": recommended_actions,
+        "action_summary": action_summary,
+        "action_groups": action_groups,
         "warnings": warnings,
     }
