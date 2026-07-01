@@ -46,6 +46,14 @@ class ParameterSpec(BaseModel):
     allowed_values: Optional[tuple[Any, ...]] = None
     help: str = ""
 
+    # Declarative bounds for numeric parameters. Purely informational for
+    # UI/API consumers UNLESS the parameter also happens to be the spec's
+    # `bounded_param` (see CommandSpec.max_scope below); independently of
+    # that, `runner._validate_args` enforces `minimum`/`maximum` for every
+    # parameter that declares them, so these are never just documentation.
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+
 
 class CommandSpec(BaseModel):
     """Full specification of a single allowlisted, runnable Manager OS command."""
@@ -74,6 +82,13 @@ class CommandSpec(BaseModel):
     # --limit-projects). Enforced by the runner, not just documented.
     max_scope: Optional[int] = None
     bounded_param: Optional[str] = None
+
+    # Optional cross-references to a companion dry-run/print-prompt
+    # command_id for commands that require a dry run before running live
+    # (e.g. project_docs_fetch_live_single -> project_docs_fetch_dry_run /
+    # project_docs_fetch_print_prompt). None for commands with no companion.
+    related_dry_run_command: Optional[str] = None
+    related_print_prompt_command: Optional[str] = None
 
     writes_tables: tuple[str, ...] = ()
     reads_tables: tuple[str, ...] = ()

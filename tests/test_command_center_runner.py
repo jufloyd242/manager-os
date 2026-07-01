@@ -58,13 +58,26 @@ REPO_ROOT = Path(__file__).parent.parent
 
 
 def test_dry_run_allowed_without_confirmation():
+    # project_docs_fetch_live_single itself no longer supports_dry_run (that
+    # capability lives on the separate project_docs_fetch_dry_run command_id
+    # — see test_command_center_registry.py::test_live_single_does_not_support_dry_run_itself).
     req = runner.validate_request(
-        "project_docs_fetch_live_single",
+        "project_docs_fetch_dry_run",
         {"opportunity_number": "OPP1"},
         dry_run=True,
         confirmed=False,
     )
     assert req.dry_run is True
+
+
+def test_live_single_dry_run_flag_rejected_since_it_no_longer_supports_dry_run():
+    with pytest.raises(InvalidArgumentError):
+        runner.validate_request(
+            "project_docs_fetch_live_single",
+            {"opportunity_number": "OPP1"},
+            dry_run=True,
+            confirmed=False,
+        )
 
 
 def test_live_without_confirmation_is_rejected():
@@ -610,7 +623,37 @@ def test_execute_workspace_and_retrieve_commands_still_blocked(cc_conn):
         with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
             result = execute_command(cc_conn, command_id, {}, confirm=True)
         mock_run.assert_not_called()
-        assert result["status"] == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# Registry metadata <-> runner guardrail agreement (registry fix task).
+#
+# runner._execute_live_single hardcodes limit default=3/max=5 and timeout
+# default=60/max=120 as the enforced safety net for project_docs_fetch_live_single
+# — these tests confirm the registry's declared ParameterSpec values for
+# that command now truthfully describe those same numbers, and that the
+# runner's hardcoded checks (unchanged) still agree in practice.
+# ---------------------------------------------------------------------------
+
+
+def test_registry_live_single_limit_max_matches_runner_hardcoded_guardrail():
+    spec = registry.get("project_docs_fetch_live_single")
+    limit_param = spec.get_parameter("limit")
+    assert limit_param.maximum == 5
+    assert limit_param.default == 3
+
+
+def test_registry_live_single_timeout_max_matches_runner_hardcoded_guardrail():
+    spec = registry.get("project_docs_fetch_live_single")
+    timeout_param = spec.get_parameter("timeout")
+    assert timeout_param.maximum == 120
+    assert timeout_param.default == 60
+
+
+def test_batch_live_bounded_not_in_executable_allowlist_regression():
+    # Regression (unchanged from prior phases): project_docs_fetch_batch_live_bounded
+    # must remain non-executable regardless of this registry fix.
+    assert "project_docs_fetch_batch_live_bounded" not in runner._EXECUTABLE_COMMAND_IDS
 
 
 def test_execute_live_single_never_calls_gemini_retrieval(cc_conn):

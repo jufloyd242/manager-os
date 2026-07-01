@@ -63,9 +63,10 @@ def _type_ok(value: Any, type_name: str) -> bool:
 
 def _validate_args(spec: CommandSpec, args: dict[str, Any]) -> dict[str, Any]:
     """Validate args against spec.parameters: reject unknown keys, missing
-    required params, wrong types, disallowed enum values, and out-of-bound
-    scope. Returns a fully-populated dict (declared params only, defaults
-    filled in)."""
+    required params, wrong types, disallowed enum values, out-of-bound
+    per-parameter minimum/maximum, and out-of-bound `bounded_param`/
+    `max_scope` scope. Returns a fully-populated dict (declared params only,
+    defaults filled in)."""
     allowed = spec.parameter_names()
     unknown = set(args) - allowed
     if unknown:
@@ -87,6 +88,16 @@ def _validate_args(spec: CommandSpec, args: dict[str, Any]) -> dict[str, Any]:
                 raise InvalidArgumentError(
                     f"Parameter {param.name!r} value {value!r} for command "
                     f"{spec.command_id!r} is not in allowed values {param.allowed_values!r}."
+                )
+            if value is not None and param.maximum is not None and value > param.maximum:
+                raise ScopeExceededError(
+                    f"Parameter {param.name!r}={value} for command {spec.command_id!r} "
+                    f"exceeds maximum allowed {param.maximum}."
+                )
+            if value is not None and param.minimum is not None and value < param.minimum:
+                raise ScopeExceededError(
+                    f"Parameter {param.name!r}={value} for command {spec.command_id!r} "
+                    f"is below minimum allowed {param.minimum}."
                 )
             validated[param.name] = value
         elif param.required:

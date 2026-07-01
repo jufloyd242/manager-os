@@ -38,8 +38,18 @@ _BATCH_CHARS, _BATCH_TOKENS = _chars_and_tokens(_SAMPLE_BATCH_PROMPT)
 
 # Bounds are deliberately conservative and hard-enforced by the runner (see
 # runner._validate_args), not just documented here.
-_SINGLE_MAX_LIMIT = 20
 _BATCH_MAX_LIMIT_PROJECTS = 10
+
+# project_docs_fetch_live_single-specific bounds. These MUST match the
+# private _LIVE_SINGLE_* guardrail constants enforced at execution time in
+# command_center/runner.py's _execute_live_single — this tuple exists so the
+# declared metadata (surfaced via the API/UI) is truthful about what a live
+# run will actually accept, instead of the much looser dry_run/print_prompt
+# bounds below (which only ever preview, never call subprocess).
+_LIVE_SINGLE_DEFAULT_LIMIT = 3
+_LIVE_SINGLE_MAX_LIMIT = 5
+_LIVE_SINGLE_DEFAULT_TIMEOUT = 60
+_LIVE_SINGLE_MAX_TIMEOUT = 120
 
 _PROJECT_DOCS_SINGLE_PARAMS = (
     ParameterSpec(name="opportunity_number", type="str", required=True, help="Opportunity number to fetch docs for."),
@@ -59,6 +69,47 @@ _PROJECT_DOCS_SINGLE_PARAMS = (
         required=False,
         default=None,
         help="Optional run_id of a prior successful dry-run for the same OppID (not yet enforced).",
+    ),
+)
+
+# Parameters for project_docs_fetch_live_single specifically: same shape as
+# _PROJECT_DOCS_SINGLE_PARAMS (used by the always-safe dry_run/print_prompt
+# variants of this command), but with limit/timeout tightened to the actual
+# guardrails _execute_live_single enforces at run time, and dry_run_run_id's
+# help text updated since it IS enforced for this command (see runner.py).
+_PROJECT_DOCS_LIVE_SINGLE_PARAMS = (
+    ParameterSpec(name="opportunity_number", type="str", required=True, help="Opportunity number to fetch docs for."),
+    ParameterSpec(name="client", type="str", required=False, default="", help="Client name (for prompt context)."),
+    ParameterSpec(name="project_name", type="str", required=False, default="", help="Project name (for prompt context)."),
+    ParameterSpec(
+        name="limit",
+        type="int",
+        required=False,
+        default=_LIVE_SINGLE_DEFAULT_LIMIT,
+        minimum=1,
+        maximum=_LIVE_SINGLE_MAX_LIMIT,
+        help="Max documents to fetch per project (guardrail-bounded).",
+    ),
+    ParameterSpec(
+        name="timeout",
+        type="int",
+        required=False,
+        default=_LIVE_SINGLE_DEFAULT_TIMEOUT,
+        minimum=1,
+        maximum=_LIVE_SINGLE_MAX_TIMEOUT,
+        help="Timeout in seconds for Gemini CLI (guardrail-bounded).",
+    ),
+    ParameterSpec(
+        name="dry_run_run_id",
+        type="str",
+        required=False,
+        default=None,
+        help=(
+            "Optional run_id of a prior successful project_docs_fetch_dry_run "
+            "run for the same OppID. If omitted, the most recent qualifying "
+            "dry run within 30 minutes is used instead; if none exists, the "
+            "live run is blocked."
+        ),
     ),
 )
 
@@ -213,11 +264,13 @@ _COMMANDS: tuple[CommandSpec, ...] = (
         cli_command="project-docs-fetch",
         risk_level=RiskLevel.external_bounded,
         external_call_risk=ExternalCallRisk.likely,
-        parameters=_PROJECT_DOCS_SINGLE_PARAMS,
-        supports_dry_run=True,
+        parameters=_PROJECT_DOCS_LIVE_SINGLE_PARAMS,
+        supports_dry_run=False,
         requires_confirmation=True,
         dry_run_required_before_live=True,
-        max_scope=_SINGLE_MAX_LIMIT,
+        related_dry_run_command="project_docs_fetch_dry_run",
+        related_print_prompt_command="project_docs_fetch_print_prompt",
+        max_scope=_LIVE_SINGLE_MAX_LIMIT,
         bounded_param="limit",
         estimated_prompt_chars=_SINGLE_CHARS,
         estimated_input_tokens=_SINGLE_TOKENS,
