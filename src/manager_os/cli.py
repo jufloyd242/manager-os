@@ -526,25 +526,29 @@ def _do_dry_run_extract(
         _step_results.append(("signals (rules)", result))
 
     if mode in ("llm", "both"):
-        from manager_os.extract.llm_signals import run_llm_extraction, LLMExtractionUnavailable
+        # NEVER call the real LLM here — dry-run must make no live LLM/Gemini
+        # calls. Preview only how many candidates *would* be sent.
+        from manager_os.extract.llm_signals import _select_llm_candidates
         try:
-            llm_result = run_llm_extraction(
+            candidates, excluded_cnt, context_cnt, empty_cnt = _select_llm_candidates(
                 mem_conn,
-                run_date=run_date,
                 max_candidates=llm_limit,
                 source_path_filter=llm_source_path,
                 note_id=llm_note_id,
                 since_days=llm_since_days,
             )
             tbl.add_row(
-                "signals (llm)",
-                str(llm_result.written),
-                str(llm_result.skipped),
-                str(llm_result.failed),
+                "signals (llm, preview)",
+                f"~{len(candidates)}",
+                str(excluded_cnt + context_cnt + empty_cnt),
+                "0",
             )
-            _step_results.append(("signals (llm)", llm_result))
-        except LLMExtractionUnavailable as exc:
-            console.print(f"[yellow]LLM extraction skipped: {exc}[/yellow]")
+            console.print(
+                f"[dim]  LLM preview: {len(candidates)} candidate(s) would be sent "
+                "to Gemini CLI (not called in dry-run).[/dim]"
+            )
+        except Exception as exc:
+            console.print(f"[yellow]⚠ LLM candidate preview failed: {exc}[/yellow]")
 
     ai_result = extract_action_items_from_all_notes(mem_conn)
     tbl.add_row(
