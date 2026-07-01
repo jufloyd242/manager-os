@@ -6,29 +6,38 @@ import { RecommendedActionCard } from './components/RecommendedActionCard'
 import { CommandCenter } from './components/CommandCenter'
 import { RecentRuns } from './components/RecentRuns'
 import { TokenBudgetPanel } from './components/TokenBudgetPanel'
-import { mockApiClient } from './api/mockData'
-import type {
-  StatusCardData,
-  DailyOperatingLoop,
-  CommandDefinition,
-  RunRecord,
-  TokenBudget,
-} from './api/client'
+import { getStatus, getDaily } from './api/client'
+import { mockSystemStatus, mockDailyOperatingLoop } from './api/mockData'
+import type { StatusCardData, DailyOperatingLoop, RunRecord, TokenEstimate } from './api/client'
 
 function App() {
   const [status, setStatus] = useState<StatusCardData[]>([])
+  const [statusMock, setStatusMock] = useState(false)
   const [loop, setLoop] = useState<DailyOperatingLoop | null>(null)
-  const [commands, setCommands] = useState<CommandDefinition[]>([])
-  const [runs, setRuns] = useState<RunRecord[]>([])
-  const [budget, setBudget] = useState<TokenBudget | null>(null)
+  const [loopMock, setLoopMock] = useState(false)
+  const [estimate, setEstimate] = useState<TokenEstimate | null>(null)
+  const [runsRefreshKey, setRunsRefreshKey] = useState(0)
   const [toast, setToast] = useState<string | null>(null)
 
   useEffect(() => {
-    mockApiClient.getSystemStatus().then(setStatus)
-    mockApiClient.getDailyOperatingLoop().then(setLoop)
-    mockApiClient.getCommandRegistry().then(setCommands)
-    mockApiClient.getRecentRuns().then(setRuns)
-    mockApiClient.getTokenBudget().then(setBudget)
+    getStatus()
+      .then((result) => {
+        setStatus(result.data)
+        setStatusMock(result.isMock)
+      })
+      .catch(() => {
+        setStatus(mockSystemStatus)
+        setStatusMock(true)
+      })
+    getDaily()
+      .then((result) => {
+        setLoop(result.data)
+        setLoopMock(result.isMock)
+      })
+      .catch(() => {
+        setLoop(mockDailyOperatingLoop)
+        setLoopMock(true)
+      })
   }, [])
 
   useEffect(() => {
@@ -37,17 +46,27 @@ function App() {
     return () => clearTimeout(timer)
   }, [toast])
 
-  async function handleRun(command: CommandDefinition, dryRun: boolean) {
-    const record = await mockApiClient.runCommand(command.command_id, { dryRun })
-    setRuns((prev) => [record, ...prev])
-    setToast(`${dryRun ? 'Dry run' : 'Run'} queued for "${command.label}" (mock only — no network call).`)
+  function handleRunRecorded(run: RunRecord) {
+    setRunsRefreshKey((key) => key + 1)
+    setToast(`Run ${run.status} for "${run.command_id}".`)
   }
+
+  const usingMockData = statusMock || loopMock
 
   return (
     <Layout>
       {toast && (
         <div className="mb-4 rounded-lg border border-slate-200 bg-slate-900 px-4 py-2 text-sm text-white shadow">
           {toast}
+        </div>
+      )}
+
+      {usingMockData && (
+        <div
+          data-testid="dashboard-mock-indicator"
+          className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-800"
+        >
+          Offline / Mock Data — the Manager OS API is unreachable, showing local mock data instead.
         </div>
       )}
 
@@ -97,11 +116,11 @@ function App() {
 
       <section aria-label="Command Center and Runs" className="mt-8 grid grid-cols-1 gap-4 xl:grid-cols-3">
         <div className="xl:col-span-2">
-          <CommandCenter commands={commands} onRun={handleRun} />
+          <CommandCenter onRunRecorded={handleRunRecorded} onEstimate={setEstimate} />
         </div>
         <div className="space-y-4">
-          {budget && <TokenBudgetPanel budget={budget} />}
-          <RecentRuns runs={runs} />
+          <TokenBudgetPanel estimate={estimate} />
+          <RecentRuns refreshKey={runsRefreshKey} />
         </div>
       </section>
     </Layout>

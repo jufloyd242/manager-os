@@ -1,10 +1,11 @@
 import type {
   StatusCardData,
   DailyOperatingLoop,
-  CommandDefinition,
+  CommandSpec,
   RunRecord,
-  TokenBudget,
-  ManagerOsApiClient,
+  ValidateResponse,
+  RunResponse,
+  RunLogs,
 } from './client'
 
 export const mockSystemStatus: StatusCardData[] = [
@@ -86,69 +87,99 @@ export const mockDailyOperatingLoop: DailyOperatingLoop = {
   warnings: [],
 }
 
-export const mockCommandRegistry: CommandDefinition[] = [
+export const mockCommandRegistry: CommandSpec[] = [
   {
     command_id: 'status',
     label: 'Status',
     description: 'Show ingest/extract freshness and DB health.',
+    category: 'diagnostics',
     risk_level: 'local_safe',
     external_call_risk: 'none',
     supports_dry_run: false,
+    supports_print_prompt: false,
     requires_confirmation: false,
+    dry_run_required_before_live: false,
+    parameters: [],
   },
   {
     command_id: 'brief',
     label: 'Generate Daily Brief',
     description: 'Assemble the markdown daily brief from open signals.',
+    category: 'build',
     risk_level: 'local_write',
     external_call_risk: 'none',
     supports_dry_run: true,
+    supports_print_prompt: false,
     requires_confirmation: false,
+    dry_run_required_before_live: false,
+    parameters: [{ name: 'target_date', type: 'str', required: false, default: null, allowed_values: null, help: 'YYYY-MM-DD' }],
   },
   {
     command_id: 'ingest-forecast',
     label: 'Ingest Staffing Forecast',
     description: 'Read the staffing forecast CSV into the local DB.',
+    category: 'ingest',
     risk_level: 'local_write',
     external_call_risk: 'none',
     supports_dry_run: true,
+    supports_print_prompt: false,
     requires_confirmation: false,
+    dry_run_required_before_live: false,
+    parameters: [],
   },
   {
     command_id: 'workspace-fetch',
     label: 'Fetch Workspace Activity',
     description: 'Retrieve Gmail/Calendar/Chat activity via Gemini CLI.',
+    category: 'workspace',
     risk_level: 'external_bounded',
     external_call_risk: 'possible',
     supports_dry_run: true,
-    requires_confirmation: false,
+    supports_print_prompt: true,
+    requires_confirmation: true,
+    dry_run_required_before_live: true,
+    parameters: [{ name: 'lookback_days', type: 'int', required: false, default: 7, allowed_values: null, help: 'Days to look back' }],
   },
   {
     command_id: 'project-docs-fetch',
     label: 'Fetch Project Documents',
     description: 'Search Drive for project documents via Gemini CLI.',
+    category: 'workspace',
     risk_level: 'external_bounded',
     external_call_risk: 'likely',
     supports_dry_run: true,
+    supports_print_prompt: true,
     requires_confirmation: true,
+    dry_run_required_before_live: true,
+    parameters: [
+      { name: 'opportunity_number', type: 'str', required: true, default: null, allowed_values: null, help: 'e.g. OPP-ACME-002' },
+    ],
   },
   {
     command_id: 'closeout-weekly',
     label: 'Send Weekly Exec Update',
     description: 'Compose and send the weekly executive update externally.',
+    category: 'closeout',
     risk_level: 'external_high_risk',
     external_call_risk: 'high',
     supports_dry_run: false,
+    supports_print_prompt: false,
     requires_confirmation: true,
+    dry_run_required_before_live: false,
+    parameters: [],
   },
   {
     command_id: 'demo-reset',
     label: 'Reset Demo Data',
     description: 'Irreversibly wipe and reseed the local demo database.',
+    category: 'admin',
     risk_level: 'blocked',
     external_call_risk: 'none',
     supports_dry_run: true,
+    supports_print_prompt: false,
     requires_confirmation: true,
+    dry_run_required_before_live: false,
+    parameters: [],
   },
 ]
 
@@ -160,6 +191,8 @@ export const mockRecentRuns: RunRecord[] = [
     dry_run: false,
     started_at: '2026-06-30T07:58:00Z',
     finished_at: '2026-06-30T07:58:03Z',
+    stdout: 'db_path: data/processed/manager_os.duckdb\nall sources fresh',
+    stderr: '',
   },
   {
     run_id: 'run-1000',
@@ -168,6 +201,8 @@ export const mockRecentRuns: RunRecord[] = [
     dry_run: false,
     started_at: '2026-06-30T07:50:00Z',
     finished_at: '2026-06-30T07:50:04Z',
+    stdout: 'Wrote output/daily_briefs/2026-06-30.md',
+    stderr: '',
   },
   {
     run_id: 'run-0999',
@@ -176,6 +211,8 @@ export const mockRecentRuns: RunRecord[] = [
     dry_run: true,
     started_at: '2026-06-29T18:12:00Z',
     finished_at: '2026-06-29T18:12:02Z',
+    stdout: '[dry-run] would ingest 42 rows',
+    stderr: '',
   },
   {
     run_id: 'run-0998',
@@ -184,17 +221,10 @@ export const mockRecentRuns: RunRecord[] = [
     dry_run: false,
     started_at: '2026-06-29T09:03:00Z',
     finished_at: '2026-06-29T09:03:41Z',
+    stdout: '',
+    stderr: 'Error: Gemini CLI timed out after 180s',
   },
 ]
-
-export const mockTokenBudget: TokenBudget = {
-  daily_budget_tokens: 200000,
-  used_tokens: 68500,
-  pending: [
-    { command_id: 'project-docs-fetch', label: 'Fetch Project Documents', estimated_input_tokens: 4200 },
-    { command_id: 'workspace-fetch', label: 'Fetch Workspace Activity', estimated_input_tokens: 6800 },
-  ],
-}
 
 function delay<T>(value: T, ms = 100): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), ms))
@@ -202,28 +232,79 @@ function delay<T>(value: T, ms = 100): Promise<T> {
 
 let runCounter = mockRecentRuns.length
 
-/**
- * Mock implementation of ManagerOsApiClient. Never calls fetch() or any
- * network endpoint — all data is fabricated in-memory. `runCommand` only
- * returns a fake RunRecord for the caller to append to local UI state.
- */
-export const mockApiClient: ManagerOsApiClient = {
-  getSystemStatus: () => delay(mockSystemStatus),
-  getDailyOperatingLoop: () => delay(mockDailyOperatingLoop),
-  getCommandRegistry: () => delay(mockCommandRegistry),
-  getRecentRuns: () => delay(mockRecentRuns),
-  getTokenBudget: () => delay(mockTokenBudget),
-  runCommand: (commandId, opts) => {
-    runCounter += 1
-    const startedAt = new Date().toISOString()
-    const record: RunRecord = {
-      run_id: `run-mock-${runCounter}`,
-      command_id: commandId,
-      status: 'success',
-      dry_run: opts.dryRun,
-      started_at: startedAt,
-      finished_at: startedAt,
-    }
-    return delay(record, 200)
-  },
+const SINGLE_COMMAND_ESTIMATED_TOKENS = 350
+
+/** Fabricates a plausible ValidateResponse for mock/offline mode. Never
+ * calls fetch() or executes anything real. */
+export function mockValidateCommand(
+  commandId: string,
+  params: Record<string, unknown>,
+): Promise<ValidateResponse> {
+  const command = mockCommandRegistry.find((c) => c.command_id === commandId)
+  const argv = [commandId, ...Object.entries(params).flatMap(([k, v]) => [`--${k}`, String(v)])]
+  return delay(
+    {
+      ok: true,
+      argv_preview: argv,
+      risk_level: command?.risk_level ?? 'local_safe',
+      external_call_risk: command?.external_call_risk ?? 'none',
+      estimated_input_tokens: command?.risk_level === 'local_safe' ? null : SINGLE_COMMAND_ESTIMATED_TOKENS,
+      warnings: command?.requires_confirmation
+        ? ['This command requires confirmation and is not runnable from this UI yet.']
+        : [],
+      requires_confirmation: command?.requires_confirmation ?? false,
+    },
+    150,
+  )
 }
+
+/** Fabricates a plausible RunResponse for mock/offline mode. Never calls
+ * fetch() or executes anything real. */
+export function mockRunCommand(
+  commandId: string,
+  _params: Record<string, unknown>,
+  _confirm: boolean,
+): Promise<RunResponse> {
+  runCounter += 1
+  const runId = `run-mock-${runCounter}`
+  const stdout = `[mock] "${commandId}" completed (no network call made).`
+  mockRecentRuns.unshift({
+    run_id: runId,
+    command_id: commandId,
+    status: 'success',
+    dry_run: false,
+    started_at: new Date().toISOString(),
+    finished_at: new Date().toISOString(),
+    stdout,
+    stderr: '',
+  })
+  return delay(
+    {
+      ok: true,
+      run_id: runId,
+      status: 'success',
+      command_id: commandId,
+      stdout,
+      stderr: '',
+      error: null,
+      estimated_input_tokens: null,
+      estimated_output_tokens: null,
+    },
+    200,
+  )
+}
+
+/** Fabricates plausible logs for mock/offline mode by looking up the run in
+ * `mockRecentRuns`, falling back to a placeholder if not found. */
+export function mockRunLogs(runId: string): Promise<RunLogs> {
+  const run = mockRecentRuns.find((r) => r.run_id === runId)
+  return delay(
+    {
+      run_id: runId,
+      stdout: run?.stdout ?? '[mock] no stdout captured for this run.',
+      stderr: run?.stderr ?? '',
+    },
+    100,
+  )
+}
+

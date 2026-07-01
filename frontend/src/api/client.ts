@@ -1,9 +1,25 @@
-// Typed API contract for Manager OS's Command Tower frontend.
+// Typed API client for Manager OS's Command Tower frontend.
 //
-// This module defines the shape of everything the dashboard needs. Today it is
-// backed only by `mockApiClient` in `mockData.ts` — no network calls are made.
-// To wire up the real backend later, implement `ManagerOsApiClient` with
-// `fetch()` calls against the real API and swap the import in `App.tsx`.
+// Every exported "load"/"action" function here tries a real fetch against
+// the Manager OS FastAPI backend first. If the network call fails (network
+// error, connection refused, or a non-2xx response) it transparently falls
+// back to the static mock data in `mockData.ts` and reports that fact via
+// the `isMock` flag on the returned `ApiResult`. Callers (components) are
+// expected to surface `isMock` as a visible "offline/mock data" indicator —
+// never fail silently and never pretend mock data is live data.
+//
+// Base URL comes from the Vite env var VITE_MANAGER_OS_API_BASE_URL, falling
+// back to http://localhost:8000 for local dev against a real backend.
+
+import {
+  mockSystemStatus,
+  mockDailyOperatingLoop,
+  mockCommandRegistry,
+  mockRecentRuns,
+  mockValidateCommand,
+  mockRunCommand,
+  mockRunLogs,
+} from './mockData'
 
 export type RiskLevel =
   | 'local_safe'
@@ -16,9 +32,11 @@ export type ExternalCallRisk = 'none' | 'possible' | 'likely' | 'high'
 
 export type Priority = 'high' | 'medium' | 'low'
 
-export type RunStatus = 'success' | 'failed' | 'running' | 'skipped'
+export type RunStatus = 'success' | 'failed' | 'running' | 'skipped' | 'blocked' | 'error' | 'ok'
 
 export type Freshness = 'fresh' | 'stale' | 'missing'
+
+export type ParameterType = 'str' | 'int' | 'float' | 'bool' | 'list'
 
 export interface StatusCardData {
   id: string
@@ -37,10 +55,8 @@ export interface RecommendedAction {
 
 /**
  * Mirrors the exact shape of Python's `build_daily_operating_loop()` dict
- * (see `src/manager_os/build/daily_operating_loop.py`) so this can be wired
- * to the real API with minimal translation:
- * {date, people_staffing, meetings, projects_deals, document_gaps,
- *  feedback_learning, recommended_actions, warnings}
+ * (see `src/manager_os/build/daily_operating_loop.py`) / the `/api/daily`
+ * response.
  */
 export interface DailyOperatingLoop {
   date: string
@@ -53,17 +69,59 @@ export interface DailyOperatingLoop {
   warnings: string[]
 }
 
-/** Mirrors the concepts of a (planned) backend command registry entry. */
-export interface CommandDefinition {
+/** A single typed parameter declared on a command (from the command registry). */
+export interface ParameterSpec {
+  name: string
+  type: ParameterType
+  required: boolean
+  default: unknown
+  allowed_values: unknown[] | null
+  help: string
+}
+
+/**
+ * Command registry entry — mirrors `manager_os.command_center.models.CommandSpec`
+ * as exposed by (the agreed contract for) `GET /api/commands` / `GET /api/commands/{id}`.
+ */
+export interface CommandSpec {
   command_id: string
   label: string
   description: string
+  category: string
   risk_level: RiskLevel
   external_call_risk: ExternalCallRisk
   supports_dry_run: boolean
+  supports_print_prompt: boolean
+  requires_confirmation: boolean
+  dry_run_required_before_live: boolean
+  parameters: ParameterSpec[]
+}
+
+/** Response shape for `POST /api/commands/{id}/validate`. */
+export interface ValidateResponse {
+  ok: boolean
+  argv_preview: string[]
+  risk_level: RiskLevel
+  external_call_risk: ExternalCallRisk
+  estimated_input_tokens: number | null
+  warnings: string[]
   requires_confirmation: boolean
 }
 
+/** Response shape for `POST /api/commands/{id}/run`. */
+export interface RunResponse {
+  ok: boolean
+  run_id: string
+  status: string
+  command_id: string
+  stdout: string | null
+  stderr: string | null
+  error: string | null
+  estimated_input_tokens: number | null
+  estimated_output_tokens: number | null
+}
+
+/** One row of run history, as returned by `GET /api/runs`. */
 export interface RunRecord {
   run_id: string
   command_id: string
@@ -71,34 +129,167 @@ export interface RunRecord {
   dry_run: boolean
   started_at: string
   finished_at: string | null
+  stdout?: string | null
+  stderr?: string | null
 }
 
-export interface TokenBudgetEntry {
+/** Response shape for `GET /api/runs/{run_id}/logs`. */
+export interface RunLogs {
+  run_id: string
+  stdout: string
+  stderr: string
+}
+
+/** The most recent token-cost estimate shown by `TokenBudgetPanel`. */
+export interface TokenEstimate {
   command_id: string
   label: string
-  estimated_input_tokens: number
+  risk_level: RiskLevel
+  estimated_input_tokens: number | null
 }
 
-export interface TokenBudget {
-  daily_budget_tokens: number
-  used_tokens: number
-  pending: TokenBudgetEntry[]
+/** Wraps every client call with a flag saying whether the data came from
+ * the real API (`isMock: false`) or the mock fallback (`isMock: true`). */
+export interface ApiResult<T> {
+  data: T
+  isMock: boolean
 }
 
-export interface RunCommandOptions {
-  dryRun: boolean
+const API_BASE_URL: string =
+  (import.meta.env.VITE_MANAGER_OS_API_BASE_URL as string | undefined) || 'http://localhost:8000'
+
+async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE_URL}${path}`, init)
+  if (!res.ok) {
+    throw new Error(`Manager OS API request to ${path} failed with status ${res.status}`)
+  }
+  return (await res.json()) as T
 }
 
-export interface ManagerOsApiClient {
-  getSystemStatus(): Promise<StatusCardData[]>
-  getDailyOperatingLoop(date?: string): Promise<DailyOperatingLoop>
-  getCommandRegistry(): Promise<CommandDefinition[]>
-  getRecentRuns(): Promise<RunRecord[]>
-  getTokenBudget(): Promise<TokenBudget>
-  /**
-   * Simulates queuing a command run. In this mock shell this NEVER makes a
-   * network call or executes anything real — it only fabricates a RunRecord
-   * for local UI state (e.g. Recent Runs).
-   */
-  runCommand(commandId: string, opts: RunCommandOptions): Promise<RunRecord>
+async function withMockFallback<T>(
+  live: () => Promise<T>,
+  fallback: () => T | Promise<T>,
+): Promise<ApiResult<T>> {
+  try {
+    const data = await live()
+    return { data, isMock: false }
+  } catch {
+    const data = await fallback()
+    return { data, isMock: true }
+  }
+}
+
+// --- Status ---------------------------------------------------------------
+
+interface RawSourceHealth {
+  name: string
+  status: string
+  count: number
+  last_updated: string | null
+  warnings: string[]
+}
+
+interface RawStatusResponse {
+  ok: boolean
+  db_path: string
+  workspace_enabled: boolean
+  sources: RawSourceHealth[]
+  warnings: string[]
+}
+
+function mapSourceStatusToFreshness(status: string): Freshness {
+  if (status === 'available') return 'fresh'
+  if (status === 'empty') return 'stale'
+  return 'missing'
+}
+
+function mapStatusResponse(raw: RawStatusResponse): StatusCardData[] {
+  return raw.sources.map((s) => ({
+    id: s.name,
+    label: s.name,
+    detail: s.warnings[0] ?? (s.last_updated ? `Last updated ${s.last_updated}` : `${s.count} rows`),
+    freshness: mapSourceStatusToFreshness(s.status),
+    count: s.count,
+  }))
+}
+
+export function getStatus(): Promise<ApiResult<StatusCardData[]>> {
+  return withMockFallback(
+    async () => mapStatusResponse(await requestJson<RawStatusResponse>('/api/status')),
+    () => mockSystemStatus,
+  )
+}
+
+// --- Daily operating loop ---------------------------------------------------
+
+export function getDaily(date?: string): Promise<ApiResult<DailyOperatingLoop>> {
+  const query = date ? `?date=${encodeURIComponent(date)}` : ''
+  return withMockFallback(
+    () => requestJson<DailyOperatingLoop>(`/api/daily${query}`),
+    () => mockDailyOperatingLoop,
+  )
+}
+
+// --- Command registry -------------------------------------------------------
+
+export function getCommands(): Promise<ApiResult<CommandSpec[]>> {
+  return withMockFallback(
+    () => requestJson<CommandSpec[]>('/api/commands'),
+    () => mockCommandRegistry,
+  )
+}
+
+export function getCommand(commandId: string): Promise<ApiResult<CommandSpec | null>> {
+  return withMockFallback(
+    () => requestJson<CommandSpec>(`/api/commands/${encodeURIComponent(commandId)}`),
+    () => mockCommandRegistry.find((c) => c.command_id === commandId) ?? null,
+  )
+}
+
+export function validateCommand(
+  commandId: string,
+  params: Record<string, unknown>,
+): Promise<ApiResult<ValidateResponse>> {
+  return withMockFallback(
+    () =>
+      requestJson<ValidateResponse>(`/api/commands/${encodeURIComponent(commandId)}/validate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ params }),
+      }),
+    () => mockValidateCommand(commandId, params),
+  )
+}
+
+export function runCommand(
+  commandId: string,
+  params: Record<string, unknown>,
+  confirm = false,
+): Promise<ApiResult<RunResponse>> {
+  return withMockFallback(
+    () =>
+      requestJson<RunResponse>(`/api/commands/${encodeURIComponent(commandId)}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ params, confirm }),
+      }),
+    () => mockRunCommand(commandId, params, confirm),
+  )
+}
+
+// --- Run history -------------------------------------------------------------
+
+export function getRuns(limit?: number): Promise<ApiResult<RunRecord[]>> {
+  const query = typeof limit === 'number' ? `?limit=${limit}` : ''
+  return withMockFallback(
+    () => requestJson<RunRecord[]>(`/api/runs${query}`),
+    () => mockRecentRuns,
+  )
+}
+
+export function getRunLogs(runId: string): Promise<ApiResult<RunLogs>> {
+  return withMockFallback(
+    () => requestJson<RunLogs>(`/api/runs/${encodeURIComponent(runId)}/logs`),
+    () => mockRunLogs(runId),
+  )
 }
