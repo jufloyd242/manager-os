@@ -323,7 +323,9 @@ def test_execute_live_single_confirm_false_blocked_regardless(cc_conn):
 
 
 def test_execute_live_single_confirm_true_still_blocked_in_this_phase(cc_conn):
-    # Only the 7 named phase-1 commands may execute, regardless of confirm=True.
+    # confirm=True alone is not sufficient: without a qualifying prior
+    # successful project_docs_fetch_dry_run run for this OppID, the live
+    # call is still rejected (dry-run-first guardrail).
     with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
         result = execute_command(
             cc_conn,
@@ -334,6 +336,7 @@ def test_execute_live_single_confirm_true_still_blocked_in_this_phase(cc_conn):
 
     mock_run.assert_not_called()
     assert result["status"] == "blocked"
+    assert "project_docs_fetch_dry_run" in result["error"]
 
 
 def test_execute_unknown_command_raises_and_persists_nothing(cc_conn):
@@ -375,6 +378,252 @@ def test_execute_timeout_is_enforced_and_persisted(cc_conn):
     row = history.get_command_run(cc_conn, result["run_id"])
     assert row is not None
     assert row["status"] == "timeout"
+
+
+
+# ---------------------------------------------------------------------------
+# project_docs_fetch_live_single — guarded live execution. This is the ONLY
+# external_bounded command allowed to actually execute in this phase, and
+# only when every guardrail below passes: single string opportunity_number
+# (no batch/list), confirm=True, limit<=5 (default 3), timeout<=120
+# (default 60), and a qualifying recent (<=30min) successful
+# project_docs_fetch_dry_run run for the same normalized OppID.
+# ---------------------------------------------------------------------------
+
+
+def _seed_successful_dry_run(conn, opportunity_number, limit=10, timeout=120):
+    """Persist a qualifying successful project_docs_fetch_dry_run row for
+    opportunity_number, via the real execute_command path (subprocess
+    mocked), so tests can exercise the dry-run-first guardrail honestly."""
+    with patch("manager_os.command_center.runner.subprocess.run", return_value=_mock_completed()):
+        result = execute_command(
+            conn,
+            "project_docs_fetch_dry_run",
+            {"opportunity_number": opportunity_number, "limit": limit, "timeout": timeout},
+        )
+    assert result["status"] == "success"
+    return result["run_id"]
+
+
+def test_registry_live_single_risk_and_external_call_risk():
+    spec = registry.get("project_docs_fetch_live_single")
+    assert spec.risk_level.value == "external_bounded"
+    assert spec.external_call_risk.value == "likely"
+
+
+def test_execute_live_single_missing_opportunity_number_rejected(cc_conn):
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(cc_conn, "project_docs_fetch_live_single", {}, confirm=True)
+
+    mock_run.assert_not_called()
+    assert result["status"] == "blocked"
+
+
+def test_execute_live_single_confirm_false_rejected_even_with_qualifying_dry_run(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP1")
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=False
+        )
+
+    mock_run.assert_not_called()
+    assert result["status"] == "blocked"
+
+
+def test_execute_live_single_limit_over_max_rejected(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP1")
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(
+            cc_conn,
+            "project_docs_fetch_live_single",
+            {"opportunity_number": "OPP1", "limit": 6},
+            confirm=True,
+        )
+
+    mock_run.assert_not_called()
+    assert result["status"] == "blocked"
+
+
+def test_execute_live_single_timeout_over_max_rejected(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP1")
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(
+            cc_conn,
+            "project_docs_fetch_live_single",
+            {"opportunity_number": "OPP1", "timeout": 121},
+            confirm=True,
+        )
+
+    mock_run.assert_not_called()
+    assert result["status"] == "blocked"
+
+
+def test_execute_live_single_batch_flag_rejected(cc_conn):
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(
+            cc_conn,
+            "project_docs_fetch_live_single",
+            {"opportunity_number": "OPP1", "batch": True},
+            confirm=True,
+        )
+
+    mock_run.assert_not_called()
+    assert result["status"] == "blocked"
+
+
+def test_execute_live_single_list_opportunity_number_rejected(cc_conn):
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(
+            cc_conn,
+            "project_docs_fetch_live_single",
+            {"opportunity_number": ["OPP1", "OPP2"]},
+            confirm=True,
+        )
+
+    mock_run.assert_not_called()
+    assert result["status"] == "blocked"
+
+
+def test_execute_live_single_missing_dry_run_first_rejected(cc_conn):
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=True
+        )
+
+    mock_run.assert_not_called()
+    assert result["status"] == "blocked"
+    assert "project_docs_fetch_dry_run" in result["error"]
+
+
+def test_execute_live_single_qualifying_dry_run_allows_execution(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP1")
+    with patch(
+        "manager_os.command_center.runner.subprocess.run", return_value=_mock_completed()
+    ) as mock_run:
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=True
+        )
+
+    mock_run.assert_called_once()
+    assert result["status"] == "success"
+
+
+def test_execute_live_single_argv_shape_when_guardrails_pass(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP1")
+    with patch(
+        "manager_os.command_center.runner.subprocess.run", return_value=_mock_completed()
+    ) as mock_run:
+        execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "opp1"}, confirm=True
+        )
+
+    args, kwargs = mock_run.call_args
+    argv = args[0]
+    assert argv == [
+        sys.executable, "-m", "manager_os.cli",
+        "project-docs-fetch",
+        "--opportunity-number", "OPP1",
+        "--limit", "3",
+        "--timeout", "60",
+        "--verbose",
+    ]
+    assert kwargs.get("shell", False) is False
+
+
+def test_execute_live_single_missing_confirm_persists_blocked_row(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP1")
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=False
+        )
+
+    mock_run.assert_not_called()
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row is not None
+    assert row["status"] == "blocked"
+    assert row["command_id"] == "project_docs_fetch_live_single"
+
+
+def test_execute_live_single_subprocess_success_persists_success(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP1")
+    with patch(
+        "manager_os.command_center.runner.subprocess.run",
+        return_value=_mock_completed(returncode=0),
+    ):
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=True
+        )
+
+    assert result["status"] == "success"
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row["status"] == "success"
+
+
+def test_execute_live_single_subprocess_nonzero_persists_failed(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP1")
+    with patch(
+        "manager_os.command_center.runner.subprocess.run",
+        return_value=_mock_completed(returncode=1, stdout="", stderr="boom"),
+    ):
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=True
+        )
+
+    assert result["status"] == "failed"
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row["status"] == "failed"
+
+
+def test_execute_live_single_subprocess_timeout_persists_timeout(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP1")
+    with patch(
+        "manager_os.command_center.runner.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=["x"], timeout=60),
+    ):
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=True
+        )
+
+    assert result["status"] == "timeout"
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row["status"] == "timeout"
+
+
+def test_execute_batch_live_bounded_still_blocked_regardless_of_confirm_phase2(cc_conn):
+    spec = registry.get("project_docs_fetch_batch_live_bounded")
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(
+            cc_conn,
+            "project_docs_fetch_batch_live_bounded",
+            {"limit_projects": spec.max_scope},
+            confirm=True,
+        )
+
+    mock_run.assert_not_called()
+    assert result["status"] == "blocked"
+
+
+def test_execute_workspace_and_retrieve_commands_still_blocked(cc_conn):
+    for command_id in (
+        "workspace_fetch_deal_docs", "retrieve_forecast", "retrieve_calendar", "retrieve_activity",
+    ):
+        with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+            result = execute_command(cc_conn, command_id, {}, confirm=True)
+        mock_run.assert_not_called()
+        assert result["status"] == "blocked"
+
+
+def test_execute_live_single_never_calls_gemini_retrieval(cc_conn):
+    with patch("manager_os.ingest.workspace_gemini._run_gemini_retrieval") as mock_gemini:
+        _seed_successful_dry_run(cc_conn, "OPP1")
+        with patch(
+            "manager_os.command_center.runner.subprocess.run", return_value=_mock_completed()
+        ):
+            execute_command(
+                cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=True
+            )
+
+    mock_gemini.assert_not_called()
 
 
 def test_execute_daily_dry_run_end_to_end_real_subprocess(tmp_path, monkeypatch):

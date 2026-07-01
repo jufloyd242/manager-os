@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 
@@ -228,3 +228,75 @@ def get_command_run(conn: Any, run_id: str) -> Optional[dict]:
     if row is None:
         return None
     return dict(zip(_RUN_RECORD_COLUMNS, row))
+
+
+# ---------------------------------------------------------------------------
+# Dry-run-first guardrail helpers (used by runner._execute_live_single to
+# enforce that project_docs_fetch_live_single is only ever executed after a
+# qualifying, recent, successful project_docs_fetch_dry_run run for the same
+# opportunity_number).
+# ---------------------------------------------------------------------------
+
+
+def _extract_opportunity_number_from_argv(argv: Optional[list]) -> Optional[str]:
+    """Pull the value following a `--opportunity-number` flag out of a
+    persisted argv list. Returns None if not present."""
+    if not argv:
+        return None
+    for i, part in enumerate(argv):
+        if part == "--opportunity-number" and i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
+def is_qualifying_dry_run(
+    row: Optional[dict], opportunity_number: str, *, within_minutes: int = 30
+) -> bool:
+    """Return True if `row` (a command_runs row dict, e.g. from
+    get_command_run) is a successful project_docs_fetch_dry_run run for the
+    given (already normalized) opportunity_number, completed within the last
+    `within_minutes` minutes."""
+    if row is None:
+        return False
+    if row.get("command_id") != "project_docs_fetch_dry_run":
+        return False
+    if row.get("status") != "success":
+        return False
+    started_at = row.get("started_at")
+    if started_at is None:
+        return False
+    if isinstance(started_at, str):
+        started_at = datetime.fromisoformat(started_at)
+    if datetime.utcnow() - started_at > timedelta(minutes=within_minutes):
+        return False
+    argv = row.get("argv_json")
+    if isinstance(argv, str):
+        argv = json.loads(argv or "[]")
+    run_opp = _extract_opportunity_number_from_argv(argv)
+    if not run_opp:
+        return False
+    return run_opp.strip().upper() == opportunity_number.strip().upper()
+
+
+def find_recent_successful_dry_run(
+    conn: Any, opportunity_number: str, *, within_minutes: int = 30
+) -> Optional[str]:
+    """Search command_runs for the most recent successful
+    project_docs_fetch_dry_run run for `opportunity_number` (already
+    normalized) within the last `within_minutes` minutes. Returns its
+    run_id, or None if no qualifying run is found."""
+    cutoff = datetime.utcnow() - timedelta(minutes=within_minutes)
+    col_list = ", ".join(_RUN_RECORD_COLUMNS)
+    rows = conn.execute(
+        f"""
+        SELECT {col_list} FROM command_runs
+        WHERE command_id = ? AND status = ? AND started_at >= ?
+        ORDER BY started_at DESC
+        """,
+        ["project_docs_fetch_dry_run", "success", cutoff],
+    ).fetchall()
+    for raw in rows:
+        row = dict(zip(_RUN_RECORD_COLUMNS, raw))
+        if is_qualifying_dry_run(row, opportunity_number, within_minutes=within_minutes):
+            return row["id"]
+    return None

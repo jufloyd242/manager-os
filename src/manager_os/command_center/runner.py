@@ -26,7 +26,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from manager_os.command_center import history, registry
+from manager_os.command_center import history, registry, token_estimator
 from manager_os.command_center.errors import (
     CommandBlockedError,
     ConfirmationRequiredError,
@@ -35,6 +35,7 @@ from manager_os.command_center.errors import (
     ScopeExceededError,
 )
 from manager_os.command_center.models import CommandSpec, RiskLevel
+from manager_os.utils import normalize_opp_id
 
 
 @dataclass(frozen=True)
@@ -304,19 +305,38 @@ def build_argv(
 # Only these command_ids may ever reach subprocess.run in this phase. Every
 # other registered command_id — including risk_level=blocked commands AND
 # any external_bounded/external_high_risk command not listed here (e.g.
-# project_docs_fetch_live_single, project_docs_fetch_batch_live_bounded) —
-# is rejected with status="blocked", regardless of `confirm`.
+# project_docs_fetch_batch_live_bounded) — is rejected with
+# status="blocked", regardless of `confirm`.
+#
+# project_docs_fetch_live_single is the ONE exception: it's allowlisted here,
+# but execute_command dispatches it to `_execute_live_single` BEFORE this
+# allowlist check, which enforces its own strict guardrails (single OppID,
+# confirm=True, bounded limit/timeout, dry-run-first) before ever building
+# argv or calling subprocess — see `_execute_live_single` below.
 _EXECUTABLE_COMMAND_IDS: frozenset[str] = frozenset(
     {
         "daily_dry_run",
         "project_docs_fetch_dry_run",
         "project_docs_fetch_print_prompt",
+        "project_docs_fetch_live_single",
         "project_memory_report",
         "feedback_summary",
         "people_audit",
         "search_projects",
     }
 )
+
+# project_docs_fetch_live_single-specific guardrails (stricter than the
+# shared _PROJECT_DOCS_SINGLE_PARAMS registry defaults, which are also used
+# by the always-safe dry_run/print_prompt variants of this command).
+_LIVE_SINGLE_ALLOWED_PARAMS: frozenset[str] = frozenset(
+    {"opportunity_number", "client", "project_name", "limit", "timeout", "dry_run_run_id"}
+)
+_LIVE_SINGLE_DEFAULT_LIMIT = 3
+_LIVE_SINGLE_MAX_LIMIT = 5
+_LIVE_SINGLE_DEFAULT_TIMEOUT = 60
+_LIVE_SINGLE_MAX_TIMEOUT = 120
+_LIVE_SINGLE_DRY_RUN_WINDOW_MINUTES = 30
 
 
 def _decode(value: Any) -> Optional[str]:
@@ -341,6 +361,201 @@ def _run_result(row: dict[str, Any], *, argv: Optional[list[str]]) -> dict[str, 
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
     }
+
+
+def _reject_live_single(conn: Any, spec: CommandSpec, message: str) -> dict[str, Any]:
+    """Persist a blocked command_runs row for project_docs_fetch_live_single
+    and return the standard result dict, without ever building argv or
+    calling subprocess."""
+    run_id = history.insert_command_run_started(
+        conn,
+        command_id=spec.command_id,
+        risk_level=spec.risk_level.value,
+        external_call_risk=spec.external_call_risk.value,
+        dry_run=False,
+        argv=None,
+        estimated_input_tokens=spec.estimated_input_tokens,
+    )
+    history.update_command_run_finished(conn, run_id, status="blocked", error=message)
+    row = history.get_command_run(conn, run_id)
+    return _run_result(row, argv=None)
+
+
+def _execute_live_single(
+    conn: Any,
+    spec: CommandSpec,
+    params: dict[str, Any],
+    *,
+    confirm: bool,
+    timeout: Optional[int],
+) -> dict[str, Any]:
+    """Guarded execution path for project_docs_fetch_live_single: the ONE
+    external_bounded command allowed to actually execute in this phase.
+
+    Guardrails, checked in order, every one of them BEFORE any argv is built
+    or subprocess is invoked:
+    1. Only opportunity_number/client/project_name/limit/timeout/
+       dry_run_run_id are accepted \u2014 any other key (e.g. a "batch" flag)
+       is rejected. There is no way to pass more than one OppID.
+    2. opportunity_number is required and must be a single string
+       (normalized via manager_os.utils.normalize_opp_id) \u2014 a list/tuple
+       is rejected.
+    3. confirm=True is required.
+    4. limit: default 3, hard max 5 \u2014 rejected (never clamped) if exceeded.
+    5. timeout: default 60, hard max 120 \u2014 rejected (never clamped) if
+       exceeded.
+    6. dry-run-first: there must be a qualifying prior successful
+       project_docs_fetch_dry_run run for the SAME normalized
+       opportunity_number within the last 30 minutes \u2014 verified via the
+       caller-supplied `dry_run_run_id` (checked against
+       history.get_command_run) if given, else via
+       history.find_recent_successful_dry_run.
+
+    Every attempt (rejected or executed) is persisted to command_runs.
+    """
+    params = params or {}
+
+    unknown = set(params) - _LIVE_SINGLE_ALLOWED_PARAMS
+    if unknown:
+        return _reject_live_single(
+            conn,
+            spec,
+            f"Unknown parameter(s) {sorted(unknown)} for project_docs_fetch_live_single. "
+            f"Allowed parameters: {sorted(_LIVE_SINGLE_ALLOWED_PARAMS)}. Batch/list "
+            "execution is never accepted for this command \u2014 exactly one "
+            "opportunity_number is required.",
+        )
+
+    opportunity_number = params.get("opportunity_number")
+    if not opportunity_number or not isinstance(opportunity_number, str):
+        return _reject_live_single(
+            conn,
+            spec,
+            "opportunity_number is required and must be a single string for "
+            "project_docs_fetch_live_single (batch/list values are rejected).",
+        )
+    normalized_opp = normalize_opp_id(opportunity_number)
+
+    if not confirm:
+        return _reject_live_single(
+            conn,
+            spec,
+            "Confirmation required (confirm=True) to execute "
+            "project_docs_fetch_live_single.",
+        )
+
+    limit = params.get("limit")
+    if limit is None:
+        limit = _LIVE_SINGLE_DEFAULT_LIMIT
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        return _reject_live_single(
+            conn, spec, f"limit must be an int, got {type(limit).__name__}."
+        )
+    if limit > _LIVE_SINGLE_MAX_LIMIT:
+        return _reject_live_single(
+            conn,
+            spec,
+            f"limit={limit} exceeds max allowed {_LIVE_SINGLE_MAX_LIMIT} for "
+            "project_docs_fetch_live_single.",
+        )
+
+    run_timeout_flag = params.get("timeout")
+    if run_timeout_flag is None:
+        run_timeout_flag = _LIVE_SINGLE_DEFAULT_TIMEOUT
+    if not isinstance(run_timeout_flag, int) or isinstance(run_timeout_flag, bool):
+        return _reject_live_single(
+            conn, spec, f"timeout must be an int, got {type(run_timeout_flag).__name__}."
+        )
+    if run_timeout_flag > _LIVE_SINGLE_MAX_TIMEOUT:
+        return _reject_live_single(
+            conn,
+            spec,
+            f"timeout={run_timeout_flag} exceeds max allowed {_LIVE_SINGLE_MAX_TIMEOUT} "
+            "for project_docs_fetch_live_single.",
+        )
+
+    dry_run_run_id = params.get("dry_run_run_id")
+    if dry_run_run_id:
+        dry_row = history.get_command_run(conn, dry_run_run_id)
+        if not history.is_qualifying_dry_run(
+            dry_row, normalized_opp, within_minutes=_LIVE_SINGLE_DRY_RUN_WINDOW_MINUTES
+        ):
+            return _reject_live_single(
+                conn,
+                spec,
+                f"Provided dry_run_run_id={dry_run_run_id!r} does not correspond to a "
+                "qualifying recent successful project_docs_fetch_dry_run run for "
+                f"{normalized_opp}. Run project_docs_fetch_dry_run successfully "
+                "before live execution.",
+            )
+    else:
+        found_run_id = history.find_recent_successful_dry_run(
+            conn, normalized_opp, within_minutes=_LIVE_SINGLE_DRY_RUN_WINDOW_MINUTES
+        )
+        if not found_run_id:
+            return _reject_live_single(
+                conn,
+                spec,
+                "Run project_docs_fetch_dry_run successfully before live execution.",
+            )
+
+    argv = [
+        sys.executable, "-m", "manager_os.cli",
+        "project-docs-fetch",
+        "--opportunity-number", normalized_opp,
+        "--limit", str(limit),
+        "--timeout", str(run_timeout_flag),
+        "--verbose",
+    ]
+
+    _, estimated_input_tokens = token_estimator.estimate_for_command(
+        "project_docs_fetch_live_single",
+        {
+            "opportunity_number": normalized_opp,
+            "client": params.get("client", ""),
+            "project_name": params.get("project_name", ""),
+        },
+    )
+
+    run_id = history.insert_command_run_started(
+        conn,
+        command_id=spec.command_id,
+        risk_level=spec.risk_level.value,
+        external_call_risk=spec.external_call_risk.value,
+        dry_run=False,
+        argv=argv,
+        estimated_input_tokens=estimated_input_tokens,
+    )
+
+    run_timeout = timeout if timeout is not None else spec.default_timeout_seconds
+
+    try:
+        proc = subprocess.run(
+            argv, shell=False, capture_output=True, text=True, timeout=run_timeout
+        )
+    except subprocess.TimeoutExpired as exc:
+        history.update_command_run_finished(
+            conn,
+            run_id,
+            status="timeout",
+            stdout=_decode(exc.stdout),
+            stderr=_decode(exc.stderr),
+            error=f"Command {spec.command_id!r} timed out after {run_timeout}s.",
+        )
+        row = history.get_command_run(conn, run_id)
+        return _run_result(row, argv=argv)
+    except OSError as exc:
+        history.update_command_run_finished(conn, run_id, status="failed", error=str(exc))
+        row = history.get_command_run(conn, run_id)
+        return _run_result(row, argv=argv)
+
+    status = "success" if proc.returncode == 0 else "failed"
+    error = None if status == "success" else f"Command exited with code {proc.returncode}."
+    history.update_command_run_finished(
+        conn, run_id, status=status, stdout=proc.stdout, stderr=proc.stderr, error=error
+    )
+    row = history.get_command_run(conn, run_id)
+    return _run_result(row, argv=argv)
 
 
 def execute_command(
@@ -383,6 +598,12 @@ def execute_command(
     spec = registry.get(command_id)  # raises CommandNotFoundError; nothing persisted yet
 
     history.ensure_command_runs_table(conn)
+
+    if command_id == "project_docs_fetch_live_single":
+        # Special-cased: this command has its own strict guardrail gate
+        # (single OppID, confirm=True, bounded limit/timeout, dry-run-first)
+        # instead of the generic build_argv/_validate_args path below.
+        return _execute_live_single(conn, spec, params, confirm=confirm, timeout=timeout)
 
     if command_id not in _EXECUTABLE_COMMAND_IDS:
         error = (
