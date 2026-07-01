@@ -66,6 +66,7 @@ def test_forecast_compressed_json_parses_and_prompt_budget(mock_run):
     assert len(dry_result.json_text) < 700
     assert "source_url: string (Google Sheets URL" not in dry_result.json_text
     assert "ONLY JSON" in dry_result.json_text or "Return ONLY" in dry_result.json_text
+    assert "read-only" in dry_result.json_text.lower()
 
 
 @patch("manager_os.ingest.workspace_gemini._run_gemini_retrieval")
@@ -103,6 +104,7 @@ def test_calendar_compressed_json_parses_and_prompt_budget(mock_run):
     assert len(dry_result.json_text) < 750
     assert "description_summary: string (brief, max 200 chars)" not in dry_result.json_text
     assert "ONLY JSON" in dry_result.json_text or "Return ONLY" in dry_result.json_text
+    assert "read-only" in dry_result.json_text.lower()
 
 
 @patch("manager_os.ingest.workspace_gemini._run_gemini_retrieval")
@@ -324,3 +326,45 @@ def test_batch_search_raises_on_ok_false(mock_run):
             [{"opportunity_number": "OPP1", "client": "C1", "project_name": "P1"}],
             dry_run=False,
         )
+
+
+# ------------------------------------------------------------------
+# Task 4: reliability guards for prompt compression / batching
+# ------------------------------------------------------------------
+
+
+def test_batch_prompt_includes_every_selected_project():
+    from manager_os.ingest.project_drive_docs import _build_batch_drive_search_prompt
+
+    projects = [
+        {"opportunity_number": "OPP1", "client": "Acme", "project_name": "Alpha"},
+        {"opportunity_number": "OPP2", "client": "Beta Co", "project_name": "Bravo"},
+        {"opportunity_number": "OPP3", "client": "Gamma Inc", "project_name": "Charlie"},
+    ]
+
+    prompt = _build_batch_drive_search_prompt(projects)
+
+    for p in projects:
+        assert p["opportunity_number"] in prompt
+        assert p["client"] in prompt
+        assert p["project_name"] in prompt
+
+
+def test_batch_prompt_size_is_sane_for_five_projects():
+    from manager_os.ingest.project_drive_docs import _build_batch_drive_search_prompt
+
+    projects = [
+        {
+            "opportunity_number": f"OPP{i}",
+            "client": f"Client {i}",
+            "project_name": f"Project {i}",
+        }
+        for i in range(5)
+    ]
+
+    prompt = _build_batch_drive_search_prompt(projects)
+
+    # Sane upper bound: boilerplate + 5 short project lines should stay well
+    # under what 5 separate single-project prompts would have cost (5 * ~530
+    # chars measured for _build_drive_search_prompt).
+    assert len(prompt) < 900
