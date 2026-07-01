@@ -155,6 +155,62 @@ export const mockCommandRegistry: CommandSpec[] = [
       { name: 'opportunity_number', type: 'str', required: true, default: null, allowed_values: null, help: 'e.g. OPP-ACME-002' },
     ],
   },
+  // --- Guarded live single project-doc fetch (contract: command_id
+  // project_docs_fetch_live_single, risk_level=external_bounded,
+  // external_call_risk=likely, requires_confirmation=true,
+  // dry_run_required_before_live=true) and its supporting dry-run/batch
+  // command ids. These are additive alongside the existing hyphenated
+  // 'project-docs-fetch' entry above (kept for back-compat with prior tests).
+  {
+    command_id: 'project_docs_fetch_dry_run',
+    label: 'Fetch Project Documents (Dry Run)',
+    description: 'Preview a single-project Drive document search without calling Gemini CLI live.',
+    category: 'workspace',
+    risk_level: 'local_safe',
+    external_call_risk: 'none',
+    supports_dry_run: true,
+    supports_print_prompt: true,
+    requires_confirmation: false,
+    dry_run_required_before_live: false,
+    parameters: [
+      { name: 'opportunity_number', type: 'str', required: true, default: null, allowed_values: null, help: 'e.g. OPP-ACME-002' },
+      { name: 'limit', type: 'int', required: false, default: 3, allowed_values: null, help: 'Max documents (up to 5)' },
+      { name: 'timeout', type: 'int', required: false, default: 60, allowed_values: null, help: 'Timeout seconds (up to 120)' },
+    ],
+  },
+  {
+    command_id: 'project_docs_fetch_live_single',
+    label: 'Fetch Project Documents (Live, Single)',
+    description: 'Live Drive document search for one project via Gemini CLI. Contacts Google Drive.',
+    category: 'workspace',
+    risk_level: 'external_bounded',
+    external_call_risk: 'likely',
+    supports_dry_run: true,
+    supports_print_prompt: false,
+    requires_confirmation: true,
+    dry_run_required_before_live: true,
+    parameters: [
+      { name: 'opportunity_number', type: 'str', required: true, default: null, allowed_values: null, help: 'e.g. OPP-ACME-002' },
+      { name: 'limit', type: 'int', required: false, default: 3, allowed_values: null, help: 'Max documents (up to 5)' },
+      { name: 'timeout', type: 'int', required: false, default: 60, allowed_values: null, help: 'Timeout seconds (up to 120)' },
+    ],
+  },
+  {
+    command_id: 'project_docs_fetch_batch_live_bounded',
+    label: 'Fetch Project Documents (Live, Batch)',
+    description: 'Live Drive document search across multiple projects via Gemini CLI. Contacts Google Drive.',
+    category: 'workspace',
+    risk_level: 'external_bounded',
+    external_call_risk: 'likely',
+    supports_dry_run: true,
+    supports_print_prompt: false,
+    requires_confirmation: true,
+    dry_run_required_before_live: true,
+    parameters: [
+      { name: 'limit_projects', type: 'int', required: true, default: null, allowed_values: null, help: 'Max projects (bounded, e.g. up to 25)' },
+      { name: 'timeout', type: 'int', required: false, default: 60, allowed_values: null, help: 'Timeout seconds' },
+    ],
+  },
   {
     command_id: 'closeout-weekly',
     label: 'Send Weekly Exec Update',

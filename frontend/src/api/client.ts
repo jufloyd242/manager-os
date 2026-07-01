@@ -97,15 +97,23 @@ export interface CommandSpec {
   parameters: ParameterSpec[]
 }
 
-/** Response shape for `POST /api/commands/{id}/validate`. */
+/** Response shape for `POST /api/commands/{id}/validate`.
+ *
+ * `command_id`, `dry_run_required_before_live`, and `estimated_output_tokens`
+ * are optional extensions to support guarded external-call commands (e.g.
+ * `project_docs_fetch_live_single`) — kept optional so existing call sites
+ * that only supply the original fields continue to type-check. */
 export interface ValidateResponse {
   ok: boolean
+  command_id?: string
   argv_preview: string[] | null
   risk_level: RiskLevel
   external_call_risk: ExternalCallRisk
-  estimated_input_tokens: number | null
-  warnings: string[]
   requires_confirmation: boolean
+  dry_run_required_before_live?: boolean
+  estimated_input_tokens: number | null
+  estimated_output_tokens?: number | null
+  warnings: string[]
 }
 
 /** Response shape for `POST /api/commands/{id}/run`. */
