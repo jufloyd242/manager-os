@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from manager_os.command_center.models import CommandSpec
 
@@ -39,6 +39,13 @@ class DailyResponse(BaseModel):
     feedback_learning: list[dict[str, Any]]
     recommended_actions: list[dict[str, Any]]
     warnings: list[str]
+    # Grouped/summarized view of recommended_actions. Loosely typed (rather
+    # than strict nested models) so this stays a faithful passthrough of
+    # build_daily_operating_loop()'s dict and doesn't fight minor shape
+    # evolution upstream. Defaults keep this backward-compatible with an
+    # older build_daily_operating_loop() that hasn't been updated yet.
+    action_summary: dict[str, Any] = Field(default_factory=dict)
+    action_groups: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PeopleResponse(BaseModel):

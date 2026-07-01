@@ -25,6 +25,8 @@ EXPECTED_KEYS = {
     "feedback_learning",
     "recommended_actions",
     "warnings",
+    "action_summary",
+    "action_groups",
 }
 
 
@@ -84,6 +86,326 @@ def _all_command_ids(body: dict) -> list[str]:
             if secondary.get("command_id"):
                 ids.append(secondary["command_id"])
     return ids
+
+
+def _all_group_command_ids(body: dict) -> list[str]:
+    """Collect every command_id referenced anywhere inside action_groups[*].actions."""
+    ids: list[str] = []
+    for group in body.get("action_groups") or []:
+        for action in group.get("actions") or []:
+            primary = action.get("primary_command")
+            if primary and primary.get("command_id"):
+                ids.append(primary["command_id"])
+            for secondary in action.get("secondary_commands") or []:
+                if secondary.get("command_id"):
+                    ids.append(secondary["command_id"])
+    return ids
+
+
+# ------------------------------------------------------------------
+# action_summary / action_groups passthrough contract (Agent B, API layer).
+#
+# build_daily_operating_loop() is mocked here (patched at its import site in
+# manager_os.api.app) so these tests exercise ONLY the API's passthrough
+# faithfulness against the agreed contract shape, independent of whether
+# Agent A's build/daily_operating_loop.py changes have landed yet. This
+# keeps the API test suite green regardless of landing order. A real
+# end-to-end cross-check (using genuine document_gaps -> action_groups data
+# from the real pipeline) is Agent A's test responsibility per the task
+# split; once that lands, these mocked tests still guard the API contract
+# independently.
+# ------------------------------------------------------------------
+
+
+def _build_mock_loop_with_action_groups(conn, target_date: date, settings=None) -> dict:
+    doc_gap_actions = [
+        {
+            "id": f"document_gap:OPP{i}",
+            "source": "document_gaps",
+            "entity_type": "project",
+            "entity_id": f"OPP{i}",
+            "title": f"Fetch docs for OPP{i}",
+            "reason": "0 documents in project_documents",
+            "command": f"manager-os project-docs-fetch --opportunity-number OPP{i} --dry-run",
+            "priority": "medium",
+            "primary_command": {
+                "command_id": "project_docs_fetch_dry_run",
+                "params": {"opportunity_number": f"OPP{i}"},
+            },
+            "secondary_commands": [
+                {
+                    "label": "Print Prompt",
+                    "command_id": "project_docs_fetch_print_prompt",
+                    "params": {"opportunity_number": f"OPP{i}"},
+                },
+                {
+                    "label": "Run Live Fetch",
+                    "command_id": "project_docs_fetch_live_single",
+                    "params": {"opportunity_number": f"OPP{i}", "limit": 3, "timeout": 60},
+                    "requires_confirmation": True,
+                    "requires_successful_dry_run": True,
+                },
+            ],
+        }
+        for i in (1, 2, 3)
+    ]
+    people_action = {
+        "title": "Review allocation for Alice — 160% planned.",
+        "reason": "160% allocation",
+        "command": None,
+        "priority": "high",
+        "source": "people_staffing",
+    }
+    recommended_actions = [*doc_gap_actions, people_action]
+
+    action_summary = {
+        "total": len(recommended_actions),
+        "by_source": {"document_gaps": 3, "people_staffing": 1},
+        "by_priority": {"high": 1, "medium": 3, "low": 0},
+        "executable": 3,
+        "informational": 1,
+    }
+    action_groups = [
+        {
+            "id": "document_gaps",
+            "title": "Document Gaps",
+            "source": "document_gaps",
+            "count": 3,
+            "priority": "medium",
+            "summary": "3 projects missing documents",
+            "default_visible_count": 5,
+            "actions": doc_gap_actions,
+        },
+        {
+            "id": "people_staffing",
+            "title": "Staffing Reviews",
+            "source": "people_staffing",
+            "count": 1,
+            "priority": "high",
+            "summary": "1 staffing review",
+            "default_visible_count": 5,
+            "actions": [people_action],
+        },
+    ]
+
+    return {
+        "date": target_date.isoformat(),
+        "people_staffing": [],
+        "meetings": [],
+        "projects_deals": [],
+        "document_gaps": [],
+        "feedback_learning": [],
+        "recommended_actions": recommended_actions,
+        "warnings": [],
+        "action_summary": action_summary,
+        "action_groups": action_groups,
+    }
+
+
+def test_daily_response_includes_action_summary_and_action_groups_keys(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+
+    with (
+        patch("manager_os.ingest.workspace_gemini._run_gemini_retrieval") as mock_run,
+        patch(
+            "manager_os.api.app.build_daily_operating_loop",
+            side_effect=_build_mock_loop_with_action_groups,
+        ),
+    ):
+        resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+
+    assert resp.status_code == 200, resp.text
+    mock_run.assert_not_called()
+    body = resp.json()
+    assert "action_summary" in body
+    assert "action_groups" in body
+
+
+def test_action_summary_total_matches_recommended_actions_count(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+
+    with patch(
+        "manager_os.api.app.build_daily_operating_loop",
+        side_effect=_build_mock_loop_with_action_groups,
+    ):
+        resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["action_summary"]["total"] == len(body["recommended_actions"])
+
+
+def test_action_groups_document_gaps_count_matches_flat_list(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+
+    with patch(
+        "manager_os.api.app.build_daily_operating_loop",
+        side_effect=_build_mock_loop_with_action_groups,
+    ):
+        resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    group = next(g for g in body["action_groups"] if g["id"] == "document_gaps")
+    flat_count = len([a for a in body["recommended_actions"] if a.get("source") == "document_gaps"])
+    assert group["count"] == flat_count
+
+
+def test_action_groups_preserve_primary_command_for_document_gap_action(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+
+    with patch(
+        "manager_os.api.app.build_daily_operating_loop",
+        side_effect=_build_mock_loop_with_action_groups,
+    ):
+        resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    group = next(g for g in body["action_groups"] if g["id"] == "document_gaps")
+    grouped_action = group["actions"][0]
+    flat_action = next(a for a in body["recommended_actions"] if a["id"] == grouped_action["id"])
+    assert grouped_action["primary_command"] == flat_action["primary_command"]
+
+
+def test_action_groups_never_expose_forbidden_command_ids(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+
+    with patch(
+        "manager_os.api.app.build_daily_operating_loop",
+        side_effect=_build_mock_loop_with_action_groups,
+    ):
+        resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    forbidden = {"project_docs_fetch_batch_live_bounded"}
+    for command_id in _all_group_command_ids(body):
+        assert command_id not in forbidden
+        assert "workspace" not in command_id
+        assert "gemini" not in command_id
+
+
+def test_daily_response_backward_compatible_when_loop_omits_new_fields(tmp_path, monkeypatch):
+    """If build_daily_operating_loop() returns a dict without action_summary/
+    action_groups (e.g. an older build), the response must still succeed with
+    sensible empty defaults rather than raising a validation error."""
+    client, _ = _client(tmp_path, monkeypatch)
+
+    def _old_shape_loop(conn, target_date, settings=None):
+        return {
+            "date": target_date.isoformat(),
+            "people_staffing": [],
+            "meetings": [],
+            "projects_deals": [],
+            "document_gaps": [],
+            "feedback_learning": [],
+            "recommended_actions": [],
+            "warnings": [],
+        }
+
+    with patch("manager_os.api.app.build_daily_operating_loop", side_effect=_old_shape_loop):
+        resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["action_summary"] == {}
+    assert body["action_groups"] == []
+
+
+# ------------------------------------------------------------------
+# Real end-to-end passthrough (no mocking of build_daily_operating_loop) —
+# exercises the actual, now-landed build/daily_action_groups.py grouping
+# logic through the real HTTP route, cross-checking the flat
+# recommended_actions list against action_summary/action_groups.
+# ------------------------------------------------------------------
+
+
+def test_daily_real_pipeline_action_summary_total_matches_recommended_actions(tmp_path, monkeypatch):
+    client, db_path = _client(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    _seed_baseline_note(conn)
+    _seed_document_gap_project(conn)
+    conn.close()
+
+    with patch("manager_os.ingest.workspace_gemini._run_gemini_retrieval") as mock_run:
+        resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+
+    assert resp.status_code == 200, resp.text
+    mock_run.assert_not_called()
+    body = resp.json()
+    assert body["action_summary"]["total"] == len(body["recommended_actions"])
+
+
+def test_daily_real_pipeline_document_gaps_group_matches_flat_list_and_preserves_commands(
+    tmp_path, monkeypatch
+):
+    client, db_path = _client(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    _seed_baseline_note(conn)
+    # Seed 6 document-gap projects to exercise the default_visible_count=5 hint
+    # (backend must still return the FULL action list per group).
+    for i in range(6):
+        _seed_document_gap_project(conn, opportunity_number=f"OPP0{i}")
+    conn.close()
+
+    with patch("manager_os.ingest.workspace_gemini._run_gemini_retrieval") as mock_run:
+        resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+
+    assert resp.status_code == 200, resp.text
+    mock_run.assert_not_called()
+    body = resp.json()
+
+    flat_doc_gap_actions = [a for a in body["recommended_actions"] if a.get("source") == "document_gaps"]
+    assert len(flat_doc_gap_actions) == 6
+
+    group = next(g for g in body["action_groups"] if g["id"] == "document_gaps")
+    assert group["count"] == 6
+    assert len(group["actions"]) == 6
+    assert group["default_visible_count"] == 5
+
+    # Spot-check: a document-gap action inside the group has the same
+    # primary_command as its flat-list counterpart (matched by id).
+    grouped_action = group["actions"][0]
+    flat_action = next(a for a in flat_doc_gap_actions if a["id"] == grouped_action["id"])
+    assert grouped_action["primary_command"] == flat_action["primary_command"]
+
+
+def test_daily_real_pipeline_no_forbidden_command_ids_in_action_groups(tmp_path, monkeypatch):
+    client, db_path = _client(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    _seed_baseline_note(conn)
+    _seed_document_gap_project(conn)
+    conn.close()
+
+    with patch("manager_os.ingest.workspace_gemini._run_gemini_retrieval") as mock_run:
+        resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+
+    assert resp.status_code == 200, resp.text
+    mock_run.assert_not_called()
+    body = resp.json()
+    forbidden = {"project_docs_fetch_batch_live_bounded"}
+    for command_id in _all_group_command_ids(body):
+        assert command_id not in forbidden
+        assert "workspace" not in command_id
+        assert "gemini" not in command_id
+
+
+def test_daily_real_pipeline_route_never_executes_subprocess(tmp_path, monkeypatch):
+    client, db_path = _client(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    _seed_baseline_note(conn)
+    _seed_document_gap_project(conn)
+    conn.close()
+
+    with (
+        patch("manager_os.ingest.workspace_gemini._run_gemini_retrieval"),
+        patch("manager_os.command_center.runner.subprocess.run") as mock_subprocess_run,
+    ):
+        resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+
+    assert resp.status_code == 200, resp.text
+    mock_subprocess_run.assert_not_called()
 
 
 def test_daily_returns_expected_section_keys(tmp_path, monkeypatch):
