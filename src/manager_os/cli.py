@@ -3007,7 +3007,7 @@ def project_docs_fetch(
         console.print("\n[dim]Would search Google Drive for documents related to this project.[/dim]")
         raise typer.Exit(0)
 
-    console.print(f"[bold]Fetching Drive docs for {stored_opp} — {project_name}[/bold]")
+    console.print(f"[bold]Fetching Drive docs for {stored_opp} — {project_name} ({client})[/bold]")
     
     drive_result = search_drive_for_project_docs(
         opportunity_number=stored_opp,
@@ -3016,13 +3016,14 @@ def project_docs_fetch(
         timeout=timeout,
     )
 
-    if drive_result.errors:
-        for error in drive_result.errors:
-            console.print(f"[red]✗ {error}[/red]")
-
     if drive_result.warnings and verbose:
         for warning in drive_result.warnings:
             console.print(f"[yellow]⚠ {warning}[/yellow]")
+
+    if drive_result.errors:
+        for error in drive_result.errors:
+            console.print(f"[red]✗ {error}[/red]")
+        raise typer.Exit(1)
 
     if not drive_result.documents:
         console.print("[yellow]No documents found in Google Drive.[/yellow]")
