@@ -5405,7 +5405,7 @@ def workspace_fetch_deal_docs(
     target_date: Optional[str] = typer.Option(None, "--date", help="Date label for snapshot (YYYY-MM-DD)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without contacting Google Drive."),
     deal_id: Optional[str] = typer.Option(None, "--deal-id", help="Fetch docs for a single deal ID."),
-    opportunity_number: Optional[str] = typer.Option(None, "--opportunity-number", help="Opportunity number (alias for --deal-id)."),
+    opportunity_number: Optional[str] = typer.Option(None, "--opportunity-number", help="[Deprecated here] Use 'manager-os project-docs-fetch --opportunity-number' instead; passing this exits non-zero with guidance."),
     limit: Optional[int] = typer.Option(None, "--limit", help="Max deals to fetch docs for."),
     timeout: int = typer.Option(60, "--timeout", help="Timeout in seconds per Gemini CLI call."),
     print_prompt: bool = typer.Option(False, "--print-prompt", help="Print the prompt that would be sent."),
@@ -5415,6 +5415,12 @@ def workspace_fetch_deal_docs(
 
     Searches Google Drive via Gemini CLI (read-only) for documents matching
     each deal's opportunity number and stores results in the deal_documents table.
+
+    NOTE: For project documents (SOW, deal sheet, project plan, etc.) keyed by
+    opportunity number, use `manager-os project-docs-fetch --opportunity-number`
+    instead. This command is deal-ID based; the `deals` table has no
+    opportunity_number field, so --opportunity-number cannot be safely
+    resolved here.
     """
     from manager_os.config import get_settings
     from manager_os.db import get_connection
@@ -5425,11 +5431,19 @@ def workspace_fetch_deal_docs(
     from rich import box as rich_box
     from rich.panel import Panel
 
+    if opportunity_number:
+        console.print(
+            "[red]--opportunity-number is handled by project-docs-fetch, not "
+            "workspace-fetch-deal-docs.[/red]"
+        )
+        console.print("Run:")
+        console.print(f"  manager-os project-docs-fetch --opportunity-number {opportunity_number} --dry-run")
+        raise typer.Exit(1)
+
     settings = get_settings()
     run_date = date.fromisoformat(target_date) if target_date else date.today()
 
-    # --opportunity-number is an alias for --deal-id
-    effective_deal_id = opportunity_number or deal_id
+    effective_deal_id = deal_id
 
     console.print(Panel.fit(
         "[bold]Manager OS — Workspace: Fetch Deal Docs[/bold]",
