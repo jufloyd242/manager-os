@@ -2763,26 +2763,24 @@ def index_projects(
             project_id = f"project::{project.opportunity_number}"
             console.print(f"  Searching Drive for {project.opportunity_number}...")
             
-            drive_result = search_drive_for_project_docs(
+            stats = search_drive_for_project_docs(
                 opportunity_number=project.opportunity_number,
                 client=project.client,
                 project_name=project.project_name,
+                conn=conn,
+                force=force,
+                limit=doc_limit,
+                project_id=project_id,
                 timeout=120,
             )
             
-            if drive_result.errors and verbose:
-                for error in drive_result.errors:
+            if stats["errors"] and verbose:
+                for error in stats["errors"]:
                     console.print(f"    [red]✗ {error}[/red]")
             
-            # Set project_id on documents
-            for doc in drive_result.documents:
-                doc.project_id = project_id
-            
-            if drive_result.documents:
-                inserted_docs, updated_docs = upsert_project_documents(conn, drive_result.documents, force=force)
-                total_docs += len(drive_result.documents)
-                if verbose:
-                    console.print(f"    Found {len(drive_result.documents)} documents")
+            total_docs += stats["parsed_count"]
+            if verbose and stats["parsed_count"] > 0:
+                console.print(f"    Found {stats['parsed_count']} documents")
         
         console.print(f"[green]✓ Enriched with {total_docs} documents[/green]")
     else:
@@ -2952,6 +2950,7 @@ def project_docs_fetch(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output."),
     batch: bool = typer.Option(False, "--batch", help="Search docs for multiple projects in one Gemini call instead of a single --opportunity-number."),
     limit_projects: int = typer.Option(5, "--limit-projects", help="Max projects to include in --batch mode (bounded)."),
+    allow_empty: bool = typer.Option(False, "--allow-empty", help="Allow empty document results without failing."),
 ) -> None:
     """Fetch Google Drive documents for a specific project.
     
@@ -3030,7 +3029,7 @@ def project_docs_fetch(
             for doc in drive_result.documents:
                 doc.project_id = project_id
             docs_to_upsert = drive_result.documents[:limit]
-            inserted, updated = upsert_project_documents(conn, docs_to_upsert, force=force)
+            inserted, updated, skipped = upsert_project_documents(conn, docs_to_upsert, force=force)
             total_inserted += inserted
             total_updated += updated
             console.print(f"[green]✓ {opp_id}: {len(drive_result.documents)} document(s)[/green]")
@@ -3099,42 +3098,45 @@ def project_docs_fetch(
 
     console.print(f"[bold]Fetching Drive docs for {stored_opp} — {project_name} ({client})[/bold]")
     
-    drive_result = search_drive_for_project_docs(
+    stats = search_drive_for_project_docs(
         opportunity_number=stored_opp,
         client=client,
         project_name=project_name,
+        conn=conn,
+        force=force,
+        limit=limit,
+        project_id=project_id,
         timeout=timeout,
     )
 
-    if drive_result.warnings and verbose:
-        for warning in drive_result.warnings:
-            console.print(f"[yellow]⚠ {warning}[/yellow]")
+    # Print Fetch Diagnostics
+    console.print("\n[bold]Fetch Diagnostics:[/bold]")
+    console.print(f"  Raw: {stats['raw_count']}")
+    console.print(f"  Parsed: {stats['parsed_count']}")
+    console.print(f"  Inserted: {stats['inserted']}")
+    console.print(f"  Updated: {stats['updated']}")
+    console.print(f"  Skipped: {stats['skipped']}")
 
-    if drive_result.errors:
-        for error in drive_result.errors:
-            console.print(f"[red]✗ {error}[/red]")
-        raise typer.Exit(1)
+    if stats["errors"]:
+        console.print("\n[bold red]Errors:[/bold red]")
+        for err in stats["errors"]:
+            console.print(f"  [red]✗ {err}[/red]")
 
-    if not drive_result.documents:
-        console.print("[yellow]No documents found in Google Drive.[/yellow]")
-        raise typer.Exit(0)
+    is_error = stats["status"] == "error"
+    is_empty = stats["parsed_count"] == 0
 
-    # Set project_id on documents
-    for doc in drive_result.documents:
-        doc.project_id = project_id
-
-    # Limit documents
-    docs_to_upsert = drive_result.documents[:limit]
-
-    inserted, updated = upsert_project_documents(conn, docs_to_upsert, force=force)
-    
-    console.print(f"[green]✓ Found {len(drive_result.documents)} documents[/green]")
-    console.print(f"  Inserted: {inserted}, Updated: {updated}")
-    
-    if verbose:
-        for doc in docs_to_upsert:
-            console.print(f"  - [{doc.document_type}] {doc.title}")
-            console.print(f"    {doc.url}")
+    if is_error or is_empty:
+        if is_error:
+            console.print("\n[bold red]Fatal Error: Drive doc fetch encountered errors.[/bold red]")
+        else:
+            console.print("\n[bold red]Fatal Error: No project documents were parsed/found.[/bold red]")
+        
+        if allow_empty:
+            console.print("[yellow]Bypassing failure due to --allow-empty flag.[/yellow]")
+        else:
+            raise typer.Exit(code=1)
+    else:
+        console.print(f"\n[bold green]✓ Successfully fetched and processed {stats['parsed_count']} documents.[/bold green]")
 
 
 # ---------------------------------------------------------------------------

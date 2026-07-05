@@ -234,26 +234,52 @@ def search_drive_for_project_docs(
     opportunity_number: str,
     client: str,
     project_name: str,
+    conn: Any = None,
+    force: bool = False,
+    limit: int = 10,
+    project_id: str = "",
     timeout: int = 120,
-) -> DriveSearchResult:
-    """Search Google Drive for documents related to a project.
+) -> dict[str, Any]:
+    """Search Google Drive for documents related to a project and return stats.
     
     Args:
         opportunity_number: The OPP number
         client: Customer/client name
         project_name: Opportunity/project name
+        conn: Optional DuckDB connection to perform upsert
+        force: If True, overwrite existing records when upserting
+        limit: Max documents to upsert
+        project_id: Optional project ID prefix
         timeout: Timeout in seconds for Gemini CLI
         
     Returns:
-        DriveSearchResult with found documents
+        Dict of stats: {
+            "status": "success" | "error" | "empty",
+            "raw_count": int,
+            "parsed_count": int,
+            "inserted": int,
+            "updated": int,
+            "skipped": int,
+            "errors": list[str]
+        }
     """
-    result = DriveSearchResult()
+    stats = {
+        "status": "success",
+        "raw_count": 0,
+        "parsed_count": 0,
+        "inserted": 0,
+        "updated": 0,
+        "skipped": 0,
+        "errors": [],
+    }
     
     if not opportunity_number:
-        result.warnings.append("No opportunity number provided, skipping Drive search")
-        return result
+        stats["status"] = "empty"
+        stats["errors"].append("No opportunity number provided, skipping Drive search")
+        return stats
     
     prompt = _build_drive_search_prompt(opportunity_number, client, project_name)
+    documents = []
     
     try:
         # Build Gemini CLI command
@@ -275,8 +301,9 @@ def search_drive_for_project_docs(
         )
         
         if proc.returncode != 0:
-            result.errors.append(f"Gemini CLI failed: {proc.stderr}")
-            return result
+            stats["status"] = "error"
+            stats["errors"].append(f"Gemini CLI failed: {proc.stderr}")
+            return stats
         
         # Parse JSON output
         output_text = proc.stdout.strip()
@@ -288,16 +315,21 @@ def search_drive_for_project_docs(
         try:
             response = json.loads(output_text)
         except json.JSONDecodeError as e:
-            result.errors.append(f"Failed to parse Gemini response: {e}")
-            return result
+            stats["status"] = "error"
+            stats["errors"].append(f"Failed to parse Gemini response: {e}")
+            return stats
         
         if not response.get("ok"):
-            result.errors.append(f"Gemini reported error: {response.get('error', 'Unknown error')}")
-            return result
+            stats["status"] = "error"
+            stats["errors"].append(f"Gemini reported error: {response.get('error', 'Unknown error')}")
+            return stats
         
         # Extract documents
         retrieved_at = response.get("retrieved_at", datetime.utcnow().isoformat())
-        for doc_data in response.get("documents", []):
+        response_docs = response.get("documents", [])
+        stats["raw_count"] = len(response_docs)
+        
+        for doc_data in response_docs:
             # Detect document type if not provided or if it's "other"
             doc_type = doc_data.get("document_type", "other")
             title = doc_data.get("title", "")
@@ -307,7 +339,7 @@ def search_drive_for_project_docs(
                 doc_type = detect_document_type(title, url)
             
             doc = ProjectDocument(
-                project_id="",  # Will be set by caller
+                project_id=project_id or f"project::{opportunity_number}",
                 opportunity_number=opportunity_number,
                 client=client,
                 project_name=project_name,
@@ -321,21 +353,36 @@ def search_drive_for_project_docs(
                 why_matched=doc_data.get("why_matched", ""),
                 metadata_json=doc_data.get("metadata", {}),
             )
-            result.documents.append(doc)
-    
+            documents.append(doc)
+            
+        stats["parsed_count"] = len(documents)
+        
+        if stats["parsed_count"] == 0:
+            stats["status"] = "empty"
+        
+        # Upsert documents if DB connection is provided
+        if conn and documents:
+            docs_to_upsert = documents[:limit]
+            inserted, updated, skipped = upsert_project_documents(conn, docs_to_upsert, force=force)
+            stats["inserted"] = inserted
+            stats["updated"] = updated
+            stats["skipped"] = skipped
+            
     except subprocess.TimeoutExpired:
-        result.errors.append(f"Gemini CLI timed out after {timeout} seconds")
+        stats["status"] = "error"
+        stats["errors"].append(f"Gemini CLI timed out after {timeout} seconds")
     except Exception as e:
-        result.errors.append(f"Drive search failed: {str(e)}")
+        stats["status"] = "error"
+        stats["errors"].append(f"Drive search failed: {str(e)}")
     
-    return result
+    return stats
 
 
 def upsert_project_documents(
     conn,
     documents: list[ProjectDocument],
     force: bool = False,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Upsert project documents into the project_documents table.
     
     Args:
@@ -344,10 +391,11 @@ def upsert_project_documents(
         force: If True, overwrite existing records
         
     Returns:
-        Tuple of (inserted_count, updated_count)
+        Tuple of (inserted_count, updated_count, skipped_count)
     """
     inserted = 0
     updated = 0
+    skipped = 0
     
     for doc in documents:
         # Generate stable document ID
@@ -384,7 +432,8 @@ def upsert_project_documents(
                         doc_id,
                     ]
                 )
-            # If not force and exists, skip (already up to date)
+            else:
+                skipped += 1
         else:
             inserted += 1
             # Insert new record only
@@ -415,4 +464,4 @@ def upsert_project_documents(
                 ]
             )
     
-    return inserted, updated
+    return inserted, updated, skipped
