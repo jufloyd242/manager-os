@@ -371,3 +371,38 @@ export function getRunLogs(runId: string): Promise<ApiResult<RunLogs>> {
     () => mockRunLogs(runId),
   )
 }
+
+// --- Staffing Balance --------------------------------------------------------
+
+export interface AllocationComparison {
+  person: string
+  original_allocation: number
+  balanced_allocation: number
+}
+
+export interface Redistribution {
+  from_person: string
+  to_person: string
+  amount: number
+  project?: string
+}
+
+export interface StaffingBalanceResponse {
+  comparison: AllocationComparison[]
+  redistributions: Redistribution[]
+}
+
+export function getStaffingBalance(): Promise<ApiResult<StaffingBalanceResponse>> {
+  return withMockFallback(
+    () => requestJson<StaffingBalanceResponse>('/api/analytics/staffing-balance'),
+    () => ({
+      comparison: [
+        { person: 'Priya Nair', original_allocation: 1.28, balanced_allocation: 1.0 },
+        { person: 'Jordan Lee', original_allocation: 0.8, balanced_allocation: 1.08 },
+      ],
+      redistributions: [
+        { from_person: 'Priya Nair', to_person: 'Jordan Lee', amount: 0.28, project: 'Acme Corp — Phase 2' },
+      ],
+    }),
+  )
+}
