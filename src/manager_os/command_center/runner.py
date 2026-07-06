@@ -576,6 +576,108 @@ def _execute_live_single(
     return _run_result(row, argv=argv)
 
 
+def _execute_project_docs_fetch_preview(
+    conn: Any,
+    command_id: str,
+    params: dict[str, Any],
+    argv: list[str],
+    spec: CommandSpec,
+) -> dict[str, Any]:
+    """Execute project-docs-fetch dry-run or print-prompt natively in-process,
+    using the active database handle to prevent DuckDB write-lock errors."""
+    from manager_os.ingest.project_drive_docs import (
+        search_drive_for_project_docs,
+        _build_drive_search_prompt,
+    )
+    from manager_os.utils import normalize_opp_id
+
+    opportunity_number = params.get("opportunity_number", "")
+    opp_id = normalize_opp_id(opportunity_number)
+
+    run_id = history.insert_command_run_started(
+        conn,
+        command_id=command_id,
+        risk_level=spec.risk_level.value,
+        external_call_risk=spec.external_call_risk.value,
+        dry_run=spec.supports_dry_run,
+        argv=argv,
+        estimated_input_tokens=spec.estimated_input_tokens,
+    )
+
+    try:
+        # Lookup project in the active DuckDB connection
+        project = conn.execute(
+            """
+            SELECT id, project_name, client, opportunity_number
+            FROM projects
+            WHERE UPPER(TRIM(opportunity_number)) = ?
+            LIMIT 1
+            """,
+            [opp_id],
+        ).fetchone()
+
+        if not project:
+            project_count = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+            stderr = f"[red]Project not found for OppID: {opp_id}[/red]\n  Total projects in index: {project_count}"
+            
+            all_opps = conn.execute(
+                "SELECT DISTINCT opportunity_number FROM projects WHERE opportunity_number != '' ORDER BY opportunity_number"
+            ).fetchall()
+            
+            if all_opps:
+                similar = [row[0] for row in all_opps if opp_id[:4] in row[0]][:5]
+                if similar:
+                    stderr += f"\n  Nearest OppID matches: {', '.join(similar)}"
+            
+            stderr += (
+                "\n\n[yellow]Suggestions:[/yellow]\n"
+                f"  1. Run: manager-os search-projects '' --opportunity-number {opp_id}\n"
+                f"  2. Run: manager-os index-projects --skip-fetch --skip-drive-enrichment --force --verbose"
+            )
+            status = "failed"
+            stdout = ""
+            error = f"Project not found for OppID: {opp_id}"
+        else:
+            project_id, project_name, client, stored_opp = project
+            limit = params.get("limit", 10)
+            timeout = params.get("timeout", 120)
+            force = params.get("force", False)
+
+            if command_id == "project_docs_fetch_print_prompt":
+                prompt = _build_drive_search_prompt(stored_opp, client, project_name)
+                stdout = f"[bold]Gemini CLI Prompt:[/bold]\n{prompt}"
+                stderr = ""
+                status = "success"
+                error = None
+            else:  # project_docs_fetch_dry_run
+                stdout = (
+                    "[bold]Project Docs Fetch — Dry Run[/bold]\n"
+                    f"  Project ID:       {project_id}\n"
+                    f"  Opportunity #:    {stored_opp}\n"
+                    f"  Project Name:     {project_name}\n"
+                    f"  Client:           {client}\n"
+                    f"  Limit:            {limit}\n"
+                    f"  Timeout:          {timeout}s\n"
+                    f"  Force:            {force}\n\n"
+                    "[dim]Would search Google Drive for documents related to this project.[/dim]"
+                )
+                stderr = ""
+                status = "success"
+                error = None
+
+    except Exception as exc:
+        status = "failed"
+        stdout = ""
+        stderr = str(exc)
+        error = str(exc)
+
+    history.update_command_run_finished(
+        conn, run_id, status=status, stdout=stdout, stderr=stderr, error=error
+    )
+    row = history.get_command_run(conn, run_id)
+    return _run_result(row, argv=argv)
+
+
 def execute_command(
     conn: Any,
     command_id: str,
@@ -656,6 +758,9 @@ def execute_command(
         )
         history.update_command_run_finished(conn, run_id, status="failed", error=str(exc))
         raise
+
+    if command_id in ("project_docs_fetch_dry_run", "project_docs_fetch_print_prompt"):
+        return _execute_project_docs_fetch_preview(conn, command_id, params, argv, spec)
 
     run_timeout = timeout if timeout is not None else spec.default_timeout_seconds
     run_id = history.insert_command_run_started(

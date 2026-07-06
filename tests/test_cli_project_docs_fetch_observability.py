@@ -151,3 +151,24 @@ def test_live_fetch_errors_are_printed_and_exit_nonzero(tmp_path):
 
     assert result.exit_code != 0
     assert "boom" in result.output
+
+
+def test_project_docs_fetch_dry_run_concurrency_lock(tmp_path):
+    db_path = str(tmp_path / "test.duckdb")
+    _seed_project(db_path)
+
+    # Hold an exclusive read-write lock on the database
+    lock_conn = get_connection(db_path)
+    
+    try:
+        # Invoke project-docs-fetch in dry-run mode
+        result = runner.invoke(
+            app,
+            ["project-docs-fetch", "--opportunity-number", "OPP0", "--dry-run"],
+            env={"MANAGER_OS_DB_PATH": db_path},
+        )
+    finally:
+        lock_conn.close()
+
+    assert result.exit_code == 0, result.output
+    assert "Dry Run" in result.output

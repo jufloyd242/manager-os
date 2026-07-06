@@ -2979,7 +2979,12 @@ def project_docs_fetch(
     )
 
     settings = get_settings()
-    conn = get_connection(settings.db_path)
+    if dry_run or print_prompt:
+        conn = _dry_run_open_ro(settings.db_path)
+        if conn is None:
+            conn = get_connection(settings.db_path)
+    else:
+        conn = get_connection(settings.db_path)
 
     if batch:
         force_clause = "" if force else "AND p.id NOT IN (SELECT DISTINCT project_id FROM project_documents)"
@@ -3009,6 +3014,7 @@ def project_docs_fetch(
             prompt = _build_batch_drive_search_prompt(projects)
             console.print("[bold]Gemini CLI Batch Prompt:[/bold]")
             console.print(prompt)
+            conn.close()
             raise typer.Exit(0)
 
         if dry_run:
@@ -3017,6 +3023,7 @@ def project_docs_fetch(
             for p in projects:
                 console.print(f"  - {p['opportunity_number']} — {p['project_name']} ({p['client']})")
             console.print("\n[dim]Would search Google Drive for documents for these projects in one batch.[/dim]")
+            conn.close()
             raise typer.Exit(0)
 
         console.print(f"[bold]Batch-fetching Drive docs for {len(projects)} project(s)[/bold]")
@@ -3088,6 +3095,7 @@ def project_docs_fetch(
         prompt = _build_drive_search_prompt(stored_opp, client, project_name)
         console.print("[bold]Gemini CLI Prompt:[/bold]")
         console.print(prompt)
+        conn.close()
         raise typer.Exit(0)
 
     if dry_run:
@@ -3100,6 +3108,7 @@ def project_docs_fetch(
         console.print(f"  Timeout:          {timeout}s")
         console.print(f"  Force:            {force}")
         console.print("\n[dim]Would search Google Drive for documents related to this project.[/dim]")
+        conn.close()
         raise typer.Exit(0)
 
     console.print(f"[bold]Fetching Drive docs for {stored_opp} — {project_name} ({client})[/bold]")

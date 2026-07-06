@@ -408,6 +408,18 @@ def _seed_successful_dry_run(conn, opportunity_number, limit=10, timeout=120):
     """Persist a qualifying successful project_docs_fetch_dry_run row for
     opportunity_number, via the real execute_command path (subprocess
     mocked), so tests can exercise the dry-run-first guardrail honestly."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    exists = conn.execute("SELECT 1 FROM projects WHERE opportunity_number = ?", [opportunity_number]).fetchone()
+    if not exists:
+        conn.execute(
+            """
+            INSERT INTO projects (id, project_name, client, opportunity_number, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [f"project::{opportunity_number}", f"Project {opportunity_number}", f"Client {opportunity_number}", opportunity_number, now, now],
+        )
+
     with patch("manager_os.command_center.runner.subprocess.run", return_value=_mock_completed()):
         result = execute_command(
             conn,
@@ -704,3 +716,37 @@ def test_execute_daily_dry_run_end_to_end_real_subprocess(tmp_path, monkeypatch)
     assert result["status"] == "success", result["stderr"]
     assert result["argv"][0] == sys.executable
     assert "DRY RUN" in (result["stdout"] or "")
+
+
+def test_execute_project_docs_fetch_dry_run_and_print_prompt_in_process(cc_conn):
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    cc_conn.execute(
+        """
+        INSERT INTO projects (id, project_name, client, opportunity_number, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ["project::OPP123", "Project OneTwoThree", "Client OneTwoThree", "OPP123", now, now],
+    )
+
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result_dry = execute_command(
+            cc_conn,
+            "project_docs_fetch_dry_run",
+            {"opportunity_number": "OPP123"},
+        )
+        result_prompt = execute_command(
+            cc_conn,
+            "project_docs_fetch_print_prompt",
+            {"opportunity_number": "OPP123"},
+        )
+
+    mock_run.assert_not_called()
+    assert result_dry["status"] == "success"
+    assert "Dry Run" in result_dry["stdout"]
+    assert "Project OneTwoThree" in result_dry["stdout"]
+
+    assert result_prompt["status"] == "success"
+    assert "Gemini CLI Prompt:" in result_prompt["stdout"]
+    assert "OPP123" in result_prompt["stdout"]
+

@@ -430,7 +430,20 @@ def test_run_live_single_succeeds_after_qualifying_dry_run(tmp_path, monkeypatch
     for an OppID, followed by project_docs_fetch_live_single/run with
     confirm=true and no dry_run_run_id, picks up that recent dry run
     automatically (history.find_recent_successful_dry_run) and executes."""
-    client, _ = _client(tmp_path, monkeypatch)
+    client, db_path = _client(tmp_path, monkeypatch)
+
+    from manager_os.db import get_connection
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    conn = get_connection(db_path)
+    conn.execute(
+        """
+        INSERT INTO projects (id, project_name, client, opportunity_number, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ["project::OPP031267", "Project OPP031267", "Client OPP031267", "OPP031267", now, now],
+    )
+    conn.close()
 
     with patch(
         "manager_os.command_center.runner.subprocess.run",
