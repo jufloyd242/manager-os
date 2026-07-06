@@ -41,7 +41,7 @@ describe('StaffingBalanceUI', () => {
     render(<DailySection title="People / Staffing" items={items} />)
 
     // Check that we render the alert badge for Priya Nair
-    const alertBadge = screen.getByText(/Overallocated/i)
+    const alertBadge = screen.getByText(/^Overallocated$/)
     expect(alertBadge).toBeInTheDocument()
 
     // Check that the Preview Rebalance button is rendered
@@ -75,13 +75,19 @@ describe('StaffingBalanceUI', () => {
     expect(screen.getAllByText(/80%/).length).toBeGreaterThan(0) // Original
     expect(screen.getAllByText(/108%/).length).toBeGreaterThan(0) // Balanced
 
-    // Check redistributions list is rendered (using flexible regex)
-    expect(screen.getByText(/Jordan Lee.*from.*Priya Nair/i)).toBeInTheDocument()
+    // Check redistributions list is rendered (using a robust text matcher for nested nodes)
+    expect(screen.getByText((_content, element) => {
+      const hasText = (node: Element | null) =>
+        node?.textContent?.includes('Jordan Lee') === true &&
+        node?.textContent?.includes('from Priya Nair') === true;
+      const childrenDontHaveText = Array.from(element?.children || []).every(child => !hasText(child as Element));
+      return hasText(element) && childrenDontHaveText;
+    })).toBeInTheDocument()
     expect(screen.getByText(/0\.28\s*FTE/i)).toBeInTheDocument() // amount
     expect(screen.getByText(/Acme Corp\s*—\s*Phase\s*2/i)).toBeInTheDocument() // project
 
     // Close the modal
-    const closeButton = screen.getByRole('button', { name: /Close/i })
+    const closeButton = screen.getAllByRole('button', { name: /Close/i })[0]
     await userEvent.click(closeButton)
 
     // Check that modal/pane is removed
