@@ -287,7 +287,8 @@ CREATE TABLE IF NOT EXISTS projects (
     industry VARCHAR,
     short_description VARCHAR,
     source_row INTEGER,
-    summary_is_generated BOOLEAN DEFAULT FALSE
+    summary_is_generated BOOLEAN DEFAULT FALSE,
+    document_status VARCHAR DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS project_documents (
@@ -339,7 +340,8 @@ CREATE TABLE IF NOT EXISTS projects (
     source_note_ids_json JSON,
     source_doc_ids_json JSON,
     created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL
+    updated_at TIMESTAMP NOT NULL,
+    document_status VARCHAR DEFAULT NULL
 );
 ALTER TABLE action_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;
 ALTER TABLE action_items ADD COLUMN IF NOT EXISTS feedback_rating VARCHAR;
@@ -420,7 +422,8 @@ CREATE TABLE IF NOT EXISTS command_runs (
     stderr                  VARCHAR,
     error                   VARCHAR,
     affected_tables_json    JSON
-)
+);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS document_status VARCHAR DEFAULT NULL;
 """
 
 _ALL_TABLES = [
