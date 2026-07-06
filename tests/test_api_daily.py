@@ -617,3 +617,46 @@ def test_daily_route_never_executes_subprocess(tmp_path, monkeypatch):
 
     assert resp.status_code == 200, resp.text
     mock_subprocess_run.assert_not_called()
+
+
+def test_daily_gaps_filters_legacy_empty(tmp_path, monkeypatch):
+    """The /api/daily endpoint must exclude any projects with document_status='LEGACY_EMPTY' from document gaps."""
+    from manager_os.api.app import create_app
+    from manager_os.db import get_connection
+    
+    db_path = str(tmp_path / "legacy_empty_test.duckdb")
+    monkeypatch.setenv("MANAGER_OS_DB_PATH", db_path)
+    conn = get_connection(db_path)
+    _seed_baseline_note(conn)
+    
+    now = datetime.now(timezone.utc)
+    # 1. Normal project with 0 docs (should be a gap)
+    conn.execute(
+        """
+        INSERT INTO projects (id, project_name, client, opportunity_number, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ["project::OPP_GAP_1", "Gap Project 1", "Gap Client 1", "OPP_GAP_1", now, now],
+    )
+    # 2. Legacy Empty project (should NOT be a gap)
+    conn.execute(
+        """
+        INSERT INTO projects (id, project_name, client, opportunity_number, created_at, updated_at, document_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ["project::OPP_LEGACY_1", "Legacy Empty Project", "Legacy Client", "OPP_LEGACY_1", now, now, "LEGACY_EMPTY"],
+    )
+    conn.close()
+
+    client = TestClient(create_app())
+    resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+    assert resp.status_code == 200
+    body = resp.json()
+    
+    gaps = body["document_gaps"]
+    opps = {g["opportunity_number"] for g in gaps}
+    
+    # OPP_GAP_1 should be in the gaps, but OPP_LEGACY_1 should be filtered out
+    assert "OPP_GAP_1" in opps
+    assert "OPP_LEGACY_1" not in opps
+

@@ -553,10 +553,31 @@ def _execute_live_single(
 
         # Convert the returned dictionary statistics into standard CLI log response structures
         if stats.get("status") == "error":
-            status = "failed"
-            error = "; ".join(stats.get("errors", ["Unknown error"]))
-            stdout = ""
-            stderr = error
+            error_msg = "; ".join(stats.get("errors", ["Unknown error"]))
+            err_lower = error_msg.lower()
+            if "no documents found" in err_lower or "no legacy documents" in err_lower:
+                status = "success"
+                error = None
+                stdout = "Verified Empty: No legacy documents exist on Drive."
+                stderr = ""
+                conn.execute(
+                    "UPDATE projects SET document_status = 'LEGACY_EMPTY' WHERE opportunity_number = ?",
+                    [normalized_opp]
+                )
+            else:
+                status = "failed"
+                error = error_msg
+                stdout = ""
+                stderr = error_msg
+        elif stats.get("status") == "empty" or stats.get("raw_count") == 0 or stats.get("parsed_count") == 0:
+            status = "success"
+            error = None
+            stdout = "Verified Empty: No legacy documents exist on Drive."
+            stderr = ""
+            conn.execute(
+                "UPDATE projects SET document_status = 'LEGACY_EMPTY' WHERE opportunity_number = ?",
+                [normalized_opp]
+            )
         else:
             status = "success"
             error = None
@@ -564,10 +585,21 @@ def _execute_live_single(
             stderr = ""
 
     except Exception as exc:
-        status = "failed"
-        error = str(exc)
-        stdout = ""
-        stderr = error
+        exc_str = str(exc)
+        if "no legacy documents exist" in exc_str.lower() or "no documents found" in exc_str.lower():
+            status = "success"
+            error = None
+            stdout = "Verified Empty: No legacy documents exist on Drive."
+            stderr = ""
+            conn.execute(
+                "UPDATE projects SET document_status = 'LEGACY_EMPTY' WHERE opportunity_number = ?",
+                [normalized_opp]
+            )
+        else:
+            status = "failed"
+            error = exc_str
+            stdout = ""
+            stderr = error
 
     history.update_command_run_finished(
         conn, run_id, status=status, stdout=stdout, stderr=stderr, error=error

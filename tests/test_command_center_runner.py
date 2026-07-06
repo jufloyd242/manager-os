@@ -750,3 +750,121 @@ def test_execute_project_docs_fetch_dry_run_and_print_prompt_in_process(cc_conn)
     assert "Gemini CLI Prompt:" in result_prompt["stdout"]
     assert "OPP123" in result_prompt["stdout"]
 
+
+def test_execute_live_single_legacy_empty_project(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP_LEGACY_1")
+    with patch(
+        "manager_os.command_center.runner.search_drive_for_project_docs"
+    ) as mock_search:
+        mock_search.return_value = {
+            "status": "empty",
+            "raw_count": 0,
+            "parsed_count": 0,
+            "inserted": 0,
+            "updated": 0,
+            "skipped": 0,
+            "errors": []
+        }
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP_LEGACY_1"}, confirm=True
+        )
+
+    assert result["status"] == "success"
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row["status"] == "success"
+    assert row["stdout"] == "Verified Empty: No legacy documents exist on Drive."
+    assert not row["stderr"]
+    assert not row["error"]
+    
+    # Check database update
+    project = cc_conn.execute(
+        "SELECT document_status FROM projects WHERE opportunity_number = 'OPP_LEGACY_1'"
+    ).fetchone()
+    assert project is not None
+    assert project[0] == "LEGACY_EMPTY"
+
+
+def test_execute_live_single_legacy_empty_exception_success(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP_LEGACY_2")
+    with patch(
+        "manager_os.command_center.runner.search_drive_for_project_docs",
+        side_effect=RuntimeError("no legacy documents exist on Drive")
+    ):
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP_LEGACY_2"}, confirm=True
+        )
+
+    assert result["status"] == "success"
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row["status"] == "success"
+    assert row["stdout"] == "Verified Empty: No legacy documents exist on Drive."
+    assert not row["stderr"]
+    assert not row["error"]
+    
+    # Check database update
+    project = cc_conn.execute(
+        "SELECT document_status FROM projects WHERE opportunity_number = 'OPP_LEGACY_2'"
+    ).fetchone()
+    assert project is not None
+    assert project[0] == "LEGACY_EMPTY"
+
+
+def test_execute_live_single_legacy_empty_error_status_case_insensitive(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP_LEGACY_3")
+    with patch(
+        "manager_os.command_center.runner.search_drive_for_project_docs"
+    ) as mock_search:
+        mock_search.return_value = {
+            "status": "error",
+            "errors": ["No documents found for OPP_LEGACY_3"],
+            "raw_count": 0,
+            "parsed_count": 0,
+            "inserted": 0,
+            "updated": 0,
+            "skipped": 0,
+        }
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP_LEGACY_3"}, confirm=True
+        )
+
+    assert result["status"] == "success"
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row["status"] == "success"
+    assert row["stdout"] == "Verified Empty: No legacy documents exist on Drive."
+    assert not row["stderr"]
+    assert not row["error"]
+    
+    # Check database update
+    project = cc_conn.execute(
+        "SELECT document_status FROM projects WHERE opportunity_number = 'OPP_LEGACY_3'"
+    ).fetchone()
+    assert project is not None
+    assert project[0] == "LEGACY_EMPTY"
+
+
+def test_execute_live_single_legacy_empty_exception_case_insensitive(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP_LEGACY_4")
+    with patch(
+        "manager_os.command_center.runner.search_drive_for_project_docs",
+        side_effect=RuntimeError("No Legacy Documents Exist on Drive")
+    ):
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP_LEGACY_4"}, confirm=True
+        )
+
+    assert result["status"] == "success"
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row["status"] == "success"
+    assert row["stdout"] == "Verified Empty: No legacy documents exist on Drive."
+    assert not row["stderr"]
+    assert not row["error"]
+    
+    # Check database update
+    project = cc_conn.execute(
+        "SELECT document_status FROM projects WHERE opportunity_number = 'OPP_LEGACY_4'"
+    ).fetchone()
+    assert project is not None
+    assert project[0] == "LEGACY_EMPTY"
+
+
+

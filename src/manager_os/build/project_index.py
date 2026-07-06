@@ -211,6 +211,10 @@ def search_projects(
         conditions.append("UPPER(TRIM(opportunity_number)) = ?")
         params.append(normalize_opp_id(opportunity_number))
     
+    # Filter out legacy empty projects unless status is explicitly queried
+    if not status:
+        conditions.append("(document_status IS NULL OR document_status != 'LEGACY_EMPTY')")
+    
     # Document type filter requires join with project_documents
     needs_doc_join = bool(document_type)
     

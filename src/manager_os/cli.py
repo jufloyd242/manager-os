@@ -2993,7 +2993,8 @@ def project_docs_fetch(
             SELECT p.id, p.project_name, p.client, p.opportunity_number
             FROM projects p
             WHERE p.opportunity_number != ''
-            {force_clause}
+              AND (p.document_status IS NULL OR p.document_status != 'LEGACY_EMPTY')
+              {force_clause}
             ORDER BY p.opportunity_number
             LIMIT ?
             """,

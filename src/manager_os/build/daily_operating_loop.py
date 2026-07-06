@@ -94,6 +94,7 @@ def _document_gaps(conn, warnings: list[str]) -> list[dict]:
             FROM projects p
             LEFT JOIN project_documents d ON d.project_id = p.id
             WHERE p.opportunity_number != ''
+              AND (p.document_status IS NULL OR p.document_status != 'LEGACY_EMPTY')
             GROUP BY p.opportunity_number, p.project_name, p.client
             HAVING COUNT(d.id) = 0
             ORDER BY p.opportunity_number
