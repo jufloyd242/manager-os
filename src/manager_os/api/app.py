@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import duckdb
 
+from manager_os.analytics.balance_capacity import balance_staffing_capacity
 from manager_os.api import services
 from manager_os.api.deps import get_db_connection, get_fresh_settings
 from manager_os.api.models import (
@@ -27,6 +28,7 @@ from manager_os.api.models import (
     StatusResponse,
 )
 from manager_os.build.daily_operating_loop import build_daily_operating_loop
+from manager_os.build.dashboard_data import get_people_rows
 from manager_os.command_center.errors import (
     CommandNotFoundError,
     InvalidArgumentError,
@@ -85,6 +87,21 @@ def create_app() -> FastAPI:
         settings: Settings = Depends(get_fresh_settings),
     ) -> PeopleResponse:
         return PeopleResponse(**services.build_people(conn, settings))
+
+    @app.get("/api/analytics/staffing-balance")
+    def staffing_balance(
+        conn: duckdb.DuckDBPyConnection = Depends(get_db_connection),
+        settings: Settings = Depends(get_fresh_settings),
+    ) -> dict:
+        rows = get_people_rows(conn, settings=settings)
+        allocations = {r.name: r.allocation_pct for r in rows}
+        return balance_staffing_capacity(
+            allocations,
+            standard_capacity=100.0,
+            overallocated_threshold=100.0,
+            underallocated_threshold=80.0,
+            max_receiver_capacity=80.0,
+        )
 
     @app.get("/api/meetings", response_model=MeetingsResponse)
     def meetings(
