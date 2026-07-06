@@ -1355,7 +1355,8 @@ If you cannot access the sheet, return:
                     
                 output_text = proc.stdout.strip()
                 extracted_json = _extract_json_payload(output_text)
-                result_data = json.loads(extracted_json)
+                from manager_os.utils import clean_and_parse_json
+                result_data = clean_and_parse_json(extracted_json)
                 
                 if not result_data.get("ok"):
                     raise RuntimeError(f"Gemini CLI reported failure: {result_data.get('error', 'Unknown error')}")
@@ -2046,7 +2047,8 @@ If you cannot access the sheet, return:
             
         output_text = proc.stdout.strip()
         extracted_json = _extract_json_payload(output_text)
-        result_data = json.loads(extracted_json)
+        from manager_os.utils import clean_and_parse_json
+        result_data = clean_and_parse_json(extracted_json)
         
         if not result_data.get("ok"):
             raise RuntimeError(f"Gemini CLI reported failure: {result_data.get('error', 'Unknown error')}")
@@ -2617,7 +2619,8 @@ If you cannot access the sheet, return:
             
         output_text = proc.stdout.strip()
         extracted_json = _extract_json_payload(output_text)
-        result_data = json.loads(extracted_json)
+        from manager_os.utils import clean_and_parse_json
+        result_data = clean_and_parse_json(extracted_json)
         
         if not result_data.get("ok"):
             raise RuntimeError(f"Gemini CLI reported failure: {result_data.get('error', 'Unknown error')}")
