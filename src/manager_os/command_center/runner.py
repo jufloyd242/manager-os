@@ -36,6 +36,7 @@ from manager_os.command_center.errors import (
 )
 from manager_os.command_center.models import CommandSpec, RiskLevel
 from manager_os.utils import normalize_opp_id
+from manager_os.ingest.project_drive_docs import search_drive_for_project_docs
 
 
 @dataclass(frozen=True)
@@ -341,7 +342,7 @@ _EXECUTABLE_COMMAND_IDS: frozenset[str] = frozenset(
 # shared _PROJECT_DOCS_SINGLE_PARAMS registry defaults, which are also used
 # by the always-safe dry_run/print_prompt variants of this command).
 _LIVE_SINGLE_ALLOWED_PARAMS: frozenset[str] = frozenset(
-    {"opportunity_number", "client", "project_name", "limit", "timeout", "dry_run_run_id"}
+    {"opportunity_number", "client", "project_name", "limit", "timeout", "dry_run_run_id", "force"}
 )
 _LIVE_SINGLE_DEFAULT_LIMIT = 3
 _LIVE_SINGLE_MAX_LIMIT = 5
@@ -538,32 +539,38 @@ def _execute_live_single(
         estimated_input_tokens=estimated_input_tokens,
     )
 
-    run_timeout = timeout if timeout is not None else spec.default_timeout_seconds
-
     try:
-        proc = subprocess.run(
-            argv, shell=False, capture_output=True, text=True, timeout=run_timeout
+        # Run the drive search engine natively, passing the active database handle
+        stats = search_drive_for_project_docs(
+            opportunity_number=normalized_opp,
+            client=params.get("client", ""),
+            project_name=params.get("project_name", ""),
+            conn=conn,
+            force=params.get("force", False),
+            limit=limit,
+            timeout=run_timeout_flag
         )
-    except subprocess.TimeoutExpired as exc:
-        history.update_command_run_finished(
-            conn,
-            run_id,
-            status="timeout",
-            stdout=_decode(exc.stdout),
-            stderr=_decode(exc.stderr),
-            error=f"Command {spec.command_id!r} timed out after {run_timeout}s.",
-        )
-        row = history.get_command_run(conn, run_id)
-        return _run_result(row, argv=argv)
-    except OSError as exc:
-        history.update_command_run_finished(conn, run_id, status="failed", error=str(exc))
-        row = history.get_command_run(conn, run_id)
-        return _run_result(row, argv=argv)
 
-    status = "success" if proc.returncode == 0 else "failed"
-    error = None if status == "success" else f"Command exited with code {proc.returncode}."
+        # Convert the returned dictionary statistics into standard CLI log response structures
+        if stats.get("status") == "error":
+            status = "failed"
+            error = "; ".join(stats.get("errors", ["Unknown error"]))
+            stdout = ""
+            stderr = error
+        else:
+            status = "success"
+            error = None
+            stdout = f"Fetch Diagnostics:\n  Raw: {stats.get('raw_count')}\n  Parsed: {stats.get('parsed_count')}\n  Inserted: {stats.get('inserted')}\n  Updated: {stats.get('updated')}\n  Skipped: {stats.get('skipped')}"
+            stderr = ""
+
+    except Exception as exc:
+        status = "failed"
+        error = str(exc)
+        stdout = ""
+        stderr = error
+
     history.update_command_run_finished(
-        conn, run_id, status=status, stdout=proc.stdout, stderr=proc.stderr, error=error
+        conn, run_id, status=status, stdout=stdout, stderr=stderr, error=error
     )
     row = history.get_command_run(conn, run_id)
     return _run_result(row, argv=argv)
