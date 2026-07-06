@@ -107,10 +107,11 @@ def test_upsert_project_documents_insert():
         ),
     ]
     
-    inserted, updated = upsert_project_documents(conn, docs, force=False)
+    inserted, updated, skipped = upsert_project_documents(conn, docs, force=False)
     
     assert inserted == 2
     assert updated == 0
+    assert skipped == 0
     
     # Verify documents in database
     rows = conn.execute(
@@ -148,11 +149,12 @@ def test_upsert_project_documents_update():
         why_matched="matched exact OPP number",
     )
     
-    inserted, updated = upsert_project_documents(conn, [doc1], force=False)
+    inserted, updated, skipped = upsert_project_documents(conn, [doc1], force=False)
     assert inserted == 1
     assert updated == 0
+    assert skipped == 0
     
-    # Update same document
+    # Update same document with force=False (should skip)
     doc2 = ProjectDocument(
         project_id="project::OPP032106",
         opportunity_number="OPP032106",
@@ -168,9 +170,22 @@ def test_upsert_project_documents_update():
         why_matched="matched exact OPP number",
     )
     
-    inserted, updated = upsert_project_documents(conn, [doc2], force=False)
+    inserted, updated, skipped = upsert_project_documents(conn, [doc2], force=False)
+    assert inserted == 0
+    assert updated == 0
+    assert skipped == 1
+    
+    # Verify not updated in db since force=False
+    row = conn.execute(
+        "SELECT title, confidence FROM project_documents WHERE document_type = 'sow'"
+    ).fetchone()
+    assert row[0] == "Project SOW v1"
+    
+    # Update same document with force=True (should update)
+    inserted, updated, skipped = upsert_project_documents(conn, [doc2], force=True)
     assert inserted == 0
     assert updated == 1
+    assert skipped == 0
     
     # Verify updated document
     row = conn.execute(
@@ -201,10 +216,12 @@ def test_upsert_project_documents_force():
         why_matched="matched exact OPP number",
     )
     
-    inserted, updated = upsert_project_documents(conn, [doc1], force=False)
+    inserted, updated, skipped = upsert_project_documents(conn, [doc1], force=False)
     assert inserted == 1
+    assert updated == 0
+    assert skipped == 0
     
-    # Force overwrite
+    # Force overwrite (existing is True and force is True -> updated is 1)
     doc2 = ProjectDocument(
         project_id="project::OPP032106",
         opportunity_number="OPP032106",
@@ -220,9 +237,10 @@ def test_upsert_project_documents_force():
         why_matched="matched exact OPP number",
     )
     
-    inserted, updated = upsert_project_documents(conn, [doc2], force=True)
-    assert inserted == 1
-    assert updated == 0
+    inserted, updated, skipped = upsert_project_documents(conn, [doc2], force=True)
+    assert inserted == 0
+    assert updated == 1
+    assert skipped == 0
     
     # Verify overwritten document
     row = conn.execute(
@@ -260,7 +278,8 @@ def test_project_document_metadata_json():
         metadata_json=metadata,
     )
     
-    upsert_project_documents(conn, [doc], force=False)
+    inserted, updated, skipped = upsert_project_documents(conn, [doc], force=False)
+    assert inserted == 1
     
     # Retrieve and verify metadata
     row = conn.execute(

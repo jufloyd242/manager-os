@@ -86,15 +86,45 @@ def _print_skip_info(
     else:
         safe = _all_skips_safe(source_results)
         if safe:
-            console.print(
-                f"[dim]  {total_skipped} record(s) skipped — already exist "
-                f"(idempotent re-run). Pass --verbose for details.[/dim]"
-            )
+            has_duplicate_skips = False
+            for _, result in source_results:
+                reasons = getattr(result, "skip_reasons", {})
+                if any(r in {"already_exists", "duplicate_content_hash", "signal_already_exists", "action_item_already_exists", "decision_already_exists"} for r in reasons):
+                    has_duplicate_skips = True
+                    break
+            if has_duplicate_skips:
+                console.print(
+                    f"[dim]  {total_skipped} record(s) skipped — already exist "
+                    f"(idempotent re-run). Pass --verbose for details.[/dim]"
+                )
         else:
             console.print(
                 f"[yellow]  {total_skipped} record(s) skipped — some may need "
                 f"attention. Pass --verbose for details.[/yellow]"
             )
+
+
+def _extract_json_payload(text: str) -> str:
+    """Extract the valid JSON string from potentially noisy LLM stdout."""
+    import re
+    text = text.strip()
+    
+    # Strategy 1: Find content inside the last markdown json code block
+    blocks = re.findall(r"```json\s*([\s\S]*?)\s*```", text)
+    if blocks:
+        return blocks[-1].strip()
+        
+    # Strategy 2: Find content inside any markdown code blocks
+    general_blocks = re.findall(r"```\s*([\s\S]*?)\s*```", text)
+    if general_blocks:
+        return general_blocks[-1].strip()
+        
+    # Strategy 3: Grab the outermost braced object block
+    brace_match = re.search(r"({[\s\S]*})", text)
+    if brace_match:
+        return brace_match.group(1).strip()
+        
+    return text
 
 
 @app.callback(invoke_without_command=True)
@@ -1324,12 +1354,8 @@ If you cannot access the sheet, return:
                     raise RuntimeError(f"Gemini CLI failed: {proc.stderr}")
                     
                 output_text = proc.stdout.strip()
-                if output_text.startswith("```json"):
-                    output_text = output_text[7:]
-                if output_text.endswith("```"):
-                    output_text = output_text[:-3]
-                    
-                result_data = json.loads(output_text)
+                extracted_json = _extract_json_payload(output_text)
+                result_data = json.loads(extracted_json)
                 
                 if not result_data.get("ok"):
                     raise RuntimeError(f"Gemini CLI reported failure: {result_data.get('error', 'Unknown error')}")
@@ -1338,13 +1364,15 @@ If you cannot access the sheet, return:
                 if not rows:
                     raise RuntimeError("Gemini CLI returned no rows.")
                     
+                # Write to CSV using StringIO to avoid write-then-read bug
+                from io import StringIO
+                buffer = StringIO()
+                writer = csv.writer(buffer)
+                writer.writerows(rows)
+                csv_content = buffer.getvalue()
+                
                 Path(local_csv).parent.mkdir(parents=True, exist_ok=True)
-                csv_content = ""
-                with open(local_csv, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerows(rows)
-                    f.seek(0)
-                    csv_content = f.read()
+                Path(local_csv).write_text(csv_content, encoding="utf-8")
                     
                 content_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
                 retrieved_at = result_data.get("retrieved_at", datetime.utcnow().isoformat())
@@ -2017,12 +2045,8 @@ If you cannot access the sheet, return:
             raise RuntimeError(f"Gemini CLI failed: {proc.stderr}")
             
         output_text = proc.stdout.strip()
-        if output_text.startswith("```json"):
-            output_text = output_text[7:]
-        if output_text.endswith("```"):
-            output_text = output_text[:-3]
-            
-        result_data = json.loads(output_text)
+        extracted_json = _extract_json_payload(output_text)
+        result_data = json.loads(extracted_json)
         
         if not result_data.get("ok"):
             raise RuntimeError(f"Gemini CLI reported failure: {result_data.get('error', 'Unknown error')}")
@@ -2031,15 +2055,15 @@ If you cannot access the sheet, return:
         if not rows:
             raise RuntimeError("Gemini CLI returned no rows.")
             
-        # Write to CSV
+        # Write to CSV using StringIO to avoid write-then-read bug
+        from io import StringIO
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerows(rows)
+        csv_content = buffer.getvalue()
+        
         Path(local_csv).parent.mkdir(parents=True, exist_ok=True)
-        csv_content = ""
-        with open(local_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerows(rows)
-            # Re-read to get exact content for hash
-            f.seek(0)
-            csv_content = f.read()
+        Path(local_csv).write_text(csv_content, encoding="utf-8")
             
         content_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
         retrieved_at = result_data.get("retrieved_at", datetime.utcnow().isoformat())
@@ -2592,12 +2616,8 @@ If you cannot access the sheet, return:
             raise RuntimeError(f"Gemini CLI failed: {proc.stderr}")
             
         output_text = proc.stdout.strip()
-        if output_text.startswith("```json"):
-            output_text = output_text[7:]
-        if output_text.endswith("```"):
-            output_text = output_text[:-3]
-            
-        result_data = json.loads(output_text)
+        extracted_json = _extract_json_payload(output_text)
+        result_data = json.loads(extracted_json)
         
         if not result_data.get("ok"):
             raise RuntimeError(f"Gemini CLI reported failure: {result_data.get('error', 'Unknown error')}")
@@ -2693,38 +2713,24 @@ def index_projects(
         console.print("[red]No local CSV path configured (MANAGER_OS_PROJECT_INDEX_LOCAL_CSV).[/red]")
         raise typer.Exit(1)
 
+    expected_sheet_id = getattr(settings, "project_index_sheet_id", "")
+    expected_gid = getattr(settings, "project_index_sheet_gid", "")
+
     if not skip_fetch:
         console.print("[bold]Step 1: Fetching project sheet...[/bold]")
-        # Call project-index-fetch logic inline
-        # For now, we'll just check if the file exists and is fresh
-        meta_path = f"{local_csv}.meta.json"
-        if not Path(meta_path).exists():
-            console.print("[red]Project index metadata not found. Run 'manager-os project-index-fetch' first.[/red]")
-            raise typer.Exit(1)
-        
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        
-        # Verify freshness
+        from manager_os.ingest.project_sheet import validate_metadata
         stale_hours = getattr(settings, "project_index_stale_after_hours", 24)
-        retrieved_at_str = meta.get("retrieved_at", "")
-        if retrieved_at_str:
-            retrieved_at_str = retrieved_at_str.replace("Z", "+00:00")
-            try:
-                retrieved_at = datetime.fromisoformat(retrieved_at_str)
-                if retrieved_at.tzinfo is None:
-                    retrieved_at = retrieved_at.replace(tzinfo=datetime.now().astimezone().tzinfo)
-                
-                now = datetime.now(retrieved_at.tzinfo)
-                if (now - retrieved_at) > timedelta(hours=stale_hours):
-                    console.print(f"[red]Project index is stale (retrieved {retrieved_at.isoformat()}, stale after {stale_hours}h).[/red]")
-                    console.print("[red]Run 'manager-os project-index-fetch --force' to refresh.[/red]")
-                    raise typer.Exit(1)
-            except ValueError:
-                console.print(f"[red]Invalid retrieved_at format in metadata: {retrieved_at_str}[/red]")
-                raise typer.Exit(1)
+        metadata_info = validate_metadata(local_csv, expected_sheet_id, expected_gid, stale_hours)
+        if not metadata_info.valid:
+            console.print(f"[red]✗ {metadata_info.error}[/red]")
+            raise typer.Exit(1)
     else:
         console.print("[bold]Step 1: Skipping fetch (--skip-fetch)[/bold]")
+        from manager_os.ingest.project_sheet import validate_metadata
+        metadata_info = validate_metadata(local_csv, expected_sheet_id, expected_gid, stale_hours=999999)
+        if not metadata_info.valid:
+            console.print(f"[red]✗ {metadata_info.error}[/red]")
+            raise typer.Exit(1)
 
     # Step 2: Parse and upsert projects
     console.print("[bold]Step 2: Parsing project sheet...[/bold]")

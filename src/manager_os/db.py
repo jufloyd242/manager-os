@@ -446,6 +446,9 @@ _ALL_TABLES = [
     "feedback_events",
     "feedback_learning_candidates",
     "command_runs",
+    "projects",
+    "project_documents",
+    "project_notes_context",
 ]
 
 

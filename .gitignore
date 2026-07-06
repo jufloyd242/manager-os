@@ -37,6 +37,12 @@ fetch_forecast.py
 calendar_list_params.json
 gmail_search_params.json
 drive_search_params.json
+aggregate_tokens.py
+extract_prompts.py
+extract_prompts_v2.sh
+extracted_prompts.txt
+gemini_interactions_2026-06-18.txt
+process_chats.py
 
 # ── Generated JSON output artifacts ───────────────────────────────────────
 output_signals.json

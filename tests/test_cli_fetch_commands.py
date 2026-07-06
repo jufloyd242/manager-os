@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from typer.testing import CliRunner
@@ -93,7 +94,7 @@ def test_project_index_metadata_validator_accepts_generated_metadata(tmp_path):
         "source": "google_sheet_project_index",
         "sheet_id": "test_sheet_id",
         "gid": "123",
-        "retrieved_at": "2026-06-18T10:00:00Z",
+        "retrieved_at": datetime.utcnow().isoformat() + "Z",
         "local_csv_path": str(local_csv),
         "row_count": 2,
         "content_hash": content_hash
@@ -127,7 +128,7 @@ def test_index_projects_skip_fetch_succeeds_after_fetch(tmp_path):
         "source": "google_sheet_project_index",
         "sheet_id": "test_sheet_id",
         "gid": "123",
-        "retrieved_at": "2026-06-18T10:00:00Z",
+        "retrieved_at": datetime.utcnow().isoformat() + "Z",
         "local_csv_path": str(local_csv),
         "row_count": 2,
         "content_hash": content_hash
@@ -137,12 +138,17 @@ def test_index_projects_skip_fetch_succeeds_after_fetch(tmp_path):
         json.dump(metadata, f)
     
     # Run index-projects with --skip-fetch
+    env = {
+        "MANAGER_OS_PROJECT_INDEX_LOCAL_CSV": str(local_csv),
+        "MANAGER_OS_PROJECT_INDEX_SHEET_ID": "test_sheet_id",
+        "MANAGER_OS_PROJECT_INDEX_SHEET_GID": "123",
+    }
     result = runner.invoke(app, [
         "index-projects",
         "--skip-fetch",
         "--force",
         "--verbose"
-    ])
+    ], env=env)
     
     # Should succeed
     assert result.exit_code == 0, f"Command failed: {result.output}"
@@ -194,10 +200,10 @@ def test_forecast_fetch_writes_csv_and_metadata(tmp_path):
         assert meta_path.exists()
         
         # Metadata should have correct hash
-        with open(local_csv, "r", encoding="utf-8") as f:
-            csv_content = f.read()
+        with open(local_csv, "rb") as f:
+            csv_bytes = f.read()
         
-        expected_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
+        expected_hash = hashlib.sha256(csv_bytes).hexdigest()
         
         with open(meta_path, "r", encoding="utf-8") as f:
             metadata = json.load(f)
@@ -221,7 +227,7 @@ def test_no_local_csv_fallback_introduced(tmp_path):
         "source": "google_sheet_project_index",
         "sheet_id": "test_sheet_id",
         "gid": "123",
-        "retrieved_at": "2026-06-18T10:00:00Z",
+        "retrieved_at": datetime.utcnow().isoformat() + "Z",
         "local_csv_path": str(local_csv),
         "row_count": 2,
         "content_hash": "wrong_hash_that_doesnt_match"
@@ -232,11 +238,16 @@ def test_no_local_csv_fallback_introduced(tmp_path):
     
     # Run index-projects with --skip-fetch
     # Should fail because metadata hash doesn't match
+    env = {
+        "MANAGER_OS_PROJECT_INDEX_LOCAL_CSV": str(local_csv),
+        "MANAGER_OS_PROJECT_INDEX_SHEET_ID": "test_sheet_id",
+        "MANAGER_OS_PROJECT_INDEX_SHEET_GID": "123",
+    }
     result = runner.invoke(app, [
         "index-projects",
         "--skip-fetch",
         "--force"
-    ])
+    ], env=env)
     
     # Should fail with metadata mismatch error, not silently use old CSV
     assert result.exit_code != 0

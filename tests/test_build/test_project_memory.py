@@ -199,9 +199,10 @@ def test_upsert_project_documents_no_replace(conn):
     )
     
     # Insert first time
-    inserted, updated = upsert_project_documents(conn, [doc], force=False)
+    inserted, updated, skipped = upsert_project_documents(conn, [doc], force=False)
     assert inserted == 1
     assert updated == 0
+    assert skipped == 0
     
     # Get the document ID
     doc_id = conn.execute(
@@ -212,9 +213,10 @@ def test_upsert_project_documents_no_replace(conn):
     # Update the document
     doc.title = "Updated SOW Document"
     doc.confidence = 0.95
-    inserted, updated = upsert_project_documents(conn, [doc], force=True)
+    inserted, updated, skipped = upsert_project_documents(conn, [doc], force=True)
     assert inserted == 0
     assert updated == 1
+    assert skipped == 0
     
     # Check that the document was updated (not replaced)
     result = conn.execute(
