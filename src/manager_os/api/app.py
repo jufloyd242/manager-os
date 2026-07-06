@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 import duckdb
 
 from manager_os.api import services
@@ -48,6 +49,14 @@ def _parse_date(value: str | None, param_name: str = "date") -> date:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="manager-os-api", description="Local read-only Manager OS API")
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/api/health", response_model=HealthResponse)
     def health() -> HealthResponse:

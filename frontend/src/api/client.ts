@@ -9,7 +9,7 @@
 // never fail silently and never pretend mock data is live data.
 //
 // Base URL comes from the Vite env var VITE_MANAGER_OS_API_BASE_URL, falling
-// back to http://localhost:8000 for local dev against a real backend.
+// back to http://127.0.0.1:8000 for local dev against a real backend.
 
 import {
   mockSystemStatus,
@@ -230,7 +230,7 @@ export interface ApiResult<T> {
 }
 
 const API_BASE_URL: string =
-  (import.meta.env.VITE_MANAGER_OS_API_BASE_URL as string | undefined) || 'http://localhost:8000'
+  (import.meta.env.VITE_MANAGER_OS_API_BASE_URL as string | undefined) || 'http://127.0.0.1:8000'
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, init)
