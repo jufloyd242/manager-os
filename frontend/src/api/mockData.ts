@@ -248,6 +248,13 @@ export const mockDailyOperatingLoop: DailyOperatingLoop = {
     OVERALLOCATION_ACTION,
     GLOBEX_FOLLOWUP_ACTION,
   ],
+  unfiltered_recommended_actions: [
+    SOW_REVIEW_ACTION,
+    INITECH_DOC_GAP_ACTION,
+    SCHEDULE_1_1_ACTION,
+    OVERALLOCATION_ACTION,
+    GLOBEX_FOLLOWUP_ACTION,
+  ],
   action_summary: mockActionSummary,
   action_groups: mockActionGroups,
   warnings: [],

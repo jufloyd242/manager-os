@@ -63,3 +63,40 @@ def test_status_missing_db_file_does_not_crash(tmp_path, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert isinstance(body["warnings"], list)
+
+
+def test_status_detailed_freshness_stale_and_unknown(tmp_path, monkeypatch):
+    client, db_path = _client(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    
+    from datetime import datetime, timedelta
+    old_time = datetime.now() - timedelta(days=2)
+    conn.execute(
+        "INSERT INTO people (id, name, updated_at) VALUES ('p1', 'Alice', ?)",
+        [old_time]
+    )
+    conn.close()
+
+    resp = client.get("/api/status")
+    body = resp.json()
+    people_source = next(s for s in body["sources"] if s["name"] == "people")
+    assert people_source["count"] == 1
+    assert people_source["freshness"] == "stale"
+    assert "stale" in people_source["explanation"].lower()
+
+
+def test_status_detailed_freshness_fresh(tmp_path, monkeypatch):
+    client, db_path = _client(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    
+    conn.execute(
+        "INSERT INTO people (id, name, updated_at) VALUES ('p1', 'Alice', now())"
+    )
+    conn.close()
+
+    resp = client.get("/api/status")
+    body = resp.json()
+    people_source = next(s for s in body["sources"] if s["name"] == "people")
+    assert people_source["count"] == 1
+    assert people_source["freshness"] == "fresh"
+    assert "updated" in people_source["explanation"].lower()

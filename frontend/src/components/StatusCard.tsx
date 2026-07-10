@@ -4,12 +4,14 @@ const FRESHNESS_STYLES: Record<StatusCardData['freshness'], string> = {
   fresh: 'text-emerald-600',
   stale: 'text-amber-600',
   missing: 'text-red-600',
+  unknown: 'text-slate-500',
 }
 
 const FRESHNESS_LABELS: Record<StatusCardData['freshness'], string> = {
   fresh: 'Fresh',
   stale: 'Stale',
   missing: 'Missing',
+  unknown: 'Unknown',
 }
 
 export function StatusCard({ data }: { data: StatusCardData }) {

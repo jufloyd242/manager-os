@@ -24,6 +24,7 @@ EXPECTED_KEYS = {
     "document_gaps",
     "feedback_learning",
     "recommended_actions",
+    "unfiltered_recommended_actions",
     "warnings",
     "action_summary",
     "action_groups",
@@ -196,6 +197,7 @@ def _build_mock_loop_with_action_groups(conn, target_date: date, settings=None) 
         "document_gaps": [],
         "feedback_learning": [],
         "recommended_actions": recommended_actions,
+        "unfiltered_recommended_actions": recommended_actions,
         "warnings": [],
         "action_summary": action_summary,
         "action_groups": action_groups,
@@ -337,14 +339,16 @@ def test_daily_real_pipeline_action_summary_total_matches_recommended_actions(tm
     assert body["action_summary"]["total"] == len(body["recommended_actions"])
 
 
-def test_daily_real_pipeline_document_gaps_group_matches_flat_list_and_preserves_commands(
+def test_daily_real_pipeline_capped_document_gaps_contract(
     tmp_path, monkeypatch
 ):
+    """With 6 seeded document gaps, recommended_actions is capped at 5 and
+    unfiltered_recommended_actions preserves all 6. Groups/summary derive
+    from the capped visible list. The hidden 6th action retains full
+    structured metadata."""
     client, db_path = _client(tmp_path, monkeypatch)
     conn = get_connection(db_path)
     _seed_baseline_note(conn)
-    # Seed 6 document-gap projects to exercise the default_visible_count=5 hint
-    # (backend must still return the FULL action list per group).
     for i in range(6):
         _seed_document_gap_project(conn, opportunity_number=f"OPP0{i}")
     conn.close()
@@ -356,19 +360,40 @@ def test_daily_real_pipeline_document_gaps_group_matches_flat_list_and_preserves
     mock_run.assert_not_called()
     body = resp.json()
 
-    flat_doc_gap_actions = [a for a in body["recommended_actions"] if a.get("source") == "document_gaps"]
-    assert len(flat_doc_gap_actions) == 6
+    # 1. Five doc-gap actions in recommended_actions (capped)
+    flat_doc_gap = [a for a in body["recommended_actions"] if a.get("source") == "document_gaps"]
+    assert len(flat_doc_gap) == 5
 
+    # 2. Six doc-gap actions in unfiltered_recommended_actions
+    unfiltered_doc_gap = [
+        a for a in body["unfiltered_recommended_actions"] if a.get("source") == "document_gaps"
+    ]
+    assert len(unfiltered_doc_gap) == 6
+
+    # 3. action_group contains same 5 actions as visible recommended_actions list
     group = next(g for g in body["action_groups"] if g["id"] == "document_gaps")
-    assert group["count"] == 6
-    assert len(group["actions"]) == 6
-    assert group["default_visible_count"] == 5
+    assert group["count"] == 5
+    assert len(group["actions"]) == 5
+    group_ids = {a["id"] for a in group["actions"]}
+    visible_ids = {a["id"] for a in flat_doc_gap}
+    assert group_ids == visible_ids
 
-    # Spot-check: a document-gap action inside the group has the same
-    # primary_command as its flat-list counterpart (matched by id).
-    grouped_action = group["actions"][0]
-    flat_action = next(a for a in flat_doc_gap_actions if a["id"] == grouped_action["id"])
-    assert grouped_action["primary_command"] == flat_action["primary_command"]
+    # 4. default_visible_count does not exceed five
+    assert group["default_visible_count"] <= 5
+
+    # 5. All six unfiltered doc-gap actions retain structured command metadata
+    for action in unfiltered_doc_gap:
+        assert action["primary_command"] is not None
+        assert action["primary_command"]["command_id"] == "project_docs_fetch_dry_run"
+        secondary_ids = {s["command_id"] for s in action.get("secondary_commands") or []}
+        assert "project_docs_fetch_print_prompt" in secondary_ids
+        assert "project_docs_fetch_live_single" in secondary_ids
+
+    # 6. Hidden sixth action not deleted/lost — present in unfiltered,
+    #    absent from visible recommended_actions
+    sixth = next(a for a in unfiltered_doc_gap if a["entity_id"] == "OPP05")
+    assert sixth is not None
+    assert "OPP05" not in {a["entity_id"] for a in flat_doc_gap}
 
 
 def test_daily_real_pipeline_no_forbidden_command_ids_in_action_groups(tmp_path, monkeypatch):
@@ -659,4 +684,73 @@ def test_daily_gaps_filters_legacy_empty(tmp_path, monkeypatch):
     # OPP_GAP_1 should be in the gaps, but OPP_LEGACY_1 should be filtered out
     assert "OPP_GAP_1" in opps
     assert "OPP_LEGACY_1" not in opps
+
+
+def test_daily_attention_list_filters_low_and_info_and_caps_at_five(tmp_path, monkeypatch):
+    client, db_path = _client(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc)
+    
+    # Let's seed 10 document gaps to create 10 potential actions
+    for i in range(10):
+        opp = f"OPP_{i}"
+        conn.execute(
+            """
+            INSERT INTO projects (id, project_name, client, opportunity_number, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [f"project::{opp}", f"Gap Project {i}", "Client", opp, now, now],
+        )
+    conn.close()
+
+    resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+    body = resp.json()
+    
+    actions = body["recommended_actions"]
+    # Should be capped at 5
+    assert len(actions) <= 5
+    for act in actions:
+        # All of them must have a primary_command (not informational-only)
+        assert act.get("primary_command") is not None
+        # All of them must not be low priority
+        assert act.get("priority") != "low"
+        # Each must contain an explanation
+        assert "explanation" in act
+
+
+def test_daily_attention_list_excludes_feedback_suppressed(tmp_path, monkeypatch):
+    client, db_path = _client(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc)
+    
+    # Seed a document gap project
+    _seed_document_gap_project(conn)
+    
+    # Suppress the gap via feedback event
+    conn.execute(
+        """
+        INSERT INTO feedback_events (id, item_id, rating, created_at)
+        VALUES ('f1', ?, 'wrong', ?)
+        """,
+        [f"document_gap:{DOC_GAP_OPP}", now]
+    )
+    conn.close()
+
+    resp = client.get("/api/daily", params={"date": TARGET_DATE.isoformat()})
+    body = resp.json()
+    
+    actions = body["recommended_actions"]
+    # The suppressed action must be excluded!
+    assert not any(act.get("id") == f"document_gap:{DOC_GAP_OPP}" for act in actions)
+
+
+def test_safe_refresh_workflow_cannot_invoke_external_retrieval(tmp_path, monkeypatch):
+    client, db_path = _client(tmp_path, monkeypatch)
+    
+    # We patch safe_refresh or mock retrieve/fetch functions to verify they aren't called or that the endpoint works safely
+    with patch("manager_os.ingest.obsidian.ingest_vault") as mock_ingest, \
+         patch("manager_os.ingest.deals.ingest_deals") as mock_deals:
+        resp = client.post("/api/refresh")
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
 

@@ -34,7 +34,7 @@ export type Priority = 'high' | 'medium' | 'low'
 
 export type RunStatus = 'success' | 'failed' | 'running' | 'skipped' | 'blocked' | 'error' | 'ok'
 
-export type Freshness = 'fresh' | 'stale' | 'missing'
+export type Freshness = 'fresh' | 'stale' | 'missing' | 'unknown'
 
 export type ParameterType = 'str' | 'int' | 'float' | 'bool' | 'list'
 
@@ -44,6 +44,11 @@ export interface StatusCardData {
   detail: string
   freshness: Freshness
   count?: number
+  last_source_date?: string | null
+  last_successful_fetch?: string | null
+  last_successful_ingest?: string | null
+  calculated_age?: string | null
+  explanation?: string | null
 }
 
 /** A single command reference used inside a `RecommendedAction`'s
@@ -78,6 +83,13 @@ export interface RecommendedAction {
   entity_id?: string
   primary_command?: RecommendedActionCommand
   secondary_commands?: RecommendedActionSecondaryCommand[]
+  why_it_matters?: string
+  recommended_next_action?: string
+  entity?: string
+  source_date?: string
+  last_refreshed?: string
+  confidence?: number
+  explanation?: string
 }
 
 /** Aggregate counts over the full set of recommended actions, used to render
@@ -124,6 +136,10 @@ export interface DailyOperatingLoop {
    * Action Inbox. Absent on older backends; the UI degrades gracefully. */
   action_summary?: ActionSummary
   action_groups?: ActionGroup[]
+  /** Full pre-cap list of recommended actions before filtering/capping.
+   * Not rendered in the default Action Inbox — available for advanced or
+   * secondary views. */
+  unfiltered_recommended_actions?: RecommendedAction[]
 }
 
 /** A single typed parameter declared on a command (from the command registry). */
@@ -240,6 +256,23 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T
 }
 
+export class ApiUnavailableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ApiUnavailableError'
+  }
+}
+
+export function isDemoModeOrTest(): boolean {
+  const isTest = typeof window !== 'undefined' && (
+    (window as any).isTestEnvironment ||
+    (window as any).vitest ||
+    (window as any).__vite_plugin_react_preamble_installed__ === undefined
+  );
+  const isDemo = typeof localStorage !== 'undefined' && localStorage.getItem('manager_os_demo_mode') === 'true';
+  return !!(isTest || isDemo);
+}
+
 async function withMockFallback<T>(
   live: () => Promise<T>,
   fallback: () => T | Promise<T>,
@@ -247,9 +280,12 @@ async function withMockFallback<T>(
   try {
     const data = await live()
     return { data, isMock: false }
-  } catch {
-    const data = await fallback()
-    return { data, isMock: true }
+  } catch (error) {
+    if (isDemoModeOrTest()) {
+      const data = await fallback()
+      return { data, isMock: true }
+    }
+    throw new ApiUnavailableError('Manager OS API is unavailable')
   }
 }
 
@@ -261,6 +297,12 @@ interface RawSourceHealth {
   count: number
   last_updated: string | null
   warnings: string[]
+  last_source_date?: string | null
+  last_successful_fetch?: string | null
+  last_successful_ingest?: string | null
+  calculated_age?: string | null
+  freshness: string
+  explanation?: string | null
 }
 
 interface RawStatusResponse {
@@ -271,19 +313,18 @@ interface RawStatusResponse {
   warnings: string[]
 }
 
-function mapSourceStatusToFreshness(status: string): Freshness {
-  if (status === 'available') return 'fresh'
-  if (status === 'empty') return 'stale'
-  return 'missing'
-}
-
 function mapStatusResponse(raw: RawStatusResponse): StatusCardData[] {
   return raw.sources.map((s) => ({
     id: s.name,
     label: s.name,
-    detail: s.warnings[0] ?? (s.last_updated ? `Last updated ${s.last_updated}` : `${s.count} rows`),
-    freshness: mapSourceStatusToFreshness(s.status),
+    detail: s.explanation ?? s.warnings[0] ?? (s.last_updated ? `Last updated ${s.last_updated}` : `${s.count} rows`),
+    freshness: (s.freshness as Freshness) || 'unknown',
     count: s.count,
+    last_source_date: s.last_source_date,
+    last_successful_fetch: s.last_successful_fetch,
+    last_successful_ingest: s.last_successful_ingest,
+    calculated_age: s.calculated_age,
+    explanation: s.explanation,
   }))
 }
 
@@ -404,5 +445,27 @@ export function getStaffingBalance(): Promise<ApiResult<StaffingBalanceResponse>
         { from_person: 'Priya Nair', to_person: 'Jordan Lee', amount: 0.28, project: 'Acme Corp — Phase 2' },
       ],
     }),
+  )
+}
+
+export function postFeedback(itemId: string, rating: string, reason?: string): Promise<ApiResult<{ ok: boolean; event_id: string }>> {
+  return withMockFallback(
+    () =>
+      requestJson<{ ok: boolean; event_id: string }>('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item_id: itemId, rating, reason }),
+      }),
+    () => ({ ok: true, event_id: 'mock-event' }),
+  )
+}
+
+export function runSafeRefresh(): Promise<ApiResult<{ ok: boolean; message: string }>> {
+  return withMockFallback(
+    () =>
+      requestJson<{ ok: boolean; message: string }>('/api/refresh', {
+        method: 'POST',
+      }),
+    () => ({ ok: true, message: 'Local refresh completed successfully.' }),
   )
 }

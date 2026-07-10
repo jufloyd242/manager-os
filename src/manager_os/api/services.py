@@ -6,7 +6,7 @@ Route handlers stay thin: call one of these, catch exceptions, return.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 import duckdb
@@ -21,28 +21,162 @@ from manager_os.config import Settings
 _SOURCE_TABLES = ["projects", "people", "meetings", "signals", "staffing_forecast"]
 
 
+def _format_age(dt: datetime) -> str:
+    now = datetime.now()
+    diff = now - dt
+    seconds = diff.total_seconds()
+    if seconds < 0:
+        return "just now"
+    if seconds < 60:
+        return "less than a minute ago"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{int(minutes)} minute{'s' if int(minutes) != 1 else ''} ago"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{int(hours)} hour{'s' if int(hours) != 1 else ''} ago"
+    days = hours / 24
+    return f"{int(days)} day{'s' if int(days) != 1 else ''} ago"
+
+
+def _get_last_successful_fetch(conn: duckdb.DuckDBPyConnection, command_id: str) -> Optional[datetime]:
+    try:
+        res = conn.execute(
+            "SELECT finished_at FROM command_runs WHERE command_id = ? AND status = 'success' ORDER BY finished_at DESC LIMIT 1",
+            [command_id]
+        ).fetchone()
+        if res and res[0]:
+            return res[0]
+    except Exception:
+        pass
+    return None
+
+
+def _get_last_successful_ingest(conn: duckdb.DuckDBPyConnection, table_name: str) -> Optional[datetime]:
+    col = "ingested_at" if table_name == "staffing_forecast" else "updated_at"
+    try:
+        res = conn.execute(f"SELECT MAX({col}) FROM {table_name}").fetchone()
+        if res and res[0]:
+            return res[0]
+    except Exception:
+        pass
+    return None
+
+
+def _get_last_source_date(conn: duckdb.DuckDBPyConnection, table_name: str) -> Optional[date]:
+    col = None
+    if table_name == "meetings":
+        col = "meeting_date"
+    elif table_name == "signals":
+        col = "signal_date"
+    elif table_name == "staffing_forecast":
+        col = "week_start"
+    elif table_name == "people":
+        col = "last_1on1_date"
+    elif table_name == "projects":
+        col = "close_date"
+    
+    if not col:
+        return None
+        
+    try:
+        res = conn.execute(f"SELECT MAX({col}) FROM {table_name}").fetchone()
+        if res and res[0]:
+            val = res[0]
+            if isinstance(val, (datetime, date)):
+                return val
+            if isinstance(val, str):
+                return date.fromisoformat(val.split(" ")[0])
+    except Exception:
+        pass
+    return None
+
+
 def build_status(conn: duckdb.DuckDBPyConnection, settings: Settings) -> dict:
     """Return a local system/data freshness summary, one entry per key table."""
     warnings: list[str] = []
     sources = []
+    
+    command_id_map = {
+        "meetings": "retrieve_calendar",
+        "staffing_forecast": "retrieve_forecast",
+        "projects": "search_projects",
+        "people": "people_audit",
+    }
+
     for name in _SOURCE_TABLES:
         try:
             count = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
-            sources.append(
-                {
+            
+            if count == 0:
+                sources.append({
                     "name": name,
-                    "status": "available" if count else "empty",
-                    "count": count,
+                    "status": "empty",
+                    "count": 0,
                     "last_updated": None,
                     "warnings": [],
-                }
-            )
+                    "last_source_date": None,
+                    "last_successful_fetch": None,
+                    "last_successful_ingest": None,
+                    "calculated_age": None,
+                    "freshness": "missing",
+                    "explanation": "No records found in database.",
+                })
+                continue
+                
+            last_source_date = _get_last_source_date(conn, name)
+            last_ingest = _get_last_successful_ingest(conn, name)
+            
+            last_fetch = None
+            if name in command_id_map:
+                last_fetch = _get_last_successful_fetch(conn, command_id_map[name])
+                
+            ref_time = last_ingest or last_fetch
+            calculated_age = None
+            freshness = "unknown"
+            explanation = "No ingest/fetch timestamp metadata found to verify freshness."
+            
+            if ref_time:
+                calculated_age = _format_age(ref_time)
+                now = datetime.now()
+                # Check 24 hours
+                if (now - ref_time) <= timedelta(hours=24):
+                    freshness = "fresh"
+                    explanation = f"Data was updated {calculated_age}."
+                else:
+                    freshness = "stale"
+                    explanation = f"Data is stale (updated {calculated_age})."
+            
+            sources.append({
+                "name": name,
+                "status": "available",
+                "count": count,
+                "last_updated": last_ingest.isoformat() if last_ingest else None,
+                "warnings": [],
+                "last_source_date": last_source_date.isoformat() if last_source_date else None,
+                "last_successful_fetch": last_fetch.isoformat() if last_fetch else None,
+                "last_successful_ingest": last_ingest.isoformat() if last_ingest else None,
+                "calculated_age": calculated_age,
+                "freshness": freshness,
+                "explanation": explanation,
+            })
+            
         except Exception as exc:
             msg = f"{name}: {exc}"
             warnings.append(msg)
-            sources.append(
-                {"name": name, "status": "missing", "count": 0, "last_updated": None, "warnings": [msg]}
-            )
+            sources.append({
+                "name": name,
+                "status": "missing",
+                "count": 0,
+                "last_updated": None,
+                "warnings": [msg],
+                "last_source_date": None,
+                "last_successful_fetch": None,
+                "last_successful_ingest": None,
+                "calculated_age": None,
+                "freshness": "missing",
+                "explanation": f"Failed to inspect source: {exc}",
+            })
 
     return {
         "ok": True,

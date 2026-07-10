@@ -6,32 +6,57 @@ Local-first management dashboard for AI/ML consulting managers. Ingests Obsidian
 
 ---
 
-## Quickstart
+## Quickstart (React-First Workflow)
+
+Manager OS is now optimized to be experienced primarily through the Vite + React TypeScript dashboard, with a fast, safe, local-only refresh workflow.
+
+### 1. Set Up Environment & Install Dependencies
 
 ```bash
-# 1. Clone and set up environment
+# Clone and set up environment
 git clone <repo-url>
 cd manager-os
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. Configure
+# Configure
 cp .env.example .env
 # Edit .env — set MANAGER_OS_VAULT_PATH and other paths
-
-# 3. Ingest your data (seeds people/clients from config automatically)
-manager-os ingest
-
-# 4. Extract signals, action items, and decisions
-manager-os extract
-
-# 5. Generate today's brief
-manager-os brief
-
-# 6. Open the dashboard (http://localhost:8501)
-manager-os dashboard
 ```
+
+### 2. Start Manager OS API Server
+
+Start the local FastAPI backend server:
+
+```bash
+uv run fastapi dev src/manager_os/api/app.py
+# Server starts on http://127.0.0.1:8000
+```
+
+### 3. Start React Frontend
+
+In another terminal, start the Vite development server for the React app:
+
+```bash
+cd frontend
+npm install
+npm run dev
+# App opens on http://localhost:5173
+```
+
+### 4. Experience the Dashboard
+
+1. Open **http://localhost:5173** in your browser.
+2. Click **Refresh Manager OS** to trigger a safe, local-only data ingestion and extraction run (no external or LLM calls).
+3. Process the **five attention items** shown on the Today view, mark feedback, and complete your tasks!
+
+---
+
+## Legacy Dashboard (Streamlit)
+
+> **Note:** The Streamlit dashboard is now a secondary/legacy interface. No new features are being added to it, but you can still run it if needed using:
+> `manager-os dashboard` (runs on http://localhost:8501)
 
 ---
 

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-export type ViewId = 'daily_loop' | 'staffing' | 'archive'
+export type ViewId = 'daily_loop' | 'staffing' | 'meetings' | 'projects' | 'archive'
 
 interface SidebarProps {
   currentView: ViewId
@@ -14,21 +14,22 @@ interface SidebarProps {
 
 export function Sidebar({ currentView, onViewChange, badges }: SidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   const menuItems = [
     {
       id: 'daily_loop' as const,
-      label: 'Daily Operating Loop',
+      label: 'Today',
       badge: badges?.daily_loop,
       icon: (
         <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H17" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
         </svg>
       )
     },
     {
       id: 'staffing' as const,
-      label: 'People / Staffing',
+      label: 'People',
       badge: badges?.staffing,
       icon: (
         <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -37,8 +38,29 @@ export function Sidebar({ currentView, onViewChange, badges }: SidebarProps) {
       )
     },
     {
+      id: 'meetings' as const,
+      label: 'Meetings',
+      icon: (
+        <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+      )
+    },
+    {
+      id: 'projects' as const,
+      label: 'Projects',
+      icon: (
+        <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 002-2h2a2 2 0 002 2" />
+        </svg>
+      )
+    }
+  ]
+
+  const advancedItems = [
+    {
       id: 'archive' as const,
-      label: 'Archive',
+      label: 'Project Archive',
       badge: badges?.archive,
       icon: (
         <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -64,7 +86,7 @@ export function Sidebar({ currentView, onViewChange, badges }: SidebarProps) {
           </div>
           {!isCollapsed && (
             <span className="font-bold text-sm tracking-wider uppercase text-white animate-fade-in whitespace-nowrap">
-              Command Tower
+              Manager OS
             </span>
           )}
         </div>
@@ -105,6 +127,53 @@ export function Sidebar({ currentView, onViewChange, badges }: SidebarProps) {
             </button>
           )
         })}
+
+        {/* Advanced Collapsible Section */}
+        <div className="pt-4 border-t border-slate-800 mt-4">
+          <button
+            onClick={() => setShowAdvanced(!showAdvanced)}
+            className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold uppercase tracking-wider text-slate-500 hover:text-slate-300 transition-colors"
+          >
+            {!isCollapsed && <span>Advanced</span>}
+            <svg
+              className={`w-4 h-4 transition-transform duration-200 ${showAdvanced ? 'rotate-90' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
+          {showAdvanced && advancedItems.map((item) => {
+            const isActive = currentView === item.id
+            return (
+              <button
+                key={item.id}
+                onClick={() => onViewChange(item.id)}
+                className={`w-full relative flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-medium transition-all duration-200 cursor-pointer mt-1.5 ${
+                  isActive
+                    ? 'bg-indigo-600/90 text-white shadow-md shadow-indigo-500/10'
+                    : 'hover:bg-slate-800 hover:text-slate-100 text-slate-400'
+                }`}
+              >
+                {item.icon}
+                {!isCollapsed && (
+                  <span className="truncate whitespace-nowrap">{item.label}</span>
+                )}
+                {item.badge !== undefined && (
+                  <span
+                    className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold shrink-0 ml-auto ${
+                      isActive ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-400'
+                    }`}
+                  >
+                    {item.badge}
+                  </span>
+                )}
+              </button>
+            )
+          })}
+        </div>
       </nav>
 
       {/* Collapsible toggle action button at the bottom */}

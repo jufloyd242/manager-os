@@ -26,6 +26,7 @@ from manager_os.api.models import (
     RunListResponse,
     RunLogsResponse,
     StatusResponse,
+    FeedbackRequestBody,
 )
 from manager_os.build.daily_operating_loop import build_daily_operating_loop
 from manager_os.build.dashboard_data import get_people_rows
@@ -185,6 +186,69 @@ def create_app() -> FastAPI:
         if run is None:
             raise HTTPException(status_code=404, detail=f"Unknown run_id: {run_id}")
         return RunLogsResponse(stdout=run["stdout"], stderr=run["stderr"], error=run["error"])
+
+    @app.post("/api/feedback")
+    def post_feedback(
+        body: FeedbackRequestBody,
+        conn: duckdb.DuckDBPyConnection = Depends(get_db_connection),
+    ) -> dict:
+        from manager_os.build.feedback import mark
+        try:
+            event_id = mark(
+                conn,
+                item_id=body.item_id,
+                rating=body.rating,
+                reason=body.reason,
+            )
+            return {"ok": True, "event_id": event_id}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/refresh")
+    def safe_refresh(
+        conn: duckdb.DuckDBPyConnection = Depends(get_db_connection),
+        settings: Settings = Depends(get_fresh_settings),
+    ) -> dict:
+        from pathlib import Path
+        from manager_os.db import seed_from_config
+        from manager_os.ingest.obsidian import ingest_vault
+        from manager_os.ingest.deals import ingest_deals
+        from manager_os.extract.signals import run_rule_extraction
+        from manager_os.extract.action_items import extract_action_items_from_all_notes
+        from manager_os.extract.decisions import extract_decisions_from_all_notes
+        
+        # 1. Seed from config
+        seed_from_config(conn, settings)
+        
+        # 2. Ingest Obsidian vault (if path exists)
+        if settings.vault_path and Path(settings.vault_path).exists():
+            try:
+                ingest_vault(settings.vault_path, conn)
+            except Exception as exc:
+                print(f"Failed to ingest vault: {exc}")
+                
+        # 3. Ingest Deals (if CSV exists)
+        deals_path = Path("data/raw/deals.csv")
+        if deals_path.exists():
+            try:
+                ingest_deals(str(deals_path), conn)
+            except Exception as exc:
+                print(f"Failed to ingest deals: {exc}")
+                
+        # 4. Run rule extraction
+        try:
+            run_rule_extraction(conn, date.today())
+        except Exception as exc:
+            print(f"Failed rule extraction: {exc}")
+            
+        # 5. Run action-items & decisions extraction
+        try:
+            extract_action_items_from_all_notes(conn, date.today())
+            extract_decisions_from_all_notes(conn, date.today())
+        except Exception as exc:
+            print(f"Failed action items/decisions extraction: {exc}")
+            
+        return {"ok": True, "message": "Local refresh completed successfully."}
 
     return app
 

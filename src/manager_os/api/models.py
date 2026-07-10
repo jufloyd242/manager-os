@@ -20,6 +20,12 @@ class SourceHealth(BaseModel):
     count: int
     last_updated: str | None = None
     warnings: list[str] = []
+    last_source_date: str | None = None
+    last_successful_fetch: str | None = None
+    last_successful_ingest: str | None = None
+    calculated_age: str | None = None
+    freshness: str = "unknown" # fresh | stale | missing | unknown
+    explanation: str | None = None
 
 
 class StatusResponse(BaseModel):
@@ -46,6 +52,7 @@ class DailyResponse(BaseModel):
     # older build_daily_operating_loop() that hasn't been updated yet.
     action_summary: dict[str, Any] = Field(default_factory=dict)
     action_groups: list[dict[str, Any]] = Field(default_factory=list)
+    unfiltered_recommended_actions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PeopleResponse(BaseModel):
@@ -142,3 +149,9 @@ class RunLogsResponse(BaseModel):
     stdout: str | None = None
     stderr: str | None = None
     error: str | None = None
+
+
+class FeedbackRequestBody(BaseModel):
+    item_id: str
+    rating: str
+    reason: str | None = None
