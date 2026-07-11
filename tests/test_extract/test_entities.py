@@ -115,6 +115,48 @@ def test_resolve_any_no_match(resolver: EntityResolver) -> None:
 
 
 # ------------------------------------------------------------------
+# resolve_person — email address matching (calendar attendees are emails)
+# ------------------------------------------------------------------
+
+
+@pytest.fixture()
+def resolver_with_emails() -> EntityResolver:
+    people = [
+        PersonConfig(name="Alice Chen", aliases=["Alice", "alice", "Alice Chen", "alice.chen@sada.com"]),
+        PersonConfig(name="Bob Martinez", aliases=["Bob", "bob", "Bob Martinez"]),
+    ]
+    clients = [ClientConfig(name="Acme Corp", aliases=["Acme", "acme", "Acme Corp"])]
+    return EntityResolver(people, clients, {})
+
+
+def test_resolve_person_by_exact_email_alias(resolver_with_emails: EntityResolver) -> None:
+    """An email explicitly listed as an alias resolves directly."""
+    assert resolver_with_emails.resolve_person("alice.chen@sada.com") == "Alice Chen"
+
+
+def test_resolve_person_by_email_local_part_fallback(resolver: EntityResolver) -> None:
+    """Calendar attendees are often raw emails not listed as aliases.
+
+    When resolve_person() gets an email address with no exact alias match,
+    it should fall back to matching the local part (before @) against
+    configured aliases, so "alice@company.com" still resolves to Alice Chen
+    via the "alice" alias.
+    """
+    assert resolver.resolve_person("alice@company.com") == "Alice Chen"
+
+
+def test_resolve_person_by_email_local_part_dotted_name(resolver: EntityResolver) -> None:
+    """firstname.lastname@domain style emails should also resolve via alias fallback."""
+    # "bob" is an alias for Bob Martinez; "bob.martinez@sada.com" should
+    # resolve via the local-part fallback even without an exact alias.
+    assert resolver.resolve_person("bob.martinez@sada.com") == "Bob Martinez"
+
+
+def test_resolve_person_email_no_match_returns_none(resolver: EntityResolver) -> None:
+    assert resolver.resolve_person("unknown.person@sada.com") is None
+
+
+# ------------------------------------------------------------------
 # extract_entities_from_text
 # ------------------------------------------------------------------
 

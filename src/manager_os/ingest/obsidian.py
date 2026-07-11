@@ -51,6 +51,15 @@ _DIR_TYPE_MAP = {
     "meetings": "meeting",
     "team": "team",
     "practice": "practice",
+    # Person-profile folders under team/**. These map to "1on1" so
+    # _infer_entity_type() classifies them as entity_type="person" rather
+    # than the generic "team" bucket — a static profile note for a direct
+    # report, manager, or peer is about that specific person, not a
+    # team-wide note. "me" is intentionally excluded here since notes about
+    # yourself aren't a person-entity relationship target.
+    "directs": "1on1",
+    "my manager": "1on1",
+    "other": "1on1",
 }
 
 
@@ -307,9 +316,18 @@ def _ingest_file(
     # Note type
     note_type = _infer_note_type(fm, md_file)
 
-    # Entity info
-    entity_name = str(fm.get("entity", fm.get("person", fm.get("client", ""))))
+    # Entity info. Tries explicit frontmatter fields first (entity/person/
+    # client/name — "name:" is included because real-world person-profile
+    # notes commonly use "name: Jason" rather than "entity:"/"person:").
+    # When frontmatter provides nothing at all (common for client status
+    # notes with zero frontmatter), falls back to the immediate parent
+    # folder name for client-type notes — e.g. clients/Bumble/status.md ->
+    # entity_name="Bumble" — since that's the vault's own naming
+    # convention (one subfolder per client).
+    entity_name = str(fm.get("entity", fm.get("person", fm.get("client", fm.get("name", "")))))
     entity_type = _infer_entity_type(note_type)
+    if not entity_name and entity_type == "client":
+        entity_name = md_file.parent.name
 
     # Note date
     note_date_str = _parse_date(fm.get("date"))

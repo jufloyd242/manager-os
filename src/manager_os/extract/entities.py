@@ -1,7 +1,15 @@
 """Entity resolution — maps raw strings to canonical person/client/deal names.
 
 Resolves against config-loaded people.yaml, clients.yaml, and deal_aliases.yaml.
-Exact alias match only (case-insensitive). No fuzzy matching in this version.
+Exact alias match, case-insensitive. Also supports a lightweight email-address
+fallback for resolve_person(): calendar attendees frequently arrive as raw
+email addresses (e.g. "alice.chen@company.com") rather than display names, and
+those addresses are rarely listed verbatim as aliases in people.yaml. When an
+exact alias match fails and the input looks like an email address, the local
+part (before "@") is matched against aliases — first as a dotted
+"firstname.lastname" split, then as the whole local part — so
+"alice.chen@sada.com" or "alice@sada.com" both resolve via existing "alice"/
+"alice chen" aliases without requiring every email to be hand-listed.
 """
 
 from __future__ import annotations
@@ -46,12 +54,41 @@ class EntityResolver:
     # ------------------------------------------------------------------
 
     def resolve_person(self, text: str) -> str | None:
-        """Return canonical person name or None."""
-        return self._person_map.get(text.lower().strip())
+        """Return canonical person name or None.
+
+        Tries an exact alias match first. If that fails and `text` looks
+        like an email address, falls back to matching the local part
+        (before "@") against configured aliases — both as-is and with dots
+        replaced by spaces (so "alice.chen@x.com" can match an "alice chen"
+        alias, not just "alice.chen").
+        """
+        cleaned = text.lower().strip()
+        exact = self._person_map.get(cleaned)
+        if exact:
+            return exact
+
+        if "@" in cleaned:
+            local_part = cleaned.split("@", 1)[0]
+            # Try the local part as-is (e.g. "alice" from "alice@x.com")
+            match = self._person_map.get(local_part)
+            if match:
+                return match
+            # Try dotted local part with dots→spaces (e.g. "alice.chen" -> "alice chen")
+            match = self._person_map.get(local_part.replace(".", " "))
+            if match:
+                return match
+            # Try just the first dot-segment (e.g. "alice.chen" -> "alice")
+            first_segment = local_part.split(".", 1)[0]
+            match = self._person_map.get(first_segment)
+            if match:
+                return match
+
+        return None
 
     def resolve_client(self, text: str) -> str | None:
         """Return canonical client name or None."""
         return self._client_map.get(text.lower().strip())
+
 
     def resolve_deal(self, text: str) -> str | None:
         """Return canonical deal name or None."""

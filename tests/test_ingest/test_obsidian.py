@@ -241,6 +241,89 @@ class TestMalformedFrontmatter:
 
 
 # ===========================================================================
+# entity_name population from "name:" frontmatter and folder-path notes
+# (regression coverage for real-world vaults using person-profile notes
+# with "name:" frontmatter under team/directs/, team/my manager/, etc.,
+# and client notes with no frontmatter at all under clients/<name>/)
+# ===========================================================================
+
+
+class TestEntityNameFromNameFrontmatter:
+    def test_name_field_populates_entity_name_for_person_note(self, tmp_path: Path, conn) -> None:
+        """A person-profile note using 'name:' frontmatter (not 'entity:' or
+        'person:') should still populate entity_name — this is the actual
+        convention used by real-world vault person notes like
+        'team/directs/Jason - ML.md' with 'name: Jason' in frontmatter.
+        """
+        vault = tmp_path / "vault"
+        directs = vault / "team" / "directs"
+        directs.mkdir(parents=True)
+        text = (
+            "---\n"
+            "name: Jason\n"
+            "title: ML Practice Leader\n"
+            "current_utilization: 100%\n"
+            "---\n\n"
+            "# Jason\n\nSome profile content.\n"
+        )
+        (directs / "Jason - ML.md").write_text(text)
+        result = ingest_vault(str(vault), conn)
+        assert result.ingested == 1
+        row = conn.execute(
+            "SELECT entity_type, entity_name FROM notes WHERE entity_name = 'Jason'"
+        ).fetchone()
+        assert row is not None
+        assert row[1] == "Jason", f"Expected entity_name='Jason', got {row}"
+        assert row[0] == "person", f"Expected entity_type='person' for a directs/ note, got {row}"
+
+    def test_team_directs_folder_infers_person_entity_type(self, tmp_path: Path, conn) -> None:
+        """Notes under team/directs/ (or team/my manager/, team/me/, team/other/)
+        should be classified as entity_type='person', not 'team' — even
+        though the top-level folder segment is literally 'team'. The
+        _DIR_TYPE_MAP heuristic currently only checks the immediate parent
+        directory name ('directs'), which isn't in the map, so it falls
+        through to the ancestor 'team' segment and gets mis-typed as a
+        generic team note instead of a person profile.
+        """
+        vault = tmp_path / "vault"
+        my_manager = vault / "team" / "my manager"
+        my_manager.mkdir(parents=True)
+        (my_manager / "Chris - Data-AI.md").write_text(
+            "---\nname: Chris\n---\n\n# Chris\n\nManager profile.\n"
+        )
+        result = ingest_vault(str(vault), conn)
+        assert result.ingested == 1
+        row = conn.execute(
+            "SELECT entity_type, entity_name, note_type FROM notes WHERE title LIKE '%Chris%'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "person", f"Expected entity_type='person', got {row}"
+        assert row[1] == "Chris"
+
+    def test_client_folder_note_with_no_frontmatter_gets_entity_name_from_h1(self, tmp_path: Path, conn) -> None:
+        """Client status notes commonly have NO frontmatter at all — the
+        client name only appears as the H1 heading and/or the containing
+        folder name (e.g. clients/Bumble/engagement-status.md, body starts
+        with '# Bumble'). entity_name should still be populated by falling
+        back to the parent folder name when frontmatter provides nothing.
+        """
+        vault = tmp_path / "vault"
+        client_dir = vault / "clients" / "Bumble"
+        client_dir.mkdir(parents=True)
+        (client_dir / "engagement-status.md").write_text(
+            "# Bumble\n\n**Current Engagement**: Staff Augmentation\n"
+        )
+        result = ingest_vault(str(vault), conn)
+        assert result.ingested == 1
+        row = conn.execute(
+            "SELECT entity_type, entity_name, note_type FROM notes WHERE title LIKE '%engagement%' OR entity_name = 'Bumble'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "client", f"Expected entity_type='client', got {row}"
+        assert row[1] == "Bumble", f"Expected entity_name='Bumble' from parent folder, got {row}"
+
+
+# ===========================================================================
 # Template directory skipping
 # ===========================================================================
 
