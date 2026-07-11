@@ -300,6 +300,68 @@ class MeetingPrepRecord(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Relationship model
+# ---------------------------------------------------------------------------
+
+
+class ResolvedRelationship(BaseModel):
+    """A single resolved relationship for a person.
+
+    ``relationship`` is a canonical value: direct_report | manager | peer |
+    client | external | unknown.
+    """
+    model_config = ConfigDict(strict=False)
+
+    person_name: str
+    relationship: str = "unknown"
+    evidence_source: str = "unknown"
+    evidence_path: str | None = None
+    warnings: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# Meeting prep response models
+# ---------------------------------------------------------------------------
+
+
+class PrepSource(BaseModel):
+    """One source consulted or selected for meeting preparation."""
+    model_config = ConfigDict(strict=False)
+
+    source_type: str
+    title: str
+    source_path: str | None = None
+    source_date: str | None = None
+    reason_selected: str
+    relevance_score: float = 0.0
+
+
+class MeetingPrepResponse(BaseModel):
+    """Structured deterministic meeting preparation response."""
+    model_config = ConfigDict(strict=False)
+
+    meeting_id: str
+    meeting_title: str
+    meeting_date: str
+    meeting_time: str = ""
+    attendees: list[str] = []
+    resolved_attendees: list[dict] = []  # [{name, relationship, evidence_source}]
+    matched_rule_id: str = "generic_fallback"
+    matched_rule_name: str = "Generic Meeting"
+    rule_match_explanation: str = ""
+    meeting_type: str = "generic"
+    prep_required: bool = True
+    sections: dict[str, Any] = {}  # {section_name: [items]}
+    sources_consulted: list[PrepSource] = []
+    sources_selected: list[PrepSource] = []
+    sources_excluded: list[str] = []
+    missing_context_warnings: list[str] = []
+    project_doc_warnings_suppressed: bool = False
+    generated_at: str = ""
+    llm_enriched: bool = False
+
+
+# ---------------------------------------------------------------------------
 # Dashboard view models
 # ---------------------------------------------------------------------------
 
