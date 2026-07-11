@@ -9,7 +9,7 @@
 // never fail silently and never pretend mock data is live data.
 //
 // Base URL comes from the Vite env var VITE_MANAGER_OS_API_BASE_URL, falling
-// back to http://127.0.0.1:8000 for local dev against a real backend.
+// back to http://localhost:8000 for local dev against a real backend.
 
 import {
   mockSystemStatus,
@@ -19,7 +19,6 @@ import {
   mockValidateCommand,
   mockRunCommand,
   mockRunLogs,
-  mockMeetingPrep,
 } from './mockData'
 
 export type RiskLevel =
@@ -35,7 +34,7 @@ export type Priority = 'high' | 'medium' | 'low'
 
 export type RunStatus = 'success' | 'failed' | 'running' | 'skipped' | 'blocked' | 'error' | 'ok'
 
-export type Freshness = 'fresh' | 'stale' | 'missing' | 'unknown'
+export type Freshness = 'fresh' | 'stale' | 'missing'
 
 export type ParameterType = 'str' | 'int' | 'float' | 'bool' | 'list'
 
@@ -45,11 +44,6 @@ export interface StatusCardData {
   detail: string
   freshness: Freshness
   count?: number
-  last_source_date?: string | null
-  last_successful_fetch?: string | null
-  last_successful_ingest?: string | null
-  calculated_age?: string | null
-  explanation?: string | null
 }
 
 /** A single command reference used inside a `RecommendedAction`'s
@@ -84,13 +78,6 @@ export interface RecommendedAction {
   entity_id?: string
   primary_command?: RecommendedActionCommand
   secondary_commands?: RecommendedActionSecondaryCommand[]
-  why_it_matters?: string
-  recommended_next_action?: string
-  entity?: string
-  source_date?: string
-  last_refreshed?: string
-  confidence?: number
-  explanation?: string
 }
 
 /** Aggregate counts over the full set of recommended actions, used to render
@@ -137,10 +124,6 @@ export interface DailyOperatingLoop {
    * Action Inbox. Absent on older backends; the UI degrades gracefully. */
   action_summary?: ActionSummary
   action_groups?: ActionGroup[]
-  /** Full pre-cap list of recommended actions before filtering/capping.
-   * Not rendered in the default Action Inbox — available for advanced or
-   * secondary views. */
-  unfiltered_recommended_actions?: RecommendedAction[]
 }
 
 /** A single typed parameter declared on a command (from the command registry). */
@@ -246,80 +229,8 @@ export interface ApiResult<T> {
   isMock: boolean
 }
 
-// ------------------------------------------------------------------
-// Meeting types
-// ------------------------------------------------------------------
-
-export interface MeetingEvent {
-  id: string
-  meeting_date: string
-  start_time: string
-  title: string
-  attendees: string[]
-  location?: string
-  source: string
-  external_id: string
-  linked_entities?: Array<{entity_type: string; entity_name: string}>
-}
-
-export interface MeetingsResponse {
-  date: string
-  meetings: MeetingEvent[]
-  warnings: string[]
-  sync_info?: {
-    last_synced: string | null
-    source: string
-    stale: boolean
-  }
-}
-
-export interface CalendarSyncResponse {
-  ok: boolean
-  date: string
-  meetings: MeetingEvent[]
-  retrieved_at: string
-  source: string
-  warnings: string[]
-  errors: string[]
-}
-
-export interface PrepSource {
-  source_type: string
-  title: string
-  source_path: string | null
-  source_date: string | null
-  reason_selected: string
-  relevance_score: number
-}
-
-export interface MeetingPrepResponse {
-  meeting_id: string
-  meeting_title: string
-  meeting_date: string
-  meeting_time: string
-  attendees: string[]
-  resolved_attendees: Array<{
-    name: string
-    relationship: string
-    evidence_source: string
-  }>
-  matched_rule_id: string
-  matched_rule_name: string
-  rule_match_explanation: string
-  meeting_type: string
-  prep_required: boolean
-  sections: Record<string, unknown[]>
-  sources_consulted: PrepSource[]
-  sources_selected: PrepSource[]
-  sources_excluded: string[]
-  missing_context_warnings: string[]
-  project_doc_warnings_suppressed: boolean
-  generated_at: string
-  llm_enriched: boolean
-}
-
 const API_BASE_URL: string =
-  (import.meta.env.VITE_MANAGER_OS_API_BASE_URL as string | undefined) || 'http://127.0.0.1:8000'
+  (import.meta.env.VITE_MANAGER_OS_API_BASE_URL as string | undefined) || 'http://localhost:8000'
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, init)
@@ -329,23 +240,6 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T
 }
 
-export class ApiUnavailableError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'ApiUnavailableError'
-  }
-}
-
-export function isDemoModeOrTest(): boolean {
-  const isTest = typeof window !== 'undefined' && (
-    (window as any).isTestEnvironment ||
-    (window as any).vitest ||
-    (window as any).__vite_plugin_react_preamble_installed__ === undefined
-  );
-  const isDemo = typeof localStorage !== 'undefined' && localStorage.getItem('manager_os_demo_mode') === 'true';
-  return !!(isTest || isDemo);
-}
-
 async function withMockFallback<T>(
   live: () => Promise<T>,
   fallback: () => T | Promise<T>,
@@ -353,12 +247,9 @@ async function withMockFallback<T>(
   try {
     const data = await live()
     return { data, isMock: false }
-  } catch (error) {
-    if (isDemoModeOrTest()) {
-      const data = await fallback()
-      return { data, isMock: true }
-    }
-    throw new ApiUnavailableError('Manager OS API is unavailable')
+  } catch {
+    const data = await fallback()
+    return { data, isMock: true }
   }
 }
 
@@ -370,12 +261,6 @@ interface RawSourceHealth {
   count: number
   last_updated: string | null
   warnings: string[]
-  last_source_date?: string | null
-  last_successful_fetch?: string | null
-  last_successful_ingest?: string | null
-  calculated_age?: string | null
-  freshness: string
-  explanation?: string | null
 }
 
 interface RawStatusResponse {
@@ -386,18 +271,19 @@ interface RawStatusResponse {
   warnings: string[]
 }
 
+function mapSourceStatusToFreshness(status: string): Freshness {
+  if (status === 'available') return 'fresh'
+  if (status === 'empty') return 'stale'
+  return 'missing'
+}
+
 function mapStatusResponse(raw: RawStatusResponse): StatusCardData[] {
   return raw.sources.map((s) => ({
     id: s.name,
     label: s.name,
-    detail: s.explanation ?? s.warnings[0] ?? (s.last_updated ? `Last updated ${s.last_updated}` : `${s.count} rows`),
-    freshness: (s.freshness as Freshness) || 'unknown',
+    detail: s.warnings[0] ?? (s.last_updated ? `Last updated ${s.last_updated}` : `${s.count} rows`),
+    freshness: mapSourceStatusToFreshness(s.status),
     count: s.count,
-    last_source_date: s.last_source_date,
-    last_successful_fetch: s.last_successful_fetch,
-    last_successful_ingest: s.last_successful_ingest,
-    calculated_age: s.calculated_age,
-    explanation: s.explanation,
   }))
 }
 
@@ -486,74 +372,69 @@ export function getRunLogs(runId: string): Promise<ApiResult<RunLogs>> {
   )
 }
 
-// --- Staffing Balance --------------------------------------------------------
+// --- Meetings ----------------------------------------------------------------
 
-export interface AllocationComparison {
-  person: string
-  original_allocation: number
-  balanced_allocation: number
+export interface MeetingEvent {
+  id: string
+  meeting_date: string
+  start_time: string
+  end_time?: string
+  location?: string
+  description_summary?: string
+  title: string
+  attendees: string[]
+  linked_entities?: unknown[]
+  source: string
+  external_id: string
+  sync_info?: { last_synced: string | null; source: string; stale: boolean }
 }
 
-export interface Redistribution {
-  from_person: string
-  to_person: string
-  amount: number
-  project?: string
+export interface MeetingsResponse {
+  date: string
+  meetings: MeetingEvent[]
+  sync_info?: { last_synced: string | null; source: string; stale: boolean }
+  warnings: string[]
 }
 
-export interface StaffingBalanceResponse {
-  comparison: AllocationComparison[]
-  redistributions: Redistribution[]
+export interface CalendarSyncResponse {
+  ok: boolean
+  date: string
+  events_found: number
+  events_added: number
+  errors: string[]
 }
 
-export function getStaffingBalance(): Promise<ApiResult<StaffingBalanceResponse>> {
-  return withMockFallback(
-    () => requestJson<StaffingBalanceResponse>('/api/analytics/staffing-balance'),
-    () => ({
-      comparison: [
-        { person: 'Priya Nair', original_allocation: 1.28, balanced_allocation: 1.0 },
-        { person: 'Jordan Lee', original_allocation: 0.8, balanced_allocation: 1.08 },
-      ],
-      redistributions: [
-        { from_person: 'Priya Nair', to_person: 'Jordan Lee', amount: 0.28, project: 'Acme Corp — Phase 2' },
-      ],
-    }),
-  )
+export interface MeetingPrepResponse {
+  meeting_id: string
+  meeting_title: string
+  meeting_date: string | null
+  meeting_time: string
+  attendees: string[]
+  resolved_attendees: {
+    person_name: string
+    relationship: string | null
+    evidence_source: string
+    evidence_path: string
+    warnings: string[]
+  }[]
+  matched_rule_id: string
+  matched_rule_name: string
+  meeting_type: string
+  prep_required: boolean
+  why_this_rule_matched: string
+  sections: Record<string, unknown[]>
+  sources_consulted: string[]
+  sources_selected: string[]
+  sources_excluded: string[]
+  missing_context_warnings: string[]
+  llm_enriched: boolean
+  generated_at: string
 }
-
-export function postFeedback(itemId: string, rating: string, reason?: string): Promise<ApiResult<{ ok: boolean; event_id: string }>> {
-  return withMockFallback(
-    () =>
-      requestJson<{ ok: boolean; event_id: string }>('/api/feedback', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item_id: itemId, rating, reason }),
-      }),
-    () => ({ ok: true, event_id: 'mock-event' }),
-  )
-}
-
-export function runSafeRefresh(): Promise<ApiResult<{ ok: boolean; message: string }>> {
-  return withMockFallback(
-    () =>
-      requestJson<{ ok: boolean; message: string }>('/api/refresh', {
-        method: 'POST',
-      }),
-    () => ({ ok: true, message: 'Local refresh completed successfully.' }),
-  )
-}
-
-// --- Meetings & Calendar Sync ------------------------------------------------
 
 export function getMeetings(date: string): Promise<ApiResult<MeetingsResponse>> {
   return withMockFallback(
     () => requestJson<MeetingsResponse>(`/api/meetings?date=${encodeURIComponent(date)}`),
-    () => ({
-      date,
-      meetings: [],
-      warnings: [],
-      sync_info: { last_synced: null, source: 'local', stale: true },
-    }),
+    () => ({ date, meetings: [], warnings: [] }),
   )
 }
 
@@ -565,31 +446,207 @@ export function syncCalendar(date: string): Promise<ApiResult<CalendarSyncRespon
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ date }),
       }),
-    () => ({
-      ok: true,
-      date,
-      meetings: [],
-      retrieved_at: new Date().toISOString(),
-      source: 'google_calendar_gemini',
-      warnings: [],
-      errors: [],
-    }),
+    () => ({ ok: true, date, events_found: 0, events_added: 0, errors: [] }),
   )
 }
 
-export function getMeetingPrep(meetingId: string): Promise<ApiResult<MeetingPrepResponse>> {
+export function getMeetingPrep(meetingId: string): Promise<ApiResult<MeetingPrepResponse | null>> {
   return withMockFallback(
     () => requestJson<MeetingPrepResponse>(`/api/meetings/${encodeURIComponent(meetingId)}/prep`),
-    () => mockMeetingPrep,
+    () => null,
   )
 }
 
-export function regeneratePrep(meetingId: string): Promise<ApiResult<MeetingPrepResponse>> {
+export function regeneratePrep(meetingId: string): Promise<ApiResult<MeetingPrepResponse | null>> {
   return withMockFallback(
     () =>
       requestJson<MeetingPrepResponse>(`/api/meetings/${encodeURIComponent(meetingId)}/prep`, {
         method: 'POST',
       }),
-    () => ({ ...mockMeetingPrep, generated_at: new Date().toISOString() }),
+    () => null,
+  )
+}
+
+// --- Deals -------------------------------------------------------------------
+
+export interface DealEntry {
+  account: string
+  deal_name: string
+  deal_id: string
+  stage: string
+  close_date: string | null
+  days_until_close: number | null
+  technical_owner: string
+  ae_name: string
+  loe_status: string
+  sow_status: string
+  staffing_feasibility: string
+  blockers: string
+  next_action: string
+  open_signal_count: number
+  highest_severity: string | null
+  attention_level: string
+  attention_reasons: string[]
+  freshness: string
+  freshness_explanation: string
+  forecast_category?: string
+  probability?: number | null
+  services_amount?: number | null
+  sow_title?: string
+  sow_url?: string
+}
+
+export interface DealsResponse {
+  deals: DealEntry[]
+  total: number
+  attention_count: number
+  counts_by_severity: Record<string, number>
+  freshness: string
+  last_updated: string | null
+  warnings: string[]
+}
+
+export function getDeals(params?: {
+  search?: string
+  attention_only?: boolean
+  stage?: string
+  owner?: string
+  limit?: number
+}): Promise<ApiResult<DealsResponse>> {
+  const query = new URLSearchParams()
+  if (params?.search) query.set('search', params.search)
+  if (params?.attention_only) query.set('attention_only', 'true')
+  if (params?.stage) query.set('stage', params.stage)
+  if (params?.owner) query.set('owner', params.owner)
+  if (params?.limit) query.set('limit', String(params.limit))
+  const qs = query.toString()
+  return withMockFallback(
+    () => requestJson<DealsResponse>(`/api/deals${qs ? '?' + qs : ''}`),
+    () => ({ deals: [], total: 0, attention_count: 0, counts_by_severity: {}, freshness: 'missing', last_updated: null, warnings: ['Backend unavailable'] }),
+  )
+}
+
+// --- Forecast ----------------------------------------------------------------
+
+export interface ForecastPersonEntry {
+  person_name: string
+  planned_hours: number
+  target_hours: number | null
+  allocation_pct: number
+  projects: string[]
+  warning: string | null
+  classification: string
+  roll_off: { week: string; reason: string } | null
+}
+
+export interface ForecastResponse {
+  selected_week: string | null
+  selection_explanation: string
+  available_weeks: string[]
+  people: ForecastPersonEntry[]
+  detail_rows: unknown[]
+  row_count: number
+  person_count: number
+  exception_count: number
+  status_counts: Record<string, number>
+  freshness: string
+  last_ingestion: string | null
+  warnings: string[]
+}
+
+export function getForecast(params?: {
+  week_start?: string
+  person?: string
+  client?: string
+  exceptions_only?: boolean
+  limit?: number
+}): Promise<ApiResult<ForecastResponse>> {
+  const query = new URLSearchParams()
+  if (params?.week_start) query.set('week_start', params.week_start)
+  if (params?.person) query.set('person', params.person)
+  if (params?.client) query.set('client', params.client)
+  if (params?.exceptions_only) query.set('exceptions_only', 'true')
+  if (params?.limit) query.set('limit', String(params.limit))
+  const qs = query.toString()
+  return withMockFallback(
+    () => requestJson<ForecastResponse>(`/api/forecast${qs ? '?' + qs : ''}`),
+    () => ({ selected_week: null, selection_explanation: 'Unavailable', available_weeks: [], people: [], detail_rows: [], row_count: 0, person_count: 0, exception_count: 0, status_counts: {}, freshness: 'missing', last_ingestion: null, warnings: ['Backend unavailable'] }),
+  )
+}
+
+// --- Workspace Context -------------------------------------------------------
+
+export interface WorkspaceContextItem {
+  source_type: string
+  source_path: string
+  source_date: string | null
+  entity_type: string
+  entity_name: string
+  link_method: string
+  link_evidence: string
+  confidence: string
+  title: string
+  excerpt: string
+  is_attention: boolean
+  is_action: boolean
+  why_this_context: string
+}
+
+export interface WorkspaceContextResponse {
+  selected_date: string
+  lookback_start: string
+  latest_actual_source_date: string | null
+  context_items: WorkspaceContextItem[]
+  linked_count: number
+  unlinked_count: number
+  attention_count: number
+  freshness: string
+  warnings: string[]
+}
+
+export function getWorkspaceContext(params?: {
+  date?: string
+  lookback_days?: number
+  entity_type?: string
+  entity?: string
+  attention_only?: boolean
+  limit?: number
+}): Promise<ApiResult<WorkspaceContextResponse>> {
+  const query = new URLSearchParams()
+  if (params?.date) query.set('date', params.date)
+  if (params?.lookback_days !== undefined) query.set('lookback_days', String(params.lookback_days))
+  if (params?.entity_type) query.set('entity_type', params.entity_type)
+  if (params?.entity) query.set('entity', params.entity)
+  if (params?.attention_only) query.set('attention_only', 'true')
+  if (params?.limit) query.set('limit', String(params.limit))
+  const qs = query.toString()
+  return withMockFallback(
+    () => requestJson<WorkspaceContextResponse>(`/api/workspace-context${qs ? '?' + qs : ''}`),
+    () => ({ selected_date: '', lookback_start: '', latest_actual_source_date: null, context_items: [], linked_count: 0, unlinked_count: 0, attention_count: 0, freshness: 'missing', warnings: ['Backend unavailable'] }),
+  )
+}
+
+// --- Refresh -----------------------------------------------------------------
+
+export interface RefreshResult {
+  ok: boolean
+  date: string
+  sources: Record<string, { status: string; source: string; ingested?: number; skipped?: number; failed?: number; warnings?: string[]; error?: string; reason?: string }>
+  extraction: { ok: boolean; results: Record<string, unknown> } | null
+}
+
+export function postRefresh(body?: {
+  date?: string
+  sources?: string[]
+  run_extraction?: boolean
+}): Promise<ApiResult<RefreshResult>> {
+  return withMockFallback(
+    () =>
+      requestJson<RefreshResult>('/api/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      }),
+    () => ({ ok: false, date: '', sources: {}, extraction: null }),
   )
 }

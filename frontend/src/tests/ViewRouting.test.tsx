@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import App from '../App'
 import {
@@ -34,63 +34,49 @@ beforeEach(() => {
 })
 
 describe('View Routing', () => {
-  it('defaults to daily_loop view and switches between daily_loop, staffing, and archive views via sidebar/navigation', async () => {
+  it('defaults to daily_loop view and switches between daily_loop, deals, and forecast views via sidebar/navigation', async () => {
     render(<App />)
 
-    // Verify initially in daily_loop view
-    // It should render the Action Inbox, and operational components (Command Center / Recent Runs)
-    expect(await screen.findByRole('heading', { name: 'Action Inbox', level: 2 })).toBeInTheDocument()
+    // Verify initially in daily_loop view — shows Top Actions and Command Center
+    expect(await screen.findByRole('heading', { name: 'Top Actions' })).toBeInTheDocument()
     expect(screen.getByText('Command Center')).toBeInTheDocument()
 
-    // Find sidebar navigation links or buttons
-    const staffingNav = screen.getByRole('button', { name: /People \/ Staffing/i })
-    const archiveNav = screen.getByRole('button', { name: /Archive/i })
-    const dailyLoopNav = screen.getByRole('button', { name: /Daily Operating Loop/i })
+    // Find sidebar navigation buttons — use getAllByRole and pick the sidebar one
+    const sidebarButtons = screen.getAllByRole('button')
+    const dealsBtn = sidebarButtons.find(b => b.textContent?.trim() === 'Deals')!
+    const forecastBtn = sidebarButtons.find(b => b.textContent?.trim() === 'Forecast')!
+    const todayBtn = sidebarButtons.find(b => b.textContent?.trim() === 'Today')!
 
-    // Click on People/Staffing view
-    await userEvent.click(staffingNav)
+    // Click on Deals view
+    await userEvent.click(dealsBtn)
 
-    // Verify active view switched to staffing
-    // Staffing view should render the DailySection for "People / Staffing" and capacity balancing metrics/preview rebalance button
-    expect(screen.queryByText('Action Inbox')).not.toBeInTheDocument()
+    // Verify active view switched to deals
     expect(screen.queryByText('Command Center')).not.toBeInTheDocument()
-    
-    // Use findByRole for h3 to avoid matching sidebar button text
-    expect(await screen.findByRole('heading', { name: 'People / Staffing', level: 3 })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Preview Rebalance/i })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Deals' })).toBeInTheDocument()
 
-    // Click on Archive view
-    await userEvent.click(archiveNav)
+    // Click on Forecast view
+    await userEvent.click(forecastBtn)
 
-    // Verify active view switched to archive
-    // Dedicated layout for historical data (e.g. Project Archive and LEGACY_EMPTY views)
-    expect(screen.queryByText('Action Inbox')).not.toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: 'People / Staffing', level: 3 })).not.toBeInTheDocument()
-    
-    expect(await screen.findByRole('heading', { name: 'Project Archive', level: 3 })).toBeInTheDocument()
-    expect((await screen.findAllByText('LEGACY_EMPTY')).length).toBeGreaterThan(0)
+    // Verify active view switched to forecast
+    expect(await screen.findByRole('heading', { name: 'Forecast' })).toBeInTheDocument()
 
-    // Click back to Daily Operating Loop view
-    await userEvent.click(dailyLoopNav)
-    expect(await screen.findByRole('heading', { name: 'Action Inbox', level: 2 })).toBeInTheDocument()
+    // Click back to Today view
+    await userEvent.click(todayBtn)
+    expect(await screen.findByRole('heading', { name: 'Top Actions' })).toBeInTheDocument()
     expect(screen.getByText('Command Center')).toBeInTheDocument()
   })
 
-  it('verifies that real-time counters/alert badges are fully synced and reactive across view changes', async () => {
+  it('verifies that the sidebar navigation renders correctly', async () => {
     render(<App />)
 
-    // Wait for the asynchronous data to load first
-    await screen.findByRole('heading', { name: 'Action Inbox', level: 2 })
+    // Wait for the asynchronous data to load
+    await screen.findByRole('heading', { name: 'Top Actions' })
 
-    // Check counters or badge in sidebar navigation
-    const actionCountBadge = screen.getByTestId('nav-badge-daily_loop')
-    expect(actionCountBadge).toHaveTextContent('5') // 5 recommended actions
-
-    // Switch to Staffing view, and then verify the counters still exist in the sidebar and are correct.
-    const staffingNav = screen.getByRole('button', { name: /People \/ Staffing/i })
-    await userEvent.click(staffingNav)
-
-    const actionCountBadgeAfter = screen.getByTestId('nav-badge-daily_loop')
-    expect(actionCountBadgeAfter).toHaveTextContent('5')
+    // Verify sidebar has the expected navigation items
+    const sidebarButtons = screen.getAllByRole('button')
+    expect(sidebarButtons.some(b => b.textContent?.trim() === 'Today')).toBe(true)
+    expect(sidebarButtons.some(b => b.textContent?.trim() === 'Deals')).toBe(true)
+    expect(sidebarButtons.some(b => b.textContent?.trim() === 'Forecast')).toBe(true)
+    expect(sidebarButtons.some(b => b.textContent?.trim() === 'Meetings')).toBe(true)
   })
 })

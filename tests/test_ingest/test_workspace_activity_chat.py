@@ -104,9 +104,12 @@ class TestActivityPromptIncludesChatUrl:
         prompt = ACTIVITY_PROMPT_TEMPLATE.format(
             target_date="2026-06-16",
             lookback_days=settings.workspace_activity_lookback_days,
-            chat_url=settings.workspace_activity_chat_url
+            chat_url=settings.workspace_activity_chat_url,
+            chat_space_id="TEST123",
         )
         assert "https://chat.google.com/u/0/app/chat/TEST123" in prompt
+        assert "mcp_google-workspace_chat" in prompt
+        assert "spaces/TEST123" in prompt
         assert "read-only mode" in prompt.lower()
         assert "Do not send, edit, delete, or modify" in prompt
 
@@ -324,4 +327,5 @@ class TestBroadPromptNoLongerUsed:
         # The old prompt had "Summarize recent Google Workspace activity relevant to management"
         # The new prompt should NOT have this exact phrasing as the primary instruction.
         assert "Summarize recent Google Workspace activity relevant to management" not in ACTIVITY_PROMPT_TEMPLATE
-        assert "Open this Google Chat space/app URL:" in ACTIVITY_PROMPT_TEMPLATE
+        assert "mcp_google-workspace_chat" in ACTIVITY_PROMPT_TEMPLATE
+        assert "spaces/{chat_space_id}" in ACTIVITY_PROMPT_TEMPLATE

@@ -5405,6 +5405,7 @@ def workspace_fetch_activity(
     output_dir: Optional[str] = typer.Option(None, "--output-dir"),
     lookback: Optional[int] = typer.Option(None, "--lookback", help="Override lookback days."),
     chat_url: Optional[str] = typer.Option(None, "--chat-url", help="Override the configured Google Chat URL."),
+    chat_space_id: Optional[str] = typer.Option(None, "--chat-space-id", help="Chat space resource ID (e.g. AAQA61WgdSs)."),
 ) -> None:
     """Retrieve workspace activity summary from configured Google Chat space."""
     from manager_os.ingest.workspace_gemini import retrieve_activity
@@ -5412,7 +5413,7 @@ def workspace_fetch_activity(
     run_date = date.fromisoformat(target_date) if target_date else date.today()
     _do_workspace_fetch(
         "activity", retrieve_activity, run_date, dry_run, print_prompt, no_yolo, timeout, output_dir,
-        lookback_days=lookback, chat_url=chat_url,
+        lookback_days=lookback, chat_url=chat_url, chat_space_id=chat_space_id,
     )
 
 

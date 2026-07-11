@@ -56,7 +56,8 @@ FORECAST_QUERY = _env(
 )
 CALENDAR_LOOKAHEAD_DAYS = int(_env("MANAGER_OS_CALENDAR_LOOKAHEAD_DAYS", "2"))
 CALENDAR_LOOKBACK_DAYS = int(_env("MANAGER_OS_CALENDAR_LOOKBACK_DAYS", "1"))
-ACTIVITY_LOOKBACK_DAYS = int(_env("MANAGER_OS_WORKSPACE_ACTIVITY_LOOKBACK_DAYS", "1"))
+ACTIVITY_LOOKBACK_DAYS = int(_env("MANAGER_OS_WORKSPACE_ACTIVITY_LOOKBACK_DAYS", "60"))
+ACTIVITY_CHAT_SPACE_ID = _env("MANAGER_OS_CHAT_SPACE_ID", "AAQA61WgdSs")
 
 
 # ------------------------------------------------------------------
@@ -315,10 +316,10 @@ ACTIVITY_PROMPT_TEMPLATE = """\
 You are operating in read-only mode.
 Do not send, edit, delete, or modify any Chat messages or Google Workspace data.
 
-Open this Google Chat space/app URL:
-{chat_url}
+Use the `mcp_google-workspace_chat` tool to list messages for the Chat space resource name `spaces/{chat_space_id}`.
 
-Retrieve the daily activity summary and action items for {target_date} (or the most recent within {lookback_days} day(s) if not available).
+List messages for {target_date} (or the most recent within {lookback_days} day(s) if no messages exist for that exact date).
+Summarize the daily activity: who posted, what was discussed, any action items or decisions made.
 
 Return ONLY JSON:
 {{"ok":true,"source":"google_chat_activity_summary","source_url":"{chat_url}","retrieved_at":"ISO8601","summary_date":"YYYY-MM-DD","summary":"str","items":[{{"type":"action_item|mention|doc_update|other","title":"str","description":"str","source_url":"str","requires_attention":true,"assigned_to":"str","due_date":"YYYY-MM-DD|null","entity_type":"str","entity_name":"str","confidence":1.0}}],"action_items":[]}}
@@ -335,11 +336,13 @@ def retrieve_activity(
     output_dir: str | None = None,
     lookback_days: int | None = None,
     chat_url: str | None = None,
+    chat_space_id: str | None = None,
 ) -> RetrievalResult:
     """Retrieve workspace activity summary from configured Google Chat space via Gemini CLI."""
     from manager_os.config import get_settings
     settings = get_settings()
     url = chat_url or settings.workspace_activity_chat_url
+    sid = chat_space_id or settings.workspace_activity_chat_space_id
     days = lookback_days or settings.workspace_activity_lookback_days
 
     if not url:
@@ -352,6 +355,7 @@ def retrieve_activity(
         target_date=target_date.isoformat(),
         lookback_days=days,
         chat_url=url,
+        chat_space_id=sid,
     )
 
     result = RetrievalResult(dry_run=dry_run)

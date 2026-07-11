@@ -3,13 +3,14 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import { Sidebar } from '../components/Sidebar'
 
 describe('Sidebar Component', () => {
-  it('renders with three views: Daily Operating Loop, People / Staffing, and Archive', () => {
+  it('renders with primary views: Today, Deals, Forecast, and Meetings', () => {
     const handleViewChange = vi.fn()
     render(<Sidebar currentView="daily_loop" onViewChange={handleViewChange} />)
     
-    expect(screen.getByText('Daily Operating Loop')).toBeInTheDocument()
-    expect(screen.getByText('People / Staffing')).toBeInTheDocument()
-    expect(screen.getByText('Archive')).toBeInTheDocument()
+    expect(screen.getByText('Today')).toBeInTheDocument()
+    expect(screen.getByText('Deals')).toBeInTheDocument()
+    expect(screen.getByText('Forecast')).toBeInTheDocument()
+    expect(screen.getByText('Meetings')).toBeInTheDocument()
   })
 
   it('supports collapsible state and toggles correctly', () => {
@@ -39,9 +40,9 @@ describe('Sidebar Component', () => {
     const handleViewChange = vi.fn()
     render(<Sidebar currentView="daily_loop" onViewChange={handleViewChange} />)
 
-    const staffingItem = screen.getByText('People / Staffing')
-    fireEvent.click(staffingItem)
+    const dealsItem = screen.getByText('Deals')
+    fireEvent.click(dealsItem)
 
-    expect(handleViewChange).toHaveBeenCalledWith('staffing')
+    expect(handleViewChange).toHaveBeenCalledWith('deals')
   })
 })

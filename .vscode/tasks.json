@@ -1,0 +1,104 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Manager OS: 01 Backend Compile",
+      "type": "shell",
+      "command": "python -m compileall src/manager_os",
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: 02 Backend Targeted Tests",
+      "type": "shell",
+      "command": "python -m pytest tests/test_api_deals.py tests/test_api_forecast.py tests/test_api_workspace_context.py tests/test_api_meetings.py tests/test_api_health.py tests/test_api_status.py -q -x --tb=short",
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: 03 Backend Full Tests",
+      "type": "shell",
+      "command": "python -m pytest tests/ -q --tb=short",
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: 04 Backend Ruff",
+      "type": "shell",
+      "command": "python -m ruff check src/",
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: 05 Backend Pyright",
+      "type": "shell",
+      "command": "python -m pyright src/ 2>&1 || true",
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: 06 Frontend Lint",
+      "type": "shell",
+      "command": "npm run lint",
+      "options": { "cwd": "${workspaceFolder}/frontend" },
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: 07 Frontend Tests",
+      "type": "shell",
+      "command": "npm run test",
+      "options": { "cwd": "${workspaceFolder}/frontend" },
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: 08 Frontend Build",
+      "type": "shell",
+      "command": "npm run build",
+      "options": { "cwd": "${workspaceFolder}/frontend" },
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: 09 Full Validation",
+      "dependsOn": [
+        "Manager OS: 01 Backend Compile",
+        "Manager OS: 03 Backend Full Tests",
+        "Manager OS: 04 Backend Ruff",
+        "Manager OS: 05 Backend Pyright",
+        "Manager OS: 06 Frontend Lint",
+        "Manager OS: 07 Frontend Tests",
+        "Manager OS: 08 Frontend Build"
+      ],
+      "dependsOrder": "sequence",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Manager OS: 10 Start API",
+      "type": "shell",
+      "command": "python -m uvicorn manager_os.api.app:app --host 127.0.0.1 --port 8000 --reload",
+      "group": "none",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: 11 Start React",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": { "cwd": "${workspaceFolder}/frontend" },
+      "group": "none",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    }
+  ]
+}

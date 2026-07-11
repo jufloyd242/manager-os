@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     workspace_activity_lookback_days: int = 1
     workspace_activity_source: str = "google_chat_space"
     workspace_activity_chat_url: str = "https://chat.google.com/u/0/app/chat/AAQA61WgdSs"
+    workspace_activity_chat_space_id: str = "AAQA61WgdSs"
 
     # Forecast source configuration
     forecast_source: str = "google_sheet_gemini"

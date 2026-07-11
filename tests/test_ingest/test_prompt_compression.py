@@ -154,7 +154,7 @@ def test_activity_compressed_json_parses_and_prompt_budget(mock_run):
     )
 
     # Required for tests/test_ingest/test_workspace_activity_chat.py to keep passing.
-    assert "Open this Google Chat space/app URL:" in dry_result.json_text
+    assert "mcp_google-workspace_chat" in dry_result.json_text
     assert "Do not send, edit, delete, or modify" in dry_result.json_text
     assert "read-only mode" in dry_result.json_text.lower()
 

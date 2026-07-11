@@ -32,9 +32,9 @@ beforeEach(() => {
 })
 
 describe('App', () => {
-  it('renders the Command Tower heading', () => {
+  it('renders the System Status heading', () => {
     render(<App />)
-    expect(screen.getByRole('heading', { name: 'Command Tower' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'System Status' })).toBeInTheDocument()
   })
 
   it('renders at least one system status card', async () => {
