@@ -572,6 +572,45 @@ export function getForecast(params?: {
   )
 }
 
+// --- People ------------------------------------------------------------------
+
+export interface PeopleResponse {
+  people: Array<{
+    id: string
+    name: string
+    role: string
+    current_client: string | null
+    allocation_pct: number | null
+    next_availability_date: string | null
+    last_1on1_date: string | null
+    morale_signal: string | null
+    growth_topic: string | null
+    blockers: string | null
+  }>
+  warnings: string[]
+}
+
+export function getPeople(): Promise<ApiResult<PeopleResponse>> {
+  return withMockFallback(
+    () => requestJson<PeopleResponse>('/api/people'),
+    () => ({ people: [], warnings: ['Backend unavailable'] }),
+  )
+}
+
+// --- Projects ----------------------------------------------------------------
+
+export interface ProjectsResponse {
+  projects: Array<Record<string, unknown>>
+  warnings: string[]
+}
+
+export function getProjects(): Promise<ApiResult<ProjectsResponse>> {
+  return withMockFallback(
+    () => requestJson<ProjectsResponse>('/api/projects'),
+    () => ({ projects: [], warnings: ['Backend unavailable'] }),
+  )
+}
+
 // --- Workspace Context -------------------------------------------------------
 
 export interface WorkspaceContextItem {

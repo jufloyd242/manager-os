@@ -29,34 +29,53 @@ beforeEach(() => {
   vi.mocked(getDaily).mockReset().mockResolvedValue({ data: mockDailyOperatingLoop, isMock: false })
   vi.mocked(getCommands).mockReset().mockResolvedValue({ data: mockCommandRegistry, isMock: false })
   vi.mocked(getRuns).mockReset().mockResolvedValue({ data: mockRecentRuns, isMock: false })
+  localStorage.clear()
+  window.location.hash = ''
 })
 
 describe('App', () => {
-  it('renders the System Status heading', () => {
+  it('renders Today page by default', async () => {
     render(<App />)
-    expect(screen.getByRole('heading', { name: 'System Status' })).toBeInTheDocument()
+    expect(await screen.findByText(/Here's what needs your attention/i)).toBeInTheDocument()
   })
 
-  it('renders at least one system status card', async () => {
+  it('renders sidebar with all groups', async () => {
     render(<App />)
-    expect(await screen.findByText(mockSystemStatus[0].label)).toBeInTheDocument()
+    await screen.findByText(/Here's what needs your attention/i)
+    expect(screen.getByText('Work')).toBeInTheDocument()
+    expect(screen.getByText('Context')).toBeInTheDocument()
+    expect(screen.getByText('Operations')).toBeInTheDocument()
   })
 
-  it('renders at least one recommended action title from mock data', async () => {
+  it('does not render Command Center on Today', async () => {
     render(<App />)
-    expect(
-      await screen.findByText(mockDailyOperatingLoop.recommended_actions[0].title),
-    ).toBeInTheDocument()
+    await screen.findByText(/Here's what needs your attention/i)
+    expect(screen.queryByText('Command Center')).not.toBeInTheDocument()
   })
 
-  it('shows backend-unavailable state when the API is unreachable', async () => {
+  it('does not render System Status heading on Today', async () => {
+    render(<App />)
+    await screen.findByText(/Here's what needs your attention/i)
+    expect(screen.queryByText('System Status')).not.toBeInTheDocument()
+  })
+
+  it('does not render Token Budget on Today', async () => {
+    render(<App />)
+    await screen.findByText(/Here's what needs your attention/i)
+    expect(screen.queryByText('Token Budget')).not.toBeInTheDocument()
+  })
+
+  it('does not render Run History on Today', async () => {
+    render(<App />)
+    await screen.findByText(/Here's what needs your attention/i)
+    expect(screen.queryByText('Run History')).not.toBeInTheDocument()
+  })
+
+  it('shows error state when API is unreachable', async () => {
     vi.mocked(getStatus).mockRejectedValueOnce(new Error('network error'))
     vi.mocked(getDaily).mockRejectedValueOnce(new Error('network error'))
 
     render(<App />)
-
-    expect(await screen.findByText(/Backend is not available/i)).toBeInTheDocument()
+    expect(await screen.findByText(/Failed to load/i)).toBeInTheDocument()
   })
 })
-
-
