@@ -8,6 +8,7 @@ import { RecentRuns } from './components/RecentRuns'
 import { TokenBudgetPanel } from './components/TokenBudgetPanel'
 import { getStatus, getDaily, runSafeRefresh } from './api/client'
 import { RecommendedActionCard } from './components/RecommendedActionCard'
+import { MeetingsView } from './components/MeetingsView'
 import type { StatusCardData, DailyOperatingLoop, RunRecord, TokenEstimate } from './api/client'
 
 function App() {
@@ -346,34 +347,7 @@ function App() {
 
       {/* MEETINGS VIEW */}
       {activeView === 'meetings' && (
-        <div className="space-y-6">
-          <div>
-            <h2 className="text-xl font-bold tracking-tight text-slate-900">Meetings Calendar &amp; Preparation</h2>
-            <p className="text-xs text-slate-500 mt-1">Review upcoming meetings requiring context synthesis or direct actions</p>
-          </div>
-          {loop?.meetings && loop.meetings.length > 0 ? (
-            <div className="bg-white rounded-2xl border border-slate-200 divide-y divide-slate-100 shadow-sm overflow-hidden">
-              {loop.meetings.map((m: any) => (
-                <div key={m.id || m.title} className="p-4 flex items-center justify-between hover:bg-slate-50/50 transition-colors">
-                  <div>
-                    <h4 className="text-sm font-bold text-slate-800">{m.title}</h4>
-                    <p className="text-xs text-slate-500 mt-1">Meeting Date: {m.meeting_date || loop.date}</p>
-                    <p className="text-xs text-rose-500 font-semibold mt-1">Required Action: {m.reason}</p>
-                  </div>
-                  {m.start_time && (
-                    <span className="text-xs font-semibold bg-slate-100 text-slate-600 px-2.5 py-1 rounded-md">
-                      {m.start_time}
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="rounded-xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-400 shadow-sm">
-              No meetings require immediate preparation.
-            </div>
-          )}
-        </div>
+        <MeetingsView />
       )}
 
       {/* PROJECTS VIEW */}

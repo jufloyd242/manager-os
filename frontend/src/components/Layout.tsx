@@ -27,11 +27,13 @@ export function Layout({ children, currentView, onViewChange, badges }: LayoutPr
             <h1 className="text-xl font-extrabold tracking-tight text-slate-900">
               {currentView === 'daily_loop' && 'Command Tower'}
               {currentView === 'staffing' && 'Staffing Center'}
+              {currentView === 'meetings' && 'Meetings Calendar'}
               {currentView === 'archive' && 'Project Archive'}
             </h1>
             <p className="text-xs font-medium text-slate-500 mt-0.5">
               {currentView === 'daily_loop' && 'Manager OS — daily operating loop & command console'}
               {currentView === 'staffing' && 'FTE allocation, team health, and capacity forecasting'}
+              {currentView === 'meetings' && 'Arbitrary-date calendar, sync, and deterministic preparation'}
               {currentView === 'archive' && 'Historical engagement records, deliverables, and summaries'}
             </p>
           </div>

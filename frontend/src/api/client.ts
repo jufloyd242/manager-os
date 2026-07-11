@@ -19,6 +19,7 @@ import {
   mockValidateCommand,
   mockRunCommand,
   mockRunLogs,
+  mockMeetingPrep,
 } from './mockData'
 
 export type RiskLevel =
@@ -245,6 +246,78 @@ export interface ApiResult<T> {
   isMock: boolean
 }
 
+// ------------------------------------------------------------------
+// Meeting types
+// ------------------------------------------------------------------
+
+export interface MeetingEvent {
+  id: string
+  meeting_date: string
+  start_time: string
+  title: string
+  attendees: string[]
+  location?: string
+  source: string
+  external_id: string
+  linked_entities?: Array<{entity_type: string; entity_name: string}>
+}
+
+export interface MeetingsResponse {
+  date: string
+  meetings: MeetingEvent[]
+  warnings: string[]
+  sync_info?: {
+    last_synced: string | null
+    source: string
+    stale: boolean
+  }
+}
+
+export interface CalendarSyncResponse {
+  ok: boolean
+  date: string
+  meetings: MeetingEvent[]
+  retrieved_at: string
+  source: string
+  warnings: string[]
+  errors: string[]
+}
+
+export interface PrepSource {
+  source_type: string
+  title: string
+  source_path: string | null
+  source_date: string | null
+  reason_selected: string
+  relevance_score: number
+}
+
+export interface MeetingPrepResponse {
+  meeting_id: string
+  meeting_title: string
+  meeting_date: string
+  meeting_time: string
+  attendees: string[]
+  resolved_attendees: Array<{
+    name: string
+    relationship: string
+    evidence_source: string
+  }>
+  matched_rule_id: string
+  matched_rule_name: string
+  rule_match_explanation: string
+  meeting_type: string
+  prep_required: boolean
+  sections: Record<string, unknown[]>
+  sources_consulted: PrepSource[]
+  sources_selected: PrepSource[]
+  sources_excluded: string[]
+  missing_context_warnings: string[]
+  project_doc_warnings_suppressed: boolean
+  generated_at: string
+  llm_enriched: boolean
+}
+
 const API_BASE_URL: string =
   (import.meta.env.VITE_MANAGER_OS_API_BASE_URL as string | undefined) || 'http://127.0.0.1:8000'
 
@@ -467,5 +540,56 @@ export function runSafeRefresh(): Promise<ApiResult<{ ok: boolean; message: stri
         method: 'POST',
       }),
     () => ({ ok: true, message: 'Local refresh completed successfully.' }),
+  )
+}
+
+// --- Meetings & Calendar Sync ------------------------------------------------
+
+export function getMeetings(date: string): Promise<ApiResult<MeetingsResponse>> {
+  return withMockFallback(
+    () => requestJson<MeetingsResponse>(`/api/meetings?date=${encodeURIComponent(date)}`),
+    () => ({
+      date,
+      meetings: [],
+      warnings: [],
+      sync_info: { last_synced: null, source: 'local', stale: true },
+    }),
+  )
+}
+
+export function syncCalendar(date: string): Promise<ApiResult<CalendarSyncResponse>> {
+  return withMockFallback(
+    () =>
+      requestJson<CalendarSyncResponse>('/api/meetings/sync-calendar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date }),
+      }),
+    () => ({
+      ok: true,
+      date,
+      meetings: [],
+      retrieved_at: new Date().toISOString(),
+      source: 'google_calendar_gemini',
+      warnings: [],
+      errors: [],
+    }),
+  )
+}
+
+export function getMeetingPrep(meetingId: string): Promise<ApiResult<MeetingPrepResponse>> {
+  return withMockFallback(
+    () => requestJson<MeetingPrepResponse>(`/api/meetings/${encodeURIComponent(meetingId)}/prep`),
+    () => mockMeetingPrep,
+  )
+}
+
+export function regeneratePrep(meetingId: string): Promise<ApiResult<MeetingPrepResponse>> {
+  return withMockFallback(
+    () =>
+      requestJson<MeetingPrepResponse>(`/api/meetings/${encodeURIComponent(meetingId)}/prep`, {
+        method: 'POST',
+      }),
+    () => ({ ...mockMeetingPrep, generated_at: new Date().toISOString() }),
   )
 }

@@ -9,6 +9,7 @@ import type {
   RecommendedAction,
   ActionGroup,
   ActionSummary,
+  MeetingPrepResponse,
 } from './client'
 
 export const mockSystemStatus: StatusCardData[] = [
@@ -554,5 +555,91 @@ export function mockRunLogs(runId: string): Promise<RunLogs> {
     },
     100,
   )
+}
+
+export const mockMeetingPrep: MeetingPrepResponse = {
+  meeting_id: 'mock-meeting-1',
+  meeting_title: '1:1 with Alice Chen',
+  meeting_date: '2026-07-10',
+  meeting_time: '10:00',
+  attendees: ['Alice Chen'],
+  resolved_attendees: [{ name: 'Alice Chen', relationship: 'direct_report', evidence_source: 'obsidian_frontmatter' }],
+  matched_rule_id: 'direct_report_1on1',
+  matched_rule_name: 'Direct Report 1:1',
+  rule_match_explanation: 'attendee relationship: Alice Chen (direct_report); title matches: 1:1',
+  meeting_type: 'direct_report_1on1',
+  prep_required: true,
+  sections: {
+    changes: [{ change: 'No recent changes detected in local data.' }],
+    risks: [{ source: 'no data', detail: 'No significant risks found in local data.' }],
+    decisions: [{ source: 'no data', detail: 'No open decisions found.' }],
+    wins: [{ source: 'no data', detail: 'No explicit wins recorded. Consider asking.' }],
+    asks: [{ source: 'no data', detail: 'No outstanding asks found.' }],
+    talking_points: [{ point: 'Review key items from prep sections above.' }],
+    questions: [
+      { question: 'What is the current status of the risk items we identified last time?' },
+      { question: "What's going well and what needs attention?" },
+      { question: 'Are there any upcoming risks I should be aware of?' },
+      { question: 'What do you need from me before our next check-in?' },
+    ],
+  },
+  sources_consulted: [],
+  sources_selected: [],
+  sources_excluded: [],
+  missing_context_warnings: ['No relevant context data found in local database for this meeting.'],
+  project_doc_warnings_suppressed: true,
+  generated_at: '2026-07-10T12:00:00Z',
+  llm_enriched: false,
+}
+
+export const mockManagerStandupPrep: MeetingPrepResponse = {
+  meeting_id: 'mock-meeting-2',
+  meeting_title: 'Staff meeting with Chris',
+  meeting_date: '2026-07-10',
+  meeting_time: '14:00',
+  attendees: ['Chris Presley'],
+  resolved_attendees: [{ name: 'Chris Presley', relationship: 'manager', evidence_source: 'obsidian_frontmatter' }],
+  matched_rule_id: 'manager_standup',
+  matched_rule_name: 'Manager Standup',
+  rule_match_explanation: 'attendee relationship: Chris Presley (manager); title matches: staff',
+  meeting_type: 'manager_standup',
+  prep_required: true,
+  sections: {
+    changes: [{ change: 'Team staffing updated for next sprint.' }],
+    risks: [{ source: 'HIGH: risk', detail: 'open high risk signal for team' }],
+    decisions_needed: [{ source: 'no data', detail: 'No open decisions found.' }],
+    wins: [{ source: 'no data', detail: 'No explicit wins recorded. Consider asking.' }],
+    asks: [{ source: 'no data', detail: 'No outstanding asks found.' }],
+    talking_points: [{ point: 'Review key items from prep sections above.' }],
+  },
+  sources_consulted: [],
+  sources_selected: [],
+  sources_excluded: [],
+  missing_context_warnings: [],
+  project_doc_warnings_suppressed: true,
+  generated_at: '2026-07-10T12:00:00Z',
+  llm_enriched: false,
+}
+
+export const mockNoPrepEvent: MeetingPrepResponse = {
+  meeting_id: 'mock-meeting-3',
+  meeting_title: 'Focus time',
+  meeting_date: '2026-07-10',
+  meeting_time: '09:00',
+  attendees: [],
+  resolved_attendees: [],
+  matched_rule_id: 'no_prep',
+  matched_rule_name: 'No Preparation Needed',
+  rule_match_explanation: 'title matches: focus time; 0 attendees (max 1)',
+  meeting_type: 'personal',
+  prep_required: false,
+  sections: {},
+  sources_consulted: [],
+  sources_selected: [],
+  sources_excluded: [],
+  missing_context_warnings: [],
+  project_doc_warnings_suppressed: true,
+  generated_at: '2026-07-10T12:00:00Z',
+  llm_enriched: false,
 }
 
