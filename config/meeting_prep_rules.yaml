@@ -1,0 +1,167 @@
+# Meeting preparation rules
+#
+# First-match priority: rules are evaluated top-to-bottom. The first rule
+# whose match conditions are satisfied is used. The generic_fallback rule
+# (empty match conditions) always matches and serves as the default.
+#
+# Each rule supports:
+#   relationship — one or more relationship types (direct_report, manager,
+#                   peer, client, external)
+#   title_patterns — list of substrings to match against meeting title
+#                    (case-insensitive)
+#   attendee_names — list of canonical attendee names or aliases
+#   attendee_count_min — minimum number of attendees (inclusive)
+#   attendee_count_max — maximum number of attendees (inclusive)
+#   exact_title — if set, requires exact title match (case-insensitive)
+#
+# A rule matches when ALL specified conditions are satisfied. Empty
+# conditions are ignored (not required). The generic_fallback rule with
+# empty match: {} always matches.
+
+rules:
+  - id: direct_report_1on1
+    name: "Direct Report 1:1"
+    prep_required: true
+    match:
+      relationship: direct_report
+      title_patterns:
+        - "1:1"
+        - "1-1"
+        - "one-on-one"
+        - "one on one"
+        - "check-in"
+        - "1-2-1"
+    preparation:
+      sections:
+        - changes
+        - risks
+        - decisions
+        - wins
+        - asks
+        - talking_points
+        - questions
+      sources:
+        - notes_1on1
+        - prior_commitments
+        - action_items
+        - signals
+        - staffing
+        - projects
+
+  - id: manager_standup
+    name: "Manager Standup"
+    prep_required: true
+    match:
+      relationship: manager
+      title_patterns:
+        - "standup"
+        - "sync"
+        - "weekly"
+        - "staff meeting"
+        - "staff"
+        - "1:1"
+        - "1-1"
+    preparation:
+      sections:
+        - changes
+        - risks
+        - decisions_needed
+        - wins
+        - asks
+        - talking_points
+      sources:
+        - team_risks
+        - staffing_exceptions
+        - deals_escalations
+        - prior_notes
+
+  - id: client_meeting
+    name: "Client / Project Meeting"
+    prep_required: true
+    match:
+      relationship:
+        - client
+        - external
+      title_patterns: []
+    preparation:
+      sections:
+        - risks
+        - actions
+        - decisions
+        - milestones
+        - deals_context
+        - prior_meetings
+      sources:
+        - client_notes
+        - risks
+        - action_items
+        - decisions
+        - deals
+        - prior_meetings
+        - workspace_summary
+
+  - id: team_standup
+    name: "Team Standup"
+    prep_required: true
+    match:
+      attendee_count_min: 3
+      title_patterns:
+        - "standup"
+        - "team sync"
+        - "daily"
+        - "team"
+    preparation:
+      sections:
+        - blockers
+        - commitments
+        - dependencies
+        - decisions
+        - announcements
+      sources:
+        - blocker_signals
+        - commitments
+        - cross_team_deps
+        - decisions
+
+  - id: no_prep
+    name: "No Preparation Needed"
+    prep_required: false
+    match:
+      title_patterns:
+        - "focus time"
+        - "focus block"
+        - "lunch"
+        - "personal"
+        - "out of office"
+        - "ooo"
+        - "reminder"
+        - "appointment"
+        - "blocked"
+        - "travel"
+        - "doctor"
+        - "dentist"
+        - "appointment"
+        - "birthday"
+        - "holiday"
+        - "vacation"
+      attendee_count_max: 1
+    preparation:
+      sections: []
+      sources: []
+
+  - id: generic_fallback
+    name: "Generic Meeting"
+    prep_required: true
+    match: {}
+    preparation:
+      sections:
+        - risks
+        - actions
+        - prior_notes
+        - questions
+      sources:
+        - attendee_notes
+        - title_notes
+        - signals
+        - action_items
+        - prior_meetings

@@ -193,6 +193,23 @@ def load_source_priority(settings: Settings | None = None) -> SourcePriorityConf
     return SourcePriorityConfig.model_validate(raw)
 
 
+def load_meeting_prep_rules(settings: Settings | None = None) -> dict:
+    """Load meeting_prep_rules.yaml.
+
+    Returns the parsed dict with a top-level "rules" key containing a list
+    of rule dicts. Falls back to an empty rules list with a generic fallback
+    if the file doesn't exist, so the system is always operable.
+    """
+    path = _config_dir(settings) / "meeting_prep_rules.yaml"
+    try:
+        raw = _load_yaml(path)
+    except FileNotFoundError:
+        return {"rules": [{"id": "generic_fallback", "name": "Generic Meeting", "match": {}, "prep_required": True}]}
+    if not isinstance(raw, dict) or "rules" not in raw:
+        return {"rules": [{"id": "generic_fallback", "name": "Generic Meeting", "match": {}, "prep_required": True}]}
+    return raw
+
+
 # ---------------------------------------------------------------------------
 # Entity resolution helpers
 # ---------------------------------------------------------------------------
