@@ -64,6 +64,43 @@ class MeetingsResponse(BaseModel):
     date: str
     meetings: list[dict[str, Any]]
     warnings: list[str] = []
+    sync_info: dict[str, Any] = {}
+
+
+class CalendarSyncResponse(BaseModel):
+    ok: bool
+    date: str
+    meetings: list[dict[str, Any]]
+    retrieved_at: str = ""
+    source: str = "google_calendar_gemini"
+    warnings: list[str] = []
+    errors: list[str] = []
+
+
+class CalendarSyncRequest(BaseModel):
+    date: str
+
+
+class MeetingPrepResponse(BaseModel):
+    meeting_id: str
+    meeting_title: str
+    meeting_date: str
+    meeting_time: str = ""
+    attendees: list[str] = []
+    resolved_attendees: list[dict[str, Any]] = []
+    matched_rule_id: str = "generic_fallback"
+    matched_rule_name: str = "Generic Meeting"
+    rule_match_explanation: str = ""
+    meeting_type: str = "generic"
+    prep_required: bool = True
+    sections: dict[str, Any] = {}
+    sources_consulted: list[dict[str, Any]] = []
+    sources_selected: list[dict[str, Any]] = []
+    sources_excluded: list[str] = []
+    missing_context_warnings: list[str] = []
+    project_doc_warnings_suppressed: bool = False
+    generated_at: str = ""
+    llm_enriched: bool = False
 
 
 class ProjectsResponse(BaseModel):

@@ -12,6 +12,8 @@ from manager_os.analytics.balance_capacity import balance_staffing_capacity
 from manager_os.api import services
 from manager_os.api.deps import get_db_connection, get_fresh_settings
 from manager_os.api.models import (
+    CalendarSyncRequest,
+    CalendarSyncResponse,
     CommandParamsRequest,
     CommandRunRequestBody,
     CommandRunResponse,
@@ -20,6 +22,7 @@ from manager_os.api.models import (
     DailyResponse,
     FeedbackResponse,
     HealthResponse,
+    MeetingPrepResponse,
     MeetingsResponse,
     PeopleResponse,
     ProjectsResponse,
@@ -249,6 +252,86 @@ def create_app() -> FastAPI:
             print(f"Failed action items/decisions extraction: {exc}")
             
         return {"ok": True, "message": "Local refresh completed successfully."}
+
+    # ------------------------------------------------------------------
+    # Calendar sync — explicit per-date retrieval
+    # ------------------------------------------------------------------
+
+    @app.post("/api/meetings/sync-calendar", response_model=CalendarSyncResponse)
+    def sync_calendar(
+        body: CalendarSyncRequest,
+        conn: duckdb.DuckDBPyConnection = Depends(get_db_connection),
+        settings: Settings = Depends(get_fresh_settings),
+    ) -> CalendarSyncResponse:
+        target_date = _parse_date(body.date)
+        result = services.sync_calendar_date(conn, target_date, settings)
+        return CalendarSyncResponse(**result)
+
+    # ------------------------------------------------------------------
+    # Meeting prep — deterministic rule-driven preparation
+    # ------------------------------------------------------------------
+
+    @app.get("/api/meetings/{meeting_id}/prep", response_model=MeetingPrepResponse)
+    def get_meeting_prep(
+        meeting_id: str,
+        conn: duckdb.DuckDBPyConnection = Depends(get_db_connection),
+        settings: Settings = Depends(get_fresh_settings),
+    ) -> MeetingPrepResponse:
+        # Check for existing prep in DB — always the most recently
+        # generated row for this meeting (defense-in-depth: prep_id is
+        # deterministic per meeting_id so there should only ever be one,
+        # but ORDER BY + LIMIT 1 guards against any legacy duplicates).
+        row = conn.execute(
+            "SELECT content, generated_at FROM meeting_prep WHERE meeting_id = ? "
+            "ORDER BY generated_at DESC LIMIT 1",
+            [meeting_id],
+        ).fetchone()
+        if row:
+            import json
+            try:
+                data = json.loads(row[0])
+                if isinstance(data, dict):
+                    return MeetingPrepResponse(**data)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Generate fresh prep
+        result = services.prep_meeting(conn, meeting_id, settings)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        return MeetingPrepResponse(**result)
+
+    @app.post("/api/meetings/{meeting_id}/prep", response_model=MeetingPrepResponse)
+    def regenerate_meeting_prep(
+        meeting_id: str,
+        conn: duckdb.DuckDBPyConnection = Depends(get_db_connection),
+        settings: Settings = Depends(get_fresh_settings),
+    ) -> MeetingPrepResponse:
+        result = services.prep_meeting(conn, meeting_id, settings)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+
+        # Persist the prep as JSON in meeting_prep table. prep_id is
+        # deterministic on meeting_id ALONE (not generated_at) so
+        # INSERT OR REPLACE actually replaces the prior stored prep for
+        # this meeting instead of accumulating a new row on every
+        # regenerate call — previously hashing in generated_at meant every
+        # call produced a distinct id, silently leaving stale duplicate
+        # rows behind that a later GET could non-deterministically return.
+        import json
+        from manager_os.db import content_hash
+        prep_json = json.dumps(result)
+        prep_id = content_hash(f"meeting_prep::{meeting_id}")
+        conn.execute(
+            "DELETE FROM meeting_prep WHERE meeting_id = ?",
+            [meeting_id],
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meeting_prep (id, meeting_id, content, generated_at) VALUES (?, ?, ?, ?)",
+            [prep_id, meeting_id, prep_json, result.get("generated_at", "")],
+        )
+
+        return MeetingPrepResponse(**result)
 
     return app
 
