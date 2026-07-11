@@ -2,12 +2,19 @@
 
 Use **Terminal → Run Task…** in VS Code to run numbered validation tasks.
 
+## Quick Start
+
+```bash
+./manager-os start
+```
+
+Or use **Terminal → Run Task… → Manager OS: Start Dashboard**.
+
 ## Environment Setup
 
-- [ ] Python virtual environment activated (`source .venv/bin/activate`)
-- [ ] `pip install -e ".[dev]"` or `uv sync --dev`
-- [ ] `cp .env.example .env` and edit paths
-- [ ] `frontend/` has `npm install` completed
+- [ ] `./manager-os doctor` — diagnose setup
+- [ ] `./manager-os build` — build frontend
+- [ ] `cp .env.example .env` and edit paths (if not using defaults)
 
 ## Backend Tests
 

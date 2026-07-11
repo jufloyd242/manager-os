@@ -46,3 +46,6 @@ process_chats.py
 
 # ── Generated JSON output artifacts ───────────────────────────────────────
 output_signals.json
+
+# ── Build manifest (frontend/dist/.build-manifest.json) ───────────────────
+.build-manifest.json

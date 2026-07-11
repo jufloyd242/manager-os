@@ -36,7 +36,7 @@
     {
       "label": "Manager OS: 05 Backend Pyright",
       "type": "shell",
-      "command": "python -m pyright src/ 2>&1 || true",
+      "command": "python -m pyright src/",
       "group": "test",
       "problemMatcher": [],
       "presentation": { "showReuseMessage": false, "clear": true }
@@ -84,18 +84,58 @@
       "problemMatcher": []
     },
     {
-      "label": "Manager OS: 10 Start API",
+      "label": "Manager OS: Start Dashboard",
       "type": "shell",
-      "command": "python -m uvicorn manager_os.api.app:app --host 127.0.0.1 --port 8000 --reload",
+      "command": "./manager-os start",
       "group": "none",
       "problemMatcher": [],
       "presentation": { "showReuseMessage": false, "clear": true }
     },
     {
-      "label": "Manager OS: 11 Start React",
+      "label": "Manager OS: Doctor",
+      "type": "shell",
+      "command": "./manager-os doctor",
+      "group": "none",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: Build Dashboard",
+      "type": "shell",
+      "command": "./manager-os build",
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: Dev Full Stack",
+      "type": "shell",
+      "command": "./manager-os dev",
+      "group": "none",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: Dev API",
+      "type": "shell",
+      "command": "./manager-os start --no-browser",
+      "group": "none",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: Dev React",
       "type": "shell",
       "command": "npm run dev",
       "options": { "cwd": "${workspaceFolder}/frontend" },
+      "group": "none",
+      "problemMatcher": [],
+      "presentation": { "showReuseMessage": false, "clear": true }
+    },
+    {
+      "label": "Manager OS: Stop Current Task",
+      "type": "shell",
+      "command": "echo 'Press Ctrl+C in the running task terminal to stop.'",
       "group": "none",
       "problemMatcher": [],
       "presentation": { "showReuseMessage": false, "clear": true }

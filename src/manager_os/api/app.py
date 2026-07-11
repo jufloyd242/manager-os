@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
+from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 import duckdb
 
 from manager_os.api import services
@@ -51,7 +55,16 @@ def _parse_date(value: str | None, param_name: str = "date") -> date:
         ) from None
 
 
-def create_app() -> FastAPI:
+def create_app(frontend_dist: str | Path | None = None) -> FastAPI:
+    """Create the Manager OS FastAPI application.
+
+    Args:
+        frontend_dist: Path to the built React frontend directory.
+            When provided, the app serves the frontend statically and
+            provides SPA fallback for non-API routes.
+            When None (default), only API routes are available — this
+            is the normal mode for unit tests.
+    """
     app = FastAPI(title="manager-os-api", description="Local read-only Manager OS API")
 
     @app.get("/api/health", response_model=HealthResponse)
@@ -172,7 +185,44 @@ def create_app() -> FastAPI:
     app.include_router(meeting_prep_router)
     app.include_router(refresh_router)
 
+    # ------------------------------------------------------------------
+    # Static frontend serving (only when frontend_dist is provided)
+    # ------------------------------------------------------------------
+    if frontend_dist is not None:
+        dist_path = Path(frontend_dist).resolve()
+        index_html = dist_path / "index.html"
+
+        if not dist_path.is_dir():
+            raise RuntimeError(
+                f"Frontend build directory not found: {dist_path}. "
+                f"Run: ./manager-os build"
+            )
+        if not index_html.is_file():
+            raise RuntimeError(
+                f"Frontend build missing index.html in {dist_path}. "
+                f"Run: ./manager-os build"
+            )
+
+        # Serve static assets
+        assets_dir = dist_path / "assets"
+        if assets_dir.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+        # SPA fallback: serve index.html for non-API paths
+        @app.get("/{full_path:path}")
+        def spa_fallback(full_path: str):
+            # Never intercept API paths
+            if full_path.startswith("api/") or full_path == "api":
+                raise HTTPException(status_code=404, detail="Not found")
+            return FileResponse(str(index_html))
+
     return app
 
 
-app = create_app()
+# Module-level instance for uvicorn.
+# Auto-detects frontend dist for production serving.
+_frontend_dist = Path(__file__).resolve().parent.parent.parent.parent / "frontend" / "dist"
+if _frontend_dist.is_dir() and (_frontend_dist / "index.html").is_file():
+    app = create_app(frontend_dist=str(_frontend_dist))
+else:
+    app = create_app()

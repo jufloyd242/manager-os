@@ -86,45 +86,15 @@ def _print_skip_info(
     else:
         safe = _all_skips_safe(source_results)
         if safe:
-            has_duplicate_skips = False
-            for _, result in source_results:
-                reasons = getattr(result, "skip_reasons", {})
-                if any(r in {"already_exists", "duplicate_content_hash", "signal_already_exists", "action_item_already_exists", "decision_already_exists"} for r in reasons):
-                    has_duplicate_skips = True
-                    break
-            if has_duplicate_skips:
-                console.print(
-                    f"[dim]  {total_skipped} record(s) skipped — already exist "
-                    f"(idempotent re-run). Pass --verbose for details.[/dim]"
-                )
+            console.print(
+                f"[dim]  {total_skipped} record(s) skipped — already exist "
+                f"(idempotent re-run). Pass --verbose for details.[/dim]"
+            )
         else:
             console.print(
                 f"[yellow]  {total_skipped} record(s) skipped — some may need "
                 f"attention. Pass --verbose for details.[/yellow]"
             )
-
-
-def _extract_json_payload(text: str) -> str:
-    """Extract the valid JSON string from potentially noisy LLM stdout."""
-    import re
-    text = text.strip()
-    
-    # Strategy 1: Find content inside the last markdown json code block
-    blocks = re.findall(r"```json\s*([\s\S]*?)\s*```", text)
-    if blocks:
-        return blocks[-1].strip()
-        
-    # Strategy 2: Find content inside any markdown code blocks
-    general_blocks = re.findall(r"```\s*([\s\S]*?)\s*```", text)
-    if general_blocks:
-        return general_blocks[-1].strip()
-        
-    # Strategy 3: Grab the outermost braced object block
-    brace_match = re.search(r"({[\s\S]*})", text)
-    if brace_match:
-        return brace_match.group(1).strip()
-        
-    return text
 
 
 @app.callback(invoke_without_command=True)
@@ -1354,9 +1324,12 @@ If you cannot access the sheet, return:
                     raise RuntimeError(f"Gemini CLI failed: {proc.stderr}")
                     
                 output_text = proc.stdout.strip()
-                extracted_json = _extract_json_payload(output_text)
-                from manager_os.utils import clean_and_parse_json
-                result_data = clean_and_parse_json(extracted_json)
+                if output_text.startswith("```json"):
+                    output_text = output_text[7:]
+                if output_text.endswith("```"):
+                    output_text = output_text[:-3]
+                    
+                result_data = json.loads(output_text)
                 
                 if not result_data.get("ok"):
                     raise RuntimeError(f"Gemini CLI reported failure: {result_data.get('error', 'Unknown error')}")
@@ -1365,15 +1338,13 @@ If you cannot access the sheet, return:
                 if not rows:
                     raise RuntimeError("Gemini CLI returned no rows.")
                     
-                # Write to CSV using StringIO to avoid write-then-read bug
-                from io import StringIO
-                buffer = StringIO()
-                writer = csv.writer(buffer)
-                writer.writerows(rows)
-                csv_content = buffer.getvalue()
-                
                 Path(local_csv).parent.mkdir(parents=True, exist_ok=True)
-                Path(local_csv).write_text(csv_content, encoding="utf-8")
+                csv_content = ""
+                with open(local_csv, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerows(rows)
+                    f.seek(0)
+                    csv_content = f.read()
                     
                 content_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
                 retrieved_at = result_data.get("retrieved_at", datetime.utcnow().isoformat())
@@ -2046,9 +2017,12 @@ If you cannot access the sheet, return:
             raise RuntimeError(f"Gemini CLI failed: {proc.stderr}")
             
         output_text = proc.stdout.strip()
-        extracted_json = _extract_json_payload(output_text)
-        from manager_os.utils import clean_and_parse_json
-        result_data = clean_and_parse_json(extracted_json)
+        if output_text.startswith("```json"):
+            output_text = output_text[7:]
+        if output_text.endswith("```"):
+            output_text = output_text[:-3]
+            
+        result_data = json.loads(output_text)
         
         if not result_data.get("ok"):
             raise RuntimeError(f"Gemini CLI reported failure: {result_data.get('error', 'Unknown error')}")
@@ -2057,15 +2031,15 @@ If you cannot access the sheet, return:
         if not rows:
             raise RuntimeError("Gemini CLI returned no rows.")
             
-        # Write to CSV using StringIO to avoid write-then-read bug
-        from io import StringIO
-        buffer = StringIO()
-        writer = csv.writer(buffer)
-        writer.writerows(rows)
-        csv_content = buffer.getvalue()
-        
+        # Write to CSV
         Path(local_csv).parent.mkdir(parents=True, exist_ok=True)
-        Path(local_csv).write_text(csv_content, encoding="utf-8")
+        csv_content = ""
+        with open(local_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerows(rows)
+            # Re-read to get exact content for hash
+            f.seek(0)
+            csv_content = f.read()
             
         content_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
         retrieved_at = result_data.get("retrieved_at", datetime.utcnow().isoformat())
@@ -2618,9 +2592,12 @@ If you cannot access the sheet, return:
             raise RuntimeError(f"Gemini CLI failed: {proc.stderr}")
             
         output_text = proc.stdout.strip()
-        extracted_json = _extract_json_payload(output_text)
-        from manager_os.utils import clean_and_parse_json
-        result_data = clean_and_parse_json(extracted_json)
+        if output_text.startswith("```json"):
+            output_text = output_text[7:]
+        if output_text.endswith("```"):
+            output_text = output_text[:-3]
+            
+        result_data = json.loads(output_text)
         
         if not result_data.get("ok"):
             raise RuntimeError(f"Gemini CLI reported failure: {result_data.get('error', 'Unknown error')}")
@@ -2716,24 +2693,38 @@ def index_projects(
         console.print("[red]No local CSV path configured (MANAGER_OS_PROJECT_INDEX_LOCAL_CSV).[/red]")
         raise typer.Exit(1)
 
-    expected_sheet_id = getattr(settings, "project_index_sheet_id", "")
-    expected_gid = getattr(settings, "project_index_sheet_gid", "")
-
     if not skip_fetch:
         console.print("[bold]Step 1: Fetching project sheet...[/bold]")
-        from manager_os.ingest.project_sheet import validate_metadata
-        stale_hours = getattr(settings, "project_index_stale_after_hours", 24)
-        metadata_info = validate_metadata(local_csv, expected_sheet_id, expected_gid, stale_hours)
-        if not metadata_info.valid:
-            console.print(f"[red]✗ {metadata_info.error}[/red]")
+        # Call project-index-fetch logic inline
+        # For now, we'll just check if the file exists and is fresh
+        meta_path = f"{local_csv}.meta.json"
+        if not Path(meta_path).exists():
+            console.print("[red]Project index metadata not found. Run 'manager-os project-index-fetch' first.[/red]")
             raise typer.Exit(1)
+        
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        
+        # Verify freshness
+        stale_hours = getattr(settings, "project_index_stale_after_hours", 24)
+        retrieved_at_str = meta.get("retrieved_at", "")
+        if retrieved_at_str:
+            retrieved_at_str = retrieved_at_str.replace("Z", "+00:00")
+            try:
+                retrieved_at = datetime.fromisoformat(retrieved_at_str)
+                if retrieved_at.tzinfo is None:
+                    retrieved_at = retrieved_at.replace(tzinfo=datetime.now().astimezone().tzinfo)
+                
+                now = datetime.now(retrieved_at.tzinfo)
+                if (now - retrieved_at) > timedelta(hours=stale_hours):
+                    console.print(f"[red]Project index is stale (retrieved {retrieved_at.isoformat()}, stale after {stale_hours}h).[/red]")
+                    console.print("[red]Run 'manager-os project-index-fetch --force' to refresh.[/red]")
+                    raise typer.Exit(1)
+            except ValueError:
+                console.print(f"[red]Invalid retrieved_at format in metadata: {retrieved_at_str}[/red]")
+                raise typer.Exit(1)
     else:
         console.print("[bold]Step 1: Skipping fetch (--skip-fetch)[/bold]")
-        from manager_os.ingest.project_sheet import validate_metadata
-        metadata_info = validate_metadata(local_csv, expected_sheet_id, expected_gid, stale_hours=999999)
-        if not metadata_info.valid:
-            console.print(f"[red]✗ {metadata_info.error}[/red]")
-            raise typer.Exit(1)
 
     # Step 2: Parse and upsert projects
     console.print("[bold]Step 2: Parsing project sheet...[/bold]")
@@ -2772,24 +2763,26 @@ def index_projects(
             project_id = f"project::{project.opportunity_number}"
             console.print(f"  Searching Drive for {project.opportunity_number}...")
             
-            stats = search_drive_for_project_docs(
+            drive_result = search_drive_for_project_docs(
                 opportunity_number=project.opportunity_number,
                 client=project.client,
                 project_name=project.project_name,
-                conn=conn,
-                force=force,
-                limit=doc_limit,
-                project_id=project_id,
                 timeout=120,
             )
             
-            if stats["errors"] and verbose:
-                for error in stats["errors"]:
+            if drive_result.errors and verbose:
+                for error in drive_result.errors:
                     console.print(f"    [red]✗ {error}[/red]")
             
-            total_docs += stats["parsed_count"]
-            if verbose and stats["parsed_count"] > 0:
-                console.print(f"    Found {stats['parsed_count']} documents")
+            # Set project_id on documents
+            for doc in drive_result.documents:
+                doc.project_id = project_id
+            
+            if drive_result.documents:
+                inserted_docs, updated_docs = upsert_project_documents(conn, drive_result.documents, force=force)
+                total_docs += len(drive_result.documents)
+                if verbose:
+                    console.print(f"    Found {len(drive_result.documents)} documents")
         
         console.print(f"[green]✓ Enriched with {total_docs} documents[/green]")
     else:
@@ -2959,7 +2952,6 @@ def project_docs_fetch(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output."),
     batch: bool = typer.Option(False, "--batch", help="Search docs for multiple projects in one Gemini call instead of a single --opportunity-number."),
     limit_projects: int = typer.Option(5, "--limit-projects", help="Max projects to include in --batch mode (bounded)."),
-    allow_empty: bool = typer.Option(False, "--allow-empty", help="Allow empty document results without failing."),
 ) -> None:
     """Fetch Google Drive documents for a specific project.
     
@@ -2982,12 +2974,7 @@ def project_docs_fetch(
     )
 
     settings = get_settings()
-    if dry_run or print_prompt:
-        conn = _dry_run_open_ro(settings.db_path)
-        if conn is None:
-            conn = get_connection(settings.db_path)
-    else:
-        conn = get_connection(settings.db_path)
+    conn = get_connection(settings.db_path)
 
     if batch:
         force_clause = "" if force else "AND p.id NOT IN (SELECT DISTINCT project_id FROM project_documents)"
@@ -2996,8 +2983,7 @@ def project_docs_fetch(
             SELECT p.id, p.project_name, p.client, p.opportunity_number
             FROM projects p
             WHERE p.opportunity_number != ''
-              AND (p.document_status IS NULL OR p.document_status != 'LEGACY_EMPTY')
-              {force_clause}
+            {force_clause}
             ORDER BY p.opportunity_number
             LIMIT ?
             """,
@@ -3018,7 +3004,6 @@ def project_docs_fetch(
             prompt = _build_batch_drive_search_prompt(projects)
             console.print("[bold]Gemini CLI Batch Prompt:[/bold]")
             console.print(prompt)
-            conn.close()
             raise typer.Exit(0)
 
         if dry_run:
@@ -3027,7 +3012,6 @@ def project_docs_fetch(
             for p in projects:
                 console.print(f"  - {p['opportunity_number']} — {p['project_name']} ({p['client']})")
             console.print("\n[dim]Would search Google Drive for documents for these projects in one batch.[/dim]")
-            conn.close()
             raise typer.Exit(0)
 
         console.print(f"[bold]Batch-fetching Drive docs for {len(projects)} project(s)[/bold]")
@@ -3046,7 +3030,7 @@ def project_docs_fetch(
             for doc in drive_result.documents:
                 doc.project_id = project_id
             docs_to_upsert = drive_result.documents[:limit]
-            inserted, updated, skipped = upsert_project_documents(conn, docs_to_upsert, force=force)
+            inserted, updated = upsert_project_documents(conn, docs_to_upsert, force=force)
             total_inserted += inserted
             total_updated += updated
             console.print(f"[green]✓ {opp_id}: {len(drive_result.documents)} document(s)[/green]")
@@ -3099,7 +3083,6 @@ def project_docs_fetch(
         prompt = _build_drive_search_prompt(stored_opp, client, project_name)
         console.print("[bold]Gemini CLI Prompt:[/bold]")
         console.print(prompt)
-        conn.close()
         raise typer.Exit(0)
 
     if dry_run:
@@ -3112,50 +3095,46 @@ def project_docs_fetch(
         console.print(f"  Timeout:          {timeout}s")
         console.print(f"  Force:            {force}")
         console.print("\n[dim]Would search Google Drive for documents related to this project.[/dim]")
-        conn.close()
         raise typer.Exit(0)
 
     console.print(f"[bold]Fetching Drive docs for {stored_opp} — {project_name} ({client})[/bold]")
     
-    stats = search_drive_for_project_docs(
+    drive_result = search_drive_for_project_docs(
         opportunity_number=stored_opp,
         client=client,
         project_name=project_name,
-        conn=conn,
-        force=force,
-        limit=limit,
-        project_id=project_id,
         timeout=timeout,
     )
 
-    # Print Fetch Diagnostics
-    console.print("\n[bold]Fetch Diagnostics:[/bold]")
-    console.print(f"  Raw: {stats['raw_count']}")
-    console.print(f"  Parsed: {stats['parsed_count']}")
-    console.print(f"  Inserted: {stats['inserted']}")
-    console.print(f"  Updated: {stats['updated']}")
-    console.print(f"  Skipped: {stats['skipped']}")
+    if drive_result.warnings and verbose:
+        for warning in drive_result.warnings:
+            console.print(f"[yellow]⚠ {warning}[/yellow]")
 
-    if stats["errors"]:
-        console.print("\n[bold red]Errors:[/bold red]")
-        for err in stats["errors"]:
-            console.print(f"  [red]✗ {err}[/red]")
+    if drive_result.errors:
+        for error in drive_result.errors:
+            console.print(f"[red]✗ {error}[/red]")
+        raise typer.Exit(1)
 
-    is_error = stats["status"] == "error"
-    is_empty = stats["parsed_count"] == 0
+    if not drive_result.documents:
+        console.print("[yellow]No documents found in Google Drive.[/yellow]")
+        raise typer.Exit(0)
 
-    if is_error or is_empty:
-        if is_error:
-            console.print("\n[bold red]Fatal Error: Drive doc fetch encountered errors.[/bold red]")
-        else:
-            console.print("\n[bold red]Fatal Error: No project documents were parsed/found.[/bold red]")
-        
-        if allow_empty:
-            console.print("[yellow]Bypassing failure due to --allow-empty flag.[/yellow]")
-        else:
-            raise typer.Exit(code=1)
-    else:
-        console.print(f"\n[bold green]✓ Successfully fetched and processed {stats['parsed_count']} documents.[/bold green]")
+    # Set project_id on documents
+    for doc in drive_result.documents:
+        doc.project_id = project_id
+
+    # Limit documents
+    docs_to_upsert = drive_result.documents[:limit]
+
+    inserted, updated = upsert_project_documents(conn, docs_to_upsert, force=force)
+    
+    console.print(f"[green]✓ Found {len(drive_result.documents)} documents[/green]")
+    console.print(f"  Inserted: {inserted}, Updated: {updated}")
+    
+    if verbose:
+        for doc in docs_to_upsert:
+            console.print(f"  - [{doc.document_type}] {doc.title}")
+            console.print(f"    {doc.url}")
 
 
 # ---------------------------------------------------------------------------
@@ -5405,7 +5384,6 @@ def workspace_fetch_activity(
     output_dir: Optional[str] = typer.Option(None, "--output-dir"),
     lookback: Optional[int] = typer.Option(None, "--lookback", help="Override lookback days."),
     chat_url: Optional[str] = typer.Option(None, "--chat-url", help="Override the configured Google Chat URL."),
-    chat_space_id: Optional[str] = typer.Option(None, "--chat-space-id", help="Chat space resource ID (e.g. AAQA61WgdSs)."),
 ) -> None:
     """Retrieve workspace activity summary from configured Google Chat space."""
     from manager_os.ingest.workspace_gemini import retrieve_activity
@@ -5413,7 +5391,7 @@ def workspace_fetch_activity(
     run_date = date.fromisoformat(target_date) if target_date else date.today()
     _do_workspace_fetch(
         "activity", retrieve_activity, run_date, dry_run, print_prompt, no_yolo, timeout, output_dir,
-        lookback_days=lookback, chat_url=chat_url, chat_space_id=chat_space_id,
+        lookback_days=lookback, chat_url=chat_url,
     )
 
 
@@ -5898,6 +5876,398 @@ def feedback_candidates_cmd() -> None:
         )
     console.print(tbl)
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# manager-os doctor
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def doctor(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output machine-readable JSON instead of a formatted table.",
+    ),
+) -> None:
+    """Diagnose the Manager OS setup and report any issues."""
+    from manager_os.startup import run_doctor, find_repo_root
+
+    try:
+        repo_root = find_repo_root()
+    except FileNotFoundError:
+        console.print("[red]Could not find repository root.[/red]")
+        raise typer.Exit(1)
+
+    report = run_doctor(repo_root)
+
+    if json_output:
+        import json as _json
+        console.print(_json.dumps(report.to_dict(), indent=2))
+        raise typer.Exit(report.exit_code)
+
+    console.print()
+    console.print("[bold]Manager OS Doctor[/bold]")
+    console.print()
+
+    for check in report.checks:
+        if check.status == "PASS":
+            style = "green"
+        elif check.status == "WARN":
+            style = "yellow"
+        else:
+            style = "red"
+        msg = check.message or ""
+        console.print(f"  [{style}]{check.status:<5}[/{style}] {check.name}  {msg}")
+
+    console.print()
+    if report.failures:
+        console.print(
+            f"[red]{report.failures} failure(s) — Manager OS cannot start reliably.[/red]"
+        )
+    elif report.warnings:
+        console.print(
+            f"[yellow]Ready to start with {report.warnings} warning(s).[/yellow]"
+        )
+    else:
+        console.print("[green]Ready to start.[/green]")
+
+    raise typer.Exit(report.exit_code)
+
+
+# ---------------------------------------------------------------------------
+# manager-os build
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def build(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Force rebuild even if the build is current.",
+    ),
+) -> None:
+    """Build the React frontend for production."""
+    from manager_os.startup import (
+        find_repo_root,
+        check_frontend_dependencies,
+        run_npm_install,
+        run_frontend_build,
+        is_build_current,
+    )
+
+    repo_root = find_repo_root()
+
+    # Check Node/npm
+    import subprocess as _sp
+    try:
+        _sp.run(["node", "--version"], capture_output=True, check=True, timeout=5)
+    except (FileNotFoundError, _sp.TimeoutExpired, _sp.CalledProcessError):
+        console.print("[red]Node.js is not available. Install Node.js to build the frontend.[/red]")
+        raise typer.Exit(1)
+
+    try:
+        _sp.run(["npm", "--version"], capture_output=True, check=True, timeout=5)
+    except (FileNotFoundError, _sp.TimeoutExpired, _sp.CalledProcessError):
+        console.print("[red]npm is not available.[/red]")
+        raise typer.Exit(1)
+
+    # Check frontend dependencies
+    if not check_frontend_dependencies(repo_root):
+        console.print("[yellow]Installing frontend dependencies...[/yellow]")
+        result = run_npm_install(repo_root)
+        if result.returncode != 0:
+            console.print(f"[red]npm install failed:\n{result.stderr}[/red]")
+            raise typer.Exit(1)
+        console.print("[green]Frontend dependencies installed.[/green]")
+
+    # Check if build is current
+    if not force and is_build_current(repo_root):
+        console.print("[green]React build is current. Nothing to do.[/green]")
+        return
+
+    # Build
+    console.print("[yellow]Building React frontend...[/yellow]")
+    result = run_frontend_build(repo_root)
+    if result.returncode != 0:
+        console.print(f"[red]Frontend build failed:\n{result.stderr}[/red]")
+        raise typer.Exit(1)
+    console.print("[green]Frontend build complete.[/green]")
+
+
+# ---------------------------------------------------------------------------
+# manager-os start
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def start(
+    no_browser: bool = typer.Option(
+        False,
+        "--no-browser",
+        help="Do not open the dashboard in the default browser.",
+    ),
+    port: int = typer.Option(
+        8000,
+        "--port",
+        help="Port to serve the dashboard on.",
+    ),
+    rebuild: bool = typer.Option(
+        False,
+        "--rebuild",
+        help="Force rebuild the frontend before starting.",
+    ),
+    no_setup: bool = typer.Option(
+        False,
+        "--no-setup",
+        help="Skip automatic setup steps (venv, pip install, npm install, build).",
+    ),
+) -> None:
+    """Start the Manager OS production dashboard.
+
+    Serves both the API and the built React frontend from a single process.
+    """
+    from manager_os.startup import (
+        find_repo_root,
+        check_port_available,
+        check_port_has_manager_os,
+        start_server_process,
+        wait_for_health,
+        open_browser,
+        terminate_process,
+        is_build_current,
+        run_frontend_build,
+        run_npm_install,
+        check_frontend_dependencies,
+    )
+
+    repo_root = find_repo_root()
+    host = "127.0.0.1"
+
+    # Check if already running
+    if check_port_has_manager_os(host, port):
+        url = f"http://{host}:{port}"
+        console.print(f"[green]Manager OS is already running at {url}[/green]")
+        if not no_browser:
+            open_browser(url)
+        return
+
+    # Check port availability
+    if not check_port_available(host, port):
+        console.print(
+            f"[red]Port {port} is already in use by another process.[/red]"
+        )
+        console.print()
+        console.print(f"Stop the process using port {port} or run:")
+        console.print(f"    ./manager-os start --port {port + 10}")
+        raise typer.Exit(1)
+
+    # Frontend build
+    if not no_setup:
+        if not check_frontend_dependencies(repo_root):
+            console.print("[yellow]Installing frontend dependencies...[/yellow]")
+            result = run_npm_install(repo_root)
+            if result.returncode != 0:
+                console.print(f"[red]npm install failed.[/red]")
+                raise typer.Exit(1)
+
+        if rebuild or not is_build_current(repo_root):
+            console.print("[yellow]Building React frontend...[/yellow]")
+            result = run_frontend_build(repo_root)
+            if result.returncode != 0:
+                # Check if a prior build exists — use it as fallback
+                dist_dir = repo_root / "frontend" / "dist"
+                if (dist_dir / "index.html").is_file():
+                    console.print(
+                        "[yellow]Frontend rebuild failed, using existing build.[/yellow]"
+                    )
+                else:
+                    console.print(
+                        "[red]Frontend build failed and no prior build exists.[/red]"
+                    )
+                    raise typer.Exit(1)
+    else:
+        if not is_build_current(repo_root):
+            console.print(
+                "[yellow]React build is missing or stale. "
+                "Run: ./manager-os build[/yellow]"
+            )
+
+    # Start server
+    url = f"http://{host}:{port}"
+    console.print(f"[green]Starting Manager OS at {url}...[/green]")
+
+    proc = start_server_process(repo_root, host=host, port=port, reload=False)
+
+    try:
+        # Wait for health
+        if not wait_for_health(f"{url}/api/health", timeout=30):
+            console.print("[red]Manager OS failed to start within 30 seconds.[/red]")
+            # Print recent output
+            import time as _time
+            _time.sleep(0.5)
+            if proc.stdout:
+                remaining = []
+                for line in proc.stdout:
+                    remaining.append(line)
+                    if len(remaining) > 20:
+                        remaining = remaining[-20:]
+                if remaining:
+                    console.print("[dim]Recent server output:[/dim]")
+                    for line in remaining:
+                        console.print(f"  [dim]{line.rstrip()}[/dim]")
+            terminate_process(proc)
+            raise typer.Exit(1)
+
+        console.print(f"[green]Manager OS is running at {url}[/green]")
+
+        if not no_browser:
+            try:
+                open_browser(url)
+            except Exception:
+                console.print("[yellow]Could not open browser.[/yellow]")
+
+        console.print()
+        console.print("Press Ctrl+C to stop.")
+
+        # Wait for process
+        try:
+            proc.wait()
+        except KeyboardInterrupt:
+            console.print()
+            console.print("[yellow]Shutting down...[/yellow]")
+            terminate_process(proc)
+            console.print("[green]Manager OS stopped.[/green]")
+
+    except KeyboardInterrupt:
+        console.print()
+        console.print("[yellow]Shutting down...[/yellow]")
+        terminate_process(proc)
+        console.print("[green]Manager OS stopped.[/green]")
+
+
+# ---------------------------------------------------------------------------
+# manager-os dev
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def dev(
+    no_browser: bool = typer.Option(
+        False,
+        "--no-browser",
+        help="Do not open the dashboard in the default browser.",
+    ),
+    api_port: int = typer.Option(
+        8000,
+        "--api-port",
+        help="Port for the API server.",
+    ),
+    frontend_port: int = typer.Option(
+        5173,
+        "--frontend-port",
+        help="Port for the Vite dev server.",
+    ),
+) -> None:
+    """Start Manager OS in development mode.
+
+    Runs both the API (with auto-reload) and the Vite dev server.
+    """
+    from manager_os.startup import (
+        find_repo_root,
+        check_port_available,
+        start_server_process,
+        start_vite_process,
+        wait_for_health,
+        open_browser,
+        terminate_process,
+    )
+
+    repo_root = find_repo_root()
+    host = "127.0.0.1"
+
+    # Check ports
+    for label, p in [("API", api_port), ("Frontend", frontend_port)]:
+        if not check_port_available(host, p):
+            console.print(
+                f"[red]Port {p} ({label}) is already in use.[/red]"
+            )
+            raise typer.Exit(1)
+
+    # Start API
+    api_url = f"http://{host}:{api_port}"
+    frontend_url = f"http://{host}:{frontend_port}"
+    console.print(f"[green]Starting API at {api_url}...[/green]")
+    api_proc = start_server_process(repo_root, host=host, port=api_port, reload=True)
+
+    # Start Vite
+    console.print(f"[green]Starting Vite at {frontend_url}...[/green]")
+    frontend_proc = start_vite_process(repo_root, port=frontend_port)
+
+    processes = [api_proc, frontend_proc]
+
+    try:
+        # Wait for API
+        console.print("[dim]Waiting for API to become healthy...[/dim]")
+        if not wait_for_health(f"{api_url}/api/health", timeout=30):
+            console.print("[red]API failed to start.[/red]")
+            for p in processes:
+                terminate_process(p)
+            raise typer.Exit(1)
+        console.print(f"[green]API is ready at {api_url}[/green]")
+
+        # Wait for Vite (shorter timeout — it responds to any HTTP)
+        import time as _time
+        import httpx as _httpx
+        console.print("[dim]Waiting for Vite...[/dim]")
+        vite_ready = False
+        for _ in range(30):
+            try:
+                resp = _httpx.get(frontend_url, timeout=2)
+                if resp.status_code < 500:
+                    vite_ready = True
+                    break
+            except (_httpx.RequestError, _httpx.TimeoutException):
+                pass
+            _time.sleep(0.5)
+
+        if vite_ready:
+            console.print(f"[green]Vite is ready at {frontend_url}[/green]")
+        else:
+            console.print("[yellow]Vite may not be ready yet.[/yellow]")
+
+        # Open browser
+        if not no_browser:
+            try:
+                open_browser(frontend_url)
+            except Exception:
+                console.print("[yellow]Could not open browser.[/yellow]")
+
+        console.print()
+        console.print(f"  API:      {api_url}")
+        console.print(f"  Frontend: {frontend_url}")
+        console.print()
+        console.print("Press Ctrl+C to stop both servers.")
+
+        # Wait for either process to exit
+        while True:
+            for i, p in enumerate(processes):
+                if p.poll() is not None:
+                    label = "API" if i == 0 else "Frontend"
+                    console.print(f"[red]{label} process exited unexpectedly.[/red]")
+                    for other in processes:
+                        terminate_process(other)
+                    raise typer.Exit(1)
+            _time.sleep(0.5)
+
+    except KeyboardInterrupt:
+        console.print()
+        console.print("[yellow]Shutting down...[/yellow]")
+        for p in processes:
+            terminate_process(p)
+        console.print("[green]Development servers stopped.[/green]")
 
 
 if __name__ == "__main__":

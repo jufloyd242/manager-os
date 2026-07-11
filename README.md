@@ -8,44 +8,116 @@ Local-first management dashboard for AI/ML consulting managers. Ingests Obsidian
 
 ## Quickstart
 
-### 1. Environment Setup
+### Daily Use
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env
-# Edit .env — set MANAGER_OS_VAULT_PATH and other paths
+./manager-os start
 ```
 
-### 2. Frontend Dependencies
+One command starts everything. Open **http://127.0.0.1:8000** in your browser.
+
+### Diagnose Setup
 
 ```bash
-cd frontend
-npm install
+./manager-os doctor
 ```
 
-### 3. Start the Backend API
+### Rebuild Frontend
 
 ```bash
-python -m uvicorn manager_os.api.app:app --host 127.0.0.1 --port 8000 --reload
+./manager-os build
 ```
 
-### 4. Start the React Frontend
-
-In another terminal:
+### Development Mode
 
 ```bash
-cd frontend
-npm run dev
+./manager-os dev
 ```
 
-Open **http://localhost:5173**.
+Runs the API (with auto-reload) and Vite dev server side by side.
 
-### 5. Ingest and Refresh
+---
 
-- Click **Refresh from file** on any view to trigger local-only ingestion and extraction (no external or LLM calls).
-- Calendar sync is explicit — click **Sync Calendar** for a specific date.
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `./manager-os start` | Start production dashboard (API + built React) |
+| `./manager-os dev` | Start development mode (API + Vite) |
+| `./manager-os doctor` | Diagnose setup and configuration |
+| `./manager-os build` | Build React frontend for production |
+
+### Options
+
+```bash
+./manager-os start --no-browser    # Don't open browser
+./manager-os start --port 8010     # Use alternate port
+./manager-os start --rebuild       # Force frontend rebuild
+./manager-os start --no-setup      # Skip automatic setup
+
+./manager-os dev --no-browser      # Don't open browser
+./manager-os dev --api-port 8000   # API port (default)
+./manager-os dev --frontend-port 5173  # Vite port (default)
+
+./manager-os doctor --json         # Machine-readable JSON output
+
+./manager-os build --force         # Force rebuild
+```
+
+### CLI (after install)
+
+```bash
+manager-os start
+manager-os dev
+manager-os doctor
+manager-os build
+```
+
+---
+
+## How It Works
+
+### Normal Mode
+
+- One FastAPI process serves both the API and the built React frontend
+- React is served from `frontend/dist/` — no separate Vite process needed
+- Startup does not refresh external data
+- Calendar sync remains an explicit user action
+- Optional missing sources (deals CSV, forecast CSV, workspace summaries) appear as warnings, not failures
+- Press `Ctrl+C` to stop
+
+### Development Mode
+
+- FastAPI runs with `--reload` for hot-reloading
+- Vite dev server provides HMR for the frontend
+- Both processes stop cleanly on `Ctrl+C`
+
+---
+
+## Architecture
+
+### Data flow
+
+```
+ingest → extract → build → dashboard
+```
+
+Each stage writes to a local DuckDB file (`data/processed/manager_os.duckdb`). Nothing writes to external systems.
+
+### Module Map
+
+| Module | Purpose |
+|--------|---------|
+| `src/manager_os/cli.py` | Typer CLI app — all commands registered here |
+| `src/manager_os/startup.py` | Startup, preflight, doctor, build, and process lifecycle |
+| `src/manager_os/config.py` | Loads and validates YAML configs + .env settings |
+| `src/manager_os/db.py` | DuckDB connection, schema init, helpers |
+| `src/manager_os/schemas.py` | All Pydantic v2 models |
+| `src/manager_os/ingest/` | Data ingestion from Obsidian, CSVs, snapshots |
+| `src/manager_os/extract/` | Rule-based and LLM signal extraction |
+| `src/manager_os/build/` | Daily brief, dashboard data, operating loop |
+| `src/manager_os/api/` | FastAPI read-only API |
+| `frontend/` | React dashboard (Vite + TypeScript + Tailwind) |
 
 ---
 
@@ -64,8 +136,12 @@ Use **Terminal → Run Task…** for ordered validation:
 | 07 | Frontend Tests | `npm run test` |
 | 08 | Frontend Build | `npm run build` |
 | 09 | Full Validation | Runs all checks sequentially |
-| 10 | Start API | `python -m uvicorn ...` |
-| 11 | Start React | `npm run dev` |
+| — | **Start Dashboard** | **`./manager-os start` — recommended daily task** |
+| — | Doctor | `./manager-os doctor` |
+| — | Build Dashboard | `./manager-os build` |
+| — | Dev Full Stack | `./manager-os dev` |
+| — | Dev API | `./manager-os start --no-browser` |
+| — | Dev React | `npm run dev` |
 
 See `docs/DASHBOARD_DEVELOPMENT_CHECKLIST.md` for a detailed walkthrough.
 

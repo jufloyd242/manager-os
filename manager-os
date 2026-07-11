@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Manager OS — root bootstrap launcher
+#
+# Resolves the repository root, finds a Python interpreter, manages the
+# virtual environment, and delegates to the Manager OS CLI.
+#
+# Usage:
+#   ./manager-os start
+#   ./manager-os dev
+#   ./manager-os doctor
+#   ./manager-os build
+#
+# Flags:
+#   --no-setup  Skip automatic venv creation and dependency installation
+
+set -euo pipefail
+
+# Resolve repository root (directory containing this script)
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT"
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Manager OS — Local-first consulting manager dashboard"
+    echo ""
+    echo "Usage:"
+    echo "  ./manager-os start       Start production dashboard"
+    echo "  ./manager-os dev         Start development mode (API + Vite)"
+    echo "  ./manager-os doctor      Diagnose setup"
+    echo "  ./manager-os build       Build React frontend"
+    echo ""
+    echo "Options:"
+    echo "  --no-setup               Skip automatic setup steps"
+    echo "  --help                   Show this help"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Python interpreter detection
+# ---------------------------------------------------------------------------
+PYTHON=""
+
+# 1. Prefer .venv
+if [[ -x "$REPO_ROOT/.venv/bin/python" ]]; then
+    PYTHON="$REPO_ROOT/.venv/bin/python"
+fi
+
+# 2. Try specific versions
+if [[ -z "$PYTHON" ]]; then
+    for ver in python3.13 python3.12 python3.11; do
+        if command -v "$ver" &>/dev/null; then
+            PYTHON="$(command -v "$ver")"
+            break
+        fi
+    done
+fi
+
+# 3. Fallback to python3 (check version)
+if [[ -z "$PYTHON" ]]; then
+    if command -v python3 &>/dev/null; then
+        ver_str="$(python3 --version 2>&1)"
+        if echo "$ver_str" | grep -qE "^Python 3\.(1[1-9]|[2-9][0-9])"; then
+            PYTHON="$(command -v python3)"
+        fi
+    fi
+fi
+
+if [[ -z "$PYTHON" ]]; then
+    echo "ERROR: Manager OS requires Python >= 3.11."
+    echo ""
+    echo "  Install it via: brew install python@3.12"
+    echo ""
+    echo "  Or create a virtual environment:"
+    echo "    python3 -m venv .venv"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Automatic setup (unless --no-setup)
+# ---------------------------------------------------------------------------
+NO_SETUP=false
+ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--no-setup" ]]; then
+        NO_SETUP=true
+    else
+        ARGS+=("$arg")
+    fi
+done
+
+if ! $NO_SETUP; then
+    # Create .venv if missing
+    if [[ ! -x "$REPO_ROOT/.venv/bin/python" ]]; then
+        echo "Creating virtual environment..."
+        "$PYTHON" -m venv "$REPO_ROOT/.venv"
+        PYTHON="$REPO_ROOT/.venv/bin/python"
+        echo "done."
+    fi
+
+    # Install project in editable mode if not installed
+    if ! "$PYTHON" -c "import manager_os" &>/dev/null 2>&1; then
+        echo "Installing Manager OS and dependencies..."
+        "$PYTHON" -m pip install --quiet --upgrade pip setuptools wheel
+        "$PYTHON" -m pip install --quiet -e ".[dev]"
+        echo "done."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Delegate to CLI
+# ---------------------------------------------------------------------------
+exec "$PYTHON" -m manager_os.cli "${ARGS[@]}"

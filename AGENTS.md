@@ -12,6 +12,7 @@ Manager OS is a local-first Python API and React dashboard for a senior AI/ML co
 | Module | Purpose |
 |--------|---------|
 | `src/manager_os/cli.py` | Typer CLI app — all commands registered here |
+| `src/manager_os/startup.py` | Startup, preflight, doctor, build, and process lifecycle |
 | `src/manager_os/config.py` | Loads and validates YAML configs + .env settings |
 | `src/manager_os/db.py` | DuckDB connection, schema init, helpers |
 | `src/manager_os/schemas.py` | All Pydantic v2 models |
@@ -50,6 +51,10 @@ Manager OS is a local-first Python API and React dashboard for a senior AI/ML co
 ## CLI Commands
 
 ```
+manager-os start       Start production dashboard (API + built React)
+manager-os dev         Start development mode (API + Vite)
+manager-os doctor      Diagnose setup and configuration
+manager-os build       Build React frontend for production
 manager-os ingest [--source all|obsidian|forecast|deals|summary] [--date YYYY-MM-DD] [--force]
 manager-os extract [--date YYYY-MM-DD] [--mode rules|llm|both] [--entity person|client|deal|all]
 manager-os brief [--date YYYY-MM-DD] [--output PATH]
@@ -116,13 +121,28 @@ manager-os demo-reset [--dry-run] [--yes-demo]
 ## Running Locally
 
 ```bash
+./manager-os start
+```
+
+Or for development:
+
+```bash
+./manager-os dev
+```
+
+Or manually:
+
+```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env
 # edit .env with your actual paths
+./manager-os build
 python -m uvicorn manager_os.api.app:app --host 127.0.0.1 --port 8000 --reload
 # In another terminal:
+cd frontend && npm install && npm run dev
+```
 cd frontend && npm install && npm run dev
 ```
 
