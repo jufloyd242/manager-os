@@ -6,7 +6,7 @@ Route handlers stay thin: call one of these, catch exceptions, return.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date
 from typing import Any, Optional
 
 import duckdb
@@ -16,171 +16,33 @@ from manager_os.build.project_index import search_projects
 from manager_os.command_center import history, registry, token_estimator
 from manager_os.command_center.errors import CommandBlockedError
 from manager_os.command_center.runner import build_argv, execute_command
-from manager_os.config import Settings, load_meeting_prep_rules
-from manager_os.extract.entities import EntityResolver
-from manager_os.extract.relationships import resolve_person_relationships
-from manager_os.extract.rule_meeting_prep import build_rule_meeting_prep, DEFAULT_RULES
-from manager_os.schemas import MeetingRecord
+from manager_os.config import Settings
 
 _SOURCE_TABLES = ["projects", "people", "meetings", "signals", "staffing_forecast"]
-
-
-def _format_age(dt: datetime) -> str:
-    now = datetime.now()
-    diff = now - dt
-    seconds = diff.total_seconds()
-    if seconds < 0:
-        return "just now"
-    if seconds < 60:
-        return "less than a minute ago"
-    minutes = seconds / 60
-    if minutes < 60:
-        return f"{int(minutes)} minute{'s' if int(minutes) != 1 else ''} ago"
-    hours = minutes / 60
-    if hours < 24:
-        return f"{int(hours)} hour{'s' if int(hours) != 1 else ''} ago"
-    days = hours / 24
-    return f"{int(days)} day{'s' if int(days) != 1 else ''} ago"
-
-
-def _get_last_successful_fetch(conn: duckdb.DuckDBPyConnection, command_id: str) -> Optional[datetime]:
-    try:
-        res = conn.execute(
-            "SELECT finished_at FROM command_runs WHERE command_id = ? AND status = 'success' ORDER BY finished_at DESC LIMIT 1",
-            [command_id]
-        ).fetchone()
-        if res and res[0]:
-            return res[0]
-    except Exception:
-        pass
-    return None
-
-
-def _get_last_successful_ingest(conn: duckdb.DuckDBPyConnection, table_name: str) -> Optional[datetime]:
-    col = "ingested_at" if table_name == "staffing_forecast" else "updated_at"
-    try:
-        res = conn.execute(f"SELECT MAX({col}) FROM {table_name}").fetchone()
-        if res and res[0]:
-            return res[0]
-    except Exception:
-        pass
-    return None
-
-
-def _get_last_source_date(conn: duckdb.DuckDBPyConnection, table_name: str) -> Optional[date]:
-    col = None
-    if table_name == "meetings":
-        col = "meeting_date"
-    elif table_name == "signals":
-        col = "signal_date"
-    elif table_name == "staffing_forecast":
-        col = "week_start"
-    elif table_name == "people":
-        col = "last_1on1_date"
-    elif table_name == "projects":
-        col = "close_date"
-    
-    if not col:
-        return None
-        
-    try:
-        res = conn.execute(f"SELECT MAX({col}) FROM {table_name}").fetchone()
-        if res and res[0]:
-            val = res[0]
-            if isinstance(val, (datetime, date)):
-                return val
-            if isinstance(val, str):
-                return date.fromisoformat(val.split(" ")[0])
-    except Exception:
-        pass
-    return None
 
 
 def build_status(conn: duckdb.DuckDBPyConnection, settings: Settings) -> dict:
     """Return a local system/data freshness summary, one entry per key table."""
     warnings: list[str] = []
     sources = []
-    
-    command_id_map = {
-        "meetings": "retrieve_calendar",
-        "staffing_forecast": "retrieve_forecast",
-        "projects": "search_projects",
-        "people": "people_audit",
-    }
-
     for name in _SOURCE_TABLES:
         try:
             count = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
-            
-            if count == 0:
-                sources.append({
+            sources.append(
+                {
                     "name": name,
-                    "status": "empty",
-                    "count": 0,
+                    "status": "available" if count else "empty",
+                    "count": count,
                     "last_updated": None,
                     "warnings": [],
-                    "last_source_date": None,
-                    "last_successful_fetch": None,
-                    "last_successful_ingest": None,
-                    "calculated_age": None,
-                    "freshness": "missing",
-                    "explanation": "No records found in database.",
-                })
-                continue
-                
-            last_source_date = _get_last_source_date(conn, name)
-            last_ingest = _get_last_successful_ingest(conn, name)
-            
-            last_fetch = None
-            if name in command_id_map:
-                last_fetch = _get_last_successful_fetch(conn, command_id_map[name])
-                
-            ref_time = last_ingest or last_fetch
-            calculated_age = None
-            freshness = "unknown"
-            explanation = "No ingest/fetch timestamp metadata found to verify freshness."
-            
-            if ref_time:
-                calculated_age = _format_age(ref_time)
-                now = datetime.now()
-                # Check 24 hours
-                if (now - ref_time) <= timedelta(hours=24):
-                    freshness = "fresh"
-                    explanation = f"Data was updated {calculated_age}."
-                else:
-                    freshness = "stale"
-                    explanation = f"Data is stale (updated {calculated_age})."
-            
-            sources.append({
-                "name": name,
-                "status": "available",
-                "count": count,
-                "last_updated": last_ingest.isoformat() if last_ingest else None,
-                "warnings": [],
-                "last_source_date": last_source_date.isoformat() if last_source_date else None,
-                "last_successful_fetch": last_fetch.isoformat() if last_fetch else None,
-                "last_successful_ingest": last_ingest.isoformat() if last_ingest else None,
-                "calculated_age": calculated_age,
-                "freshness": freshness,
-                "explanation": explanation,
-            })
-            
+                }
+            )
         except Exception as exc:
             msg = f"{name}: {exc}"
             warnings.append(msg)
-            sources.append({
-                "name": name,
-                "status": "missing",
-                "count": 0,
-                "last_updated": None,
-                "warnings": [msg],
-                "last_source_date": None,
-                "last_successful_fetch": None,
-                "last_successful_ingest": None,
-                "calculated_age": None,
-                "freshness": "missing",
-                "explanation": f"Failed to inspect source: {exc}",
-            })
+            sources.append(
+                {"name": name, "status": "missing", "count": 0, "last_updated": None, "warnings": [msg]}
+            )
 
     return {
         "ok": True,
@@ -212,138 +74,29 @@ def build_meetings(conn: duckdb.DuckDBPyConnection, target_date: date) -> dict:
         warnings.append(f"meetings: {exc}")
         meetings = []
 
-    # Add sync freshness info
-    sync_info = {"last_synced": None, "source": "local", "stale": True}
+    # Build sync_info from most recent calendar-synced meeting
+    sync_info: dict | None = None
     try:
         row = conn.execute(
-            "SELECT MAX(finished_at) FROM command_runs WHERE command_id = 'retrieve_calendar' AND status = 'success'"
+            """SELECT MAX(updated_at) FROM meetings
+               WHERE meeting_date = ? AND source = 'calendar_sync'""",
+            [target_date],
         ).fetchone()
         if row and row[0]:
-            sync_info["last_synced"] = row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0])
-            sync_info["stale"] = False
+            sync_info = {
+                "last_synced": row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0]),
+                "source": "calendar_sync",
+                "stale": False,
+            }
     except Exception:
         pass
 
-    return {"date": target_date.isoformat(), "meetings": meetings, "warnings": warnings, "sync_info": sync_info}
-
-
-def sync_calendar_date(
-    conn: duckdb.DuckDBPyConnection,
-    target_date: date,
-    settings: Settings,
-) -> dict:
-    """Explicit per-date calendar sync.
-
-    Retrieves only the requested date (lookback=0, lookahead=0),
-    ingests the snapshot, and returns the resulting meetings.
-    """
-    warnings: list[str] = []
-    errors: list[str] = []
-
-    # 1. Retrieve
-    from manager_os.ingest.workspace_gemini import retrieve_calendar
-    from manager_os.ingest.workspace_snapshot import ingest_workspace_calendar_snapshot
-    from manager_os.db import get_connection
-
-    # NOTE: intentionally omit output_dir here so retrieve_calendar() writes
-    # to its own default location (data/raw/workspace_snapshots/calendar/).
-    # ingest_workspace_calendar_snapshot() reads from that exact same
-    # default when base_dir is not supplied. Passing settings.gws_snapshot_dir
-    # here previously caused a path mismatch: the snapshot was written to
-    # gws_snapshot_dir but the ingester looked in workspace_snapshots/calendar,
-    # so ingestion silently found nothing and synced meetings stayed empty.
-    result = retrieve_calendar(
-        target_date=target_date,
-        use_yolo=getattr(settings, "workspace_retrieval_yolo", True),
-        lookback_days=0,
-        lookahead_days=0,
-    )
-
-    if not result.ok:
-        errors.append(result.error or "Calendar retrieval failed")
-        return {
-            "ok": False,
-            "date": target_date.isoformat(),
-            "meetings": [],
-            "retrieved_at": "",
-            "source": "google_calendar_gemini",
-            "warnings": warnings,
-            "errors": errors,
-        }
-
-    # 2. Ingest
-    ingest_result = ingest_workspace_calendar_snapshot(conn, target_date)
-    if ingest_result.errors:
-        warnings.extend(ingest_result.errors)
-
-    # 3. Return meetings for the date
-    try:
-        meetings = get_meetings_for_date(conn, target_date)
-    except Exception as exc:
-        warnings.append(f"meetings: {exc}")
-        meetings = []
-
     return {
-        "ok": True,
         "date": target_date.isoformat(),
         "meetings": meetings,
-        "retrieved_at": result.retrieved_at or "",
-        "source": "google_calendar_gemini",
         "warnings": warnings,
-        "errors": errors,
+        "sync_info": sync_info,
     }
-
-
-def prep_meeting(
-    conn: duckdb.DuckDBPyConnection,
-    meeting_id: str,
-    settings: Settings,
-) -> dict:
-    """Generate structured deterministic prep for one meeting.
-
-    Loads rules from config, resolves relationships from Obsidian, matches
-    a rule, and builds a structured prep response. No Gemini calls.
-    """
-    from manager_os.config import load_people, load_clients, load_deal_aliases
-
-    # 1. Get the meeting
-    row = conn.execute(
-        """SELECT id, meeting_date, start_time, title, attendees,
-                  linked_entities, source, external_id, updated_at
-           FROM meetings WHERE id = ?""",
-        [meeting_id],
-    ).fetchone()
-    if not row:
-        return {"error": f"Meeting {meeting_id} not found"}
-
-    meeting = MeetingRecord(
-        id=row[0],
-        meeting_date=row[1],
-        start_time=row[2] or "",
-        title=row[3] or "",
-        attendees=json.loads(row[4]) if isinstance(row[4], str) else (row[4] or []),
-        linked_entities=json.loads(row[5]) if isinstance(row[5], str) else (row[5] or []),
-        source=row[6] or "",
-        external_id=row[7] or "",
-    )
-
-    # 2. Build resolver
-    people = load_people(settings)
-    clients = load_clients(settings)
-    deal_aliases = load_deal_aliases(settings)
-    resolver = EntityResolver(people, clients, deal_aliases)
-
-    # 3. Resolve relationships from Obsidian
-    rels = resolve_person_relationships(conn, resolver)
-
-    # 4. Load rules
-    rules_config = load_meeting_prep_rules(settings)
-    rules = rules_config.get("rules", DEFAULT_RULES)
-
-    # 5. Build prep
-    prep = build_rule_meeting_prep(meeting, conn, resolver, rels, rules)
-
-    return prep.model_dump(mode="json")
 
 
 def build_projects(conn: duckdb.DuckDBPyConnection, limit: int = 200) -> dict:

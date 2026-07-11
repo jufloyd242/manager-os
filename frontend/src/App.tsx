@@ -11,16 +11,14 @@ import { MeetingsView } from './components/MeetingsView'
 import { DealsView } from './features/deals/DealsView'
 import { ForecastView } from './features/forecast/ForecastView'
 import { getStatus, getDaily } from './api/client'
-import { mockSystemStatus, mockDailyOperatingLoop } from './api/mockData'
 import type { StatusCardData, DailyOperatingLoop, RunRecord, TokenEstimate } from './api/client'
 import type { ViewId } from './components/Sidebar'
 
 function App() {
   const [currentView, setCurrentView] = useState<ViewId>('daily_loop')
   const [status, setStatus] = useState<StatusCardData[]>([])
-  const [statusMock, setStatusMock] = useState(false)
   const [loop, setLoop] = useState<DailyOperatingLoop | null>(null)
-  const [loopMock, setLoopMock] = useState(false)
+  const [backendAvailable, setBackendAvailable] = useState(true)
   const [estimate, setEstimate] = useState<TokenEstimate | null>(null)
   const [runsRefreshKey, setRunsRefreshKey] = useState(0)
   const [toast, setToast] = useState<string | null>(null)
@@ -29,20 +27,17 @@ function App() {
     getStatus()
       .then((result) => {
         setStatus(result.data)
-        setStatusMock(result.isMock)
+        setBackendAvailable(true)
       })
       .catch(() => {
-        setStatus(mockSystemStatus)
-        setStatusMock(true)
+        setBackendAvailable(false)
       })
     getDaily()
       .then((result) => {
         setLoop(result.data)
-        setLoopMock(result.isMock)
       })
       .catch(() => {
-        setLoop(mockDailyOperatingLoop)
-        setLoopMock(true)
+        // Daily is non-critical for availability check
       })
   }, [])
 
@@ -57,7 +52,36 @@ function App() {
     setToast(`Run ${run.status} for "${run.command_id}".`)
   }
 
-  const usingMockData = statusMock || loopMock
+  if (!backendAvailable && currentView === 'daily_loop') {
+    return (
+      <div className="flex h-screen bg-slate-100">
+        <Sidebar currentView={currentView} onViewChange={setCurrentView} />
+        <main className="flex-1 overflow-y-auto p-6">
+          <div className="mx-auto max-w-2xl mt-20 text-center">
+            <h1 className="text-2xl font-bold text-slate-900 mb-4">Manager OS</h1>
+            <div className="rounded-xl border border-amber-300 bg-amber-50 p-6">
+              <p className="text-amber-800 font-medium mb-2">Backend is not available</p>
+              <p className="text-amber-700 text-sm mb-4">
+                The Manager OS API is unreachable at http://127.0.0.1:8000.
+              </p>
+              <p className="text-amber-700 text-sm mb-4">
+                Make sure the backend is running:
+              </p>
+              <code className="block rounded bg-amber-100 px-4 py-2 text-sm font-mono text-amber-900 mb-4">
+                ./manager-os start
+              </code>
+              <button
+                onClick={() => window.location.reload()}
+                className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 cursor-pointer"
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        </main>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-screen bg-slate-100">
@@ -66,15 +90,6 @@ function App() {
         {toast && (
           <div className="mb-4 rounded-lg border border-slate-200 bg-slate-900 px-4 py-2 text-sm text-white shadow">
             {toast}
-          </div>
-        )}
-
-        {usingMockData && currentView === 'daily_loop' && (
-          <div
-            data-testid="dashboard-mock-indicator"
-            className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-800"
-          >
-            Offline / Mock Data — the Manager OS API is unreachable, showing local mock data instead.
           </div>
         )}
 
@@ -123,8 +138,8 @@ function App() {
                       <p className="mt-1 text-2xl font-bold text-slate-900">{loop.people_staffing.length}</p>
                     </div>
                     <div className="rounded-lg border border-slate-200 bg-white p-4">
-                      <p className="text-xs font-medium uppercase text-slate-400">Document Gaps</p>
-                      <p className="mt-1 text-2xl font-bold text-slate-900">{loop.document_gaps.length}</p>
+                      <p className="text-xs font-medium uppercase text-slate-400">Workspace Context</p>
+                      <p className="mt-1 text-2xl font-bold text-slate-900">{loop.meetings.length}</p>
                     </div>
                   </div>
                 </section>
@@ -143,15 +158,22 @@ function App() {
               </>
             )}
 
-            <section aria-label="Command Center and Runs" className="mt-8 grid grid-cols-1 gap-4 xl:grid-cols-3">
-              <div className="xl:col-span-2">
-                <CommandCenter onRunRecorded={handleRunRecorded} onEstimate={setEstimate} />
+            <details className="mt-8 group">
+              <summary className="cursor-pointer text-sm font-semibold text-slate-400 hover:text-slate-600 select-none">
+                <span className="group-open:hidden">▶ </span>
+                <span className="hidden group-open:inline">▼ </span>
+                Advanced
+              </summary>
+              <div className="grid grid-cols-1 gap-4 xl:grid-cols-3 mt-4">
+                <div className="xl:col-span-2">
+                  <CommandCenter onRunRecorded={handleRunRecorded} onEstimate={setEstimate} />
+                </div>
+                <div className="space-y-4">
+                  <TokenBudgetPanel estimate={estimate} />
+                  <RecentRuns refreshKey={runsRefreshKey} />
+                </div>
               </div>
-              <div className="space-y-4">
-                <TokenBudgetPanel estimate={estimate} />
-                <RecentRuns refreshKey={runsRefreshKey} />
-              </div>
-            </section>
+            </details>
           </Layout>
         )}
 

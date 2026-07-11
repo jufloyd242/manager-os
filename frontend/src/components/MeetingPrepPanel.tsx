@@ -6,7 +6,7 @@ interface MeetingPrepPanelProps {
   onRegenerate: () => void
 }
 
-function relationshipBadgeColor(rel: string): string {
+function relationshipBadgeColor(rel: string | null): string {
   switch (rel) {
     case 'direct_report':
       return 'bg-blue-50 text-blue-700 border-blue-200'
@@ -113,9 +113,9 @@ export function MeetingPrepPanel({ prep, onRegenerate }: MeetingPrepPanelProps) 
                 key={i}
                 className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${relationshipBadgeColor(ra.relationship)}`}
               >
-                <span>{ra.name}</span>
+                <span>{ra.person_name}</span>
                 <span className="opacity-70">·</span>
-                <span>{relationshipLabel(ra.relationship)}</span>
+                <span>{relationshipLabel(ra.relationship ?? '')}</span>
               </span>
             ))}
           </div>
@@ -199,7 +199,7 @@ export function MeetingPrepPanel({ prep, onRegenerate }: MeetingPrepPanelProps) 
             <div>
               <p className="font-bold text-slate-600 mb-1">Matched Rule</p>
               <p className="text-slate-500">{prep.matched_rule_name} ({prep.matched_rule_id})</p>
-              <p className="text-slate-400 mt-0.5">{prep.rule_match_explanation}</p>
+              <p className="text-slate-400 mt-0.5">{prep.why_this_rule_matched}</p>
             </div>
 
             {prep.sources_selected.length > 0 && (
@@ -208,13 +208,7 @@ export function MeetingPrepPanel({ prep, onRegenerate }: MeetingPrepPanelProps) 
                 <div className="space-y-1">
                   {prep.sources_selected.map((s, i) => (
                     <div key={i} className="flex items-start gap-2">
-                      <span className="shrink-0 font-mono text-[10px] text-slate-400 bg-slate-100 px-1 rounded">
-                        {s.source_type}
-                      </span>
-                      <span className="text-slate-500">{s.title}</span>
-                      {s.reason_selected && (
-                        <span className="text-slate-400 italic">— {s.reason_selected}</span>
-                      )}
+                      <span className="text-slate-500">{s}</span>
                     </div>
                   ))}
                 </div>
@@ -227,10 +221,7 @@ export function MeetingPrepPanel({ prep, onRegenerate }: MeetingPrepPanelProps) 
                 <div className="space-y-1">
                   {prep.sources_consulted.map((s, i) => (
                     <div key={i} className="flex items-start gap-2">
-                      <span className="shrink-0 font-mono text-[10px] text-slate-400 bg-slate-100 px-1 rounded">
-                        {s.source_type}
-                      </span>
-                      <span className="text-slate-500">{s.title}</span>
+                      <span className="text-slate-500">{s}</span>
                     </div>
                   ))}
                 </div>

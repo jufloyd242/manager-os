@@ -174,7 +174,9 @@ describe('RecommendedActionCard — document-gap structured actions', () => {
     render(<RecommendedActionCard action={INFORMATIONAL_ACTION} />)
 
     expect(screen.getByText(INFORMATIONAL_ACTION.title)).toBeInTheDocument()
-    expect(screen.getByText(INFORMATIONAL_ACTION.reason)).toBeInTheDocument()
+    expect(screen.getByText((_content, node) => {
+      return node?.textContent === `Reason: ${INFORMATIONAL_ACTION.reason}`
+    })).toBeInTheDocument()
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
 

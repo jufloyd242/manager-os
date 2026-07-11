@@ -49,13 +49,13 @@ describe('App', () => {
     ).toBeInTheDocument()
   })
 
-  it('falls back to mock data and shows an offline indicator when the API is unreachable', async () => {
+  it('shows backend-unavailable state when the API is unreachable', async () => {
     vi.mocked(getStatus).mockRejectedValueOnce(new Error('network error'))
     vi.mocked(getDaily).mockRejectedValueOnce(new Error('network error'))
 
     render(<App />)
 
-    expect(await screen.findByTestId('dashboard-mock-indicator')).toBeInTheDocument()
+    expect(await screen.findByText(/Backend is not available/i)).toBeInTheDocument()
   })
 })
 

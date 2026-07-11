@@ -78,7 +78,7 @@ export function MeetingsView({ initialDate }: MeetingsViewProps) {
       setMeetings(result.data.meetings || [])
       setWarnings(result.data.warnings || [])
       setSyncInfo(result.data.sync_info || null)
-    } catch (err) {
+    } catch {
       setError('Failed to load meetings. Is the backend running?')
       setMeetings([])
     } finally {
@@ -104,7 +104,7 @@ export function MeetingsView({ initialDate }: MeetingsViewProps) {
       if (result.data.errors?.length) {
         setError(result.data.errors.join('; '))
       }
-    } catch (err) {
+    } catch {
       setError('Calendar sync failed. Is Gemini CLI configured?')
     } finally {
       setSyncing(false)
@@ -131,7 +131,7 @@ export function MeetingsView({ initialDate }: MeetingsViewProps) {
     try {
       const result = await getMeetingPrep(m.id)
       setPrep(result.data)
-    } catch (err) {
+    } catch {
       setPrepError('Failed to load meeting preparation.')
     } finally {
       setPrepLoading(false)
@@ -145,7 +145,7 @@ export function MeetingsView({ initialDate }: MeetingsViewProps) {
     try {
       const result = await regeneratePrep(selectedMeeting.id)
       setPrep(result.data)
-    } catch (err) {
+    } catch {
       setPrepError('Failed to regenerate preparation.')
     } finally {
       setPrepLoading(false)

@@ -15,14 +15,9 @@ export function ForecastView() {
     setError(null)
     try {
       const result = await getForecast({ week_start: selectedWeek || undefined, exceptions_only: exceptionsOnly || undefined, limit: 200 })
-      if (result.isMock) {
-        setError('Backend unavailable')
-        setData(null)
-      } else {
-        setData(result.data)
-        if (!selectedWeek && result.data.selected_week) {
-          setSelectedWeek(result.data.selected_week)
-        }
+      setData(result.data)
+      if (!selectedWeek && result.data.selected_week) {
+        setSelectedWeek(result.data.selected_week)
       }
     } catch {
       setError('Failed to load forecast')
@@ -42,10 +37,11 @@ export function ForecastView() {
   }
 
   const weekBack = () => {
-    if (!selectedWeek) return
-    const d = new Date(selectedWeek + 'T00:00:00')
-    d.setDate(d.getDate() - 7)
-    setSelectedWeek(d.toISOString().split('T')[0])
+    if (!selectedWeek || !data?.available_weeks) return
+    const idx = data.available_weeks.indexOf(selectedWeek)
+    if (idx > 0) {
+      setSelectedWeek(data.available_weeks[idx - 1])
+    }
   }
 
   const weekForward = () => {

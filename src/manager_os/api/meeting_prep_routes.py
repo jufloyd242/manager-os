@@ -508,3 +508,108 @@ def regenerate_meeting_prep(
 ) -> dict:
     """Regenerate deterministic meeting preparation. No external calls."""
     return get_meeting_prep(meeting_id, conn=conn, settings=settings)
+
+
+@router.post("/meetings/sync-calendar")
+def sync_calendar(
+    body: dict,
+    conn: duckdb.DuckDBPyConnection = Depends(get_db_connection),
+    settings: Settings = Depends(get_fresh_settings),
+) -> dict:
+    """Sync calendar events for a specific date via Gemini CLI.
+
+    This is an explicit external operation — only called when the user
+    clicks the Sync Calendar button.
+    """
+    from datetime import datetime as _dt
+    from manager_os.ingest.workspace_gemini import retrieve_calendar
+    from manager_os.db import get_connection as _get_conn
+
+    target_date_str = body.get("date", "")
+    if not target_date_str:
+        raise HTTPException(status_code=400, detail="Missing 'date' field")
+
+    try:
+        target_date = date.fromisoformat(target_date_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date: {target_date_str!r}")
+
+    try:
+        result = retrieve_calendar(
+            target_date,
+            use_yolo=True,
+            timeout=180,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "date": target_date_str,
+            "meetings": [],
+            "retrieved_at": _dt.utcnow().isoformat(),
+            "source": "gemini_cli",
+            "warnings": [],
+            "errors": [f"Calendar retrieval failed: {exc}"],
+        }
+
+    if not result.ok:
+        return {
+            "ok": False,
+            "date": target_date_str,
+            "meetings": [],
+            "retrieved_at": _dt.utcnow().isoformat(),
+            "source": "gemini_cli",
+            "warnings": [],
+            "errors": [result.error or "Calendar retrieval returned failure status"],
+        }
+
+    # Write calendar events to the meetings table
+    meetings = []
+    for event in result.items:
+        try:
+            meeting_id = event.get("id", f"cal-{target_date_str}-{len(meetings)}")
+            conn.execute(
+                """INSERT OR REPLACE INTO meetings
+                   (id, meeting_date, start_time, end_time, title, attendees,
+                    linked_entities, source, external_id, location,
+                    description_summary, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    meeting_id,
+                    target_date,
+                    event.get("start_time", ""),
+                    event.get("end_time"),
+                    event.get("title", "Untitled"),
+                    str(event.get("attendees", [])),
+                    str(event.get("linked_entities", [])),
+                    "calendar_sync",
+                    event.get("external_id", meeting_id),
+                    event.get("location"),
+                    event.get("description_summary"),
+                    _dt.utcnow(),
+                ],
+            )
+            meetings.append({
+                "id": meeting_id,
+                "meeting_date": target_date_str,
+                "start_time": event.get("start_time", ""),
+                "end_time": event.get("end_time"),
+                "location": event.get("location"),
+                "description_summary": event.get("description_summary"),
+                "title": event.get("title", "Untitled"),
+                "attendees": event.get("attendees", []),
+                "linked_entities": event.get("linked_entities", []),
+                "source": "calendar_sync",
+                "external_id": event.get("external_id", meeting_id),
+            })
+        except Exception as exc:
+            continue
+
+    return {
+        "ok": True,
+        "date": target_date_str,
+        "meetings": meetings,
+        "retrieved_at": _dt.utcnow().isoformat(),
+        "source": "gemini_cli",
+        "warnings": [],
+        "errors": [],
+    }

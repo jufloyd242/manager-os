@@ -167,8 +167,9 @@ describe('ActionInbox', () => {
     const group = screen.getByTestId('action-group-document_gaps')
     const search = within(group).getByRole('textbox', { name: /search/i })
     await user.type(search, 'OPP-DOCGAP-030')
-    expect(within(group).getAllByTestId('action-item')).toHaveLength(1)
-    expect(within(group).getByText(/OPP-DOCGAP-030/)).toBeInTheDocument()
+    const items = within(group).getAllByTestId('action-item')
+    expect(items).toHaveLength(1)
+    expect(items[0]).toHaveTextContent('OPP-DOCGAP-030')
   })
 
   it('typing a client/project name into the search box filters similarly', async () => {

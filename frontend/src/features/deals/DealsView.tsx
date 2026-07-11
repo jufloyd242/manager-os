@@ -16,12 +16,7 @@ export function DealsView() {
     setError(null)
     try {
       const result = await getDeals({ search: search || undefined, attention_only: attentionOnly || undefined, limit: 200 })
-      if (result.isMock) {
-        setError('Backend unavailable — showing no data')
-        setData(null)
-      } else {
-        setData(result.data)
-      }
+      setData(result.data)
     } catch {
       setError('Failed to load deals')
       setData(null)

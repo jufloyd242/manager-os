@@ -20,12 +20,6 @@ class SourceHealth(BaseModel):
     count: int
     last_updated: str | None = None
     warnings: list[str] = []
-    last_source_date: str | None = None
-    last_successful_fetch: str | None = None
-    last_successful_ingest: str | None = None
-    calculated_age: str | None = None
-    freshness: str = "unknown" # fresh | stale | missing | unknown
-    explanation: str | None = None
 
 
 class StatusResponse(BaseModel):
@@ -52,7 +46,6 @@ class DailyResponse(BaseModel):
     # older build_daily_operating_loop() that hasn't been updated yet.
     action_summary: dict[str, Any] = Field(default_factory=dict)
     action_groups: list[dict[str, Any]] = Field(default_factory=list)
-    unfiltered_recommended_actions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PeopleResponse(BaseModel):
@@ -63,44 +56,8 @@ class PeopleResponse(BaseModel):
 class MeetingsResponse(BaseModel):
     date: str
     meetings: list[dict[str, Any]]
+    sync_info: dict[str, Any] | None = None
     warnings: list[str] = []
-    sync_info: dict[str, Any] = {}
-
-
-class CalendarSyncResponse(BaseModel):
-    ok: bool
-    date: str
-    meetings: list[dict[str, Any]]
-    retrieved_at: str = ""
-    source: str = "google_calendar_gemini"
-    warnings: list[str] = []
-    errors: list[str] = []
-
-
-class CalendarSyncRequest(BaseModel):
-    date: str
-
-
-class MeetingPrepResponse(BaseModel):
-    meeting_id: str
-    meeting_title: str
-    meeting_date: str
-    meeting_time: str = ""
-    attendees: list[str] = []
-    resolved_attendees: list[dict[str, Any]] = []
-    matched_rule_id: str = "generic_fallback"
-    matched_rule_name: str = "Generic Meeting"
-    rule_match_explanation: str = ""
-    meeting_type: str = "generic"
-    prep_required: bool = True
-    sections: dict[str, Any] = {}
-    sources_consulted: list[dict[str, Any]] = []
-    sources_selected: list[dict[str, Any]] = []
-    sources_excluded: list[str] = []
-    missing_context_warnings: list[str] = []
-    project_doc_warnings_suppressed: bool = False
-    generated_at: str = ""
-    llm_enriched: bool = False
 
 
 class ProjectsResponse(BaseModel):
@@ -186,9 +143,3 @@ class RunLogsResponse(BaseModel):
     stdout: str | None = None
     stderr: str | None = None
     error: str | None = None
-
-
-class FeedbackRequestBody(BaseModel):
-    item_id: str
-    rating: str
-    reason: str | None = None
