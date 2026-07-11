@@ -207,6 +207,61 @@ def test_retrieve_calendar_ok(fake_calendar_response, tmp_path: Path) -> None:
     assert Path(result.written_to).exists()
 
 
+def test_retrieve_calendar_passes_zero_lookback_not_replaced(fake_calendar_response, tmp_path: Path) -> None:
+    """Exact-date sync: zero lookback/lookahead must stay zero, not fall back to defaults."""
+    result = retrieve_calendar(
+        date.today(),
+        output_dir=str(tmp_path),
+        lookback_days=0,
+        lookahead_days=0,
+    )
+    assert result.ok is True
+
+
+def test_retrieve_calendar_zero_lookback_not_overridden_by_default(tmp_path: Path) -> None:
+    """When 0 is explicitly passed, the default CALENDAR_LOOKBACK_DAYS must NOT be used."""
+    from manager_os.ingest.workspace_gemini import CALENDAR_LOOKBACK_DAYS, CALENDAR_LOOKAHEAD_DAYS
+
+    # Verify defaults are non-zero (so test is meaningful)
+    assert CALENDAR_LOOKBACK_DAYS > 0, "Default lookback must be >0 for this test"
+    assert CALENDAR_LOOKAHEAD_DAYS > 0, "Default lookahead must be >0 for this test"
+
+    # Dry-run to inspect prompt text
+    result = retrieve_calendar(
+        date(2026, 7, 10),
+        dry_run=True,
+        output_dir=str(tmp_path),
+        lookback_days=0,
+        lookahead_days=0,
+    )
+    prompt = result.json_text.lower()
+    # Should say lookback=0, not lookback=<default>
+    assert "lookback=0d" in prompt, (
+        f"Expected 'lookback=0d' in prompt but got defaults. "
+        f"Prompt excerpt: {prompt[:300]}"
+    )
+    assert "ahead=0d" in prompt, (
+        f"Expected 'ahead=0d' in prompt but got defaults. "
+        f"Prompt excerpt: {prompt[:300]}"
+    )
+    # Ensure the default values do not appear
+    assert f"lookback={CALENDAR_LOOKBACK_DAYS}d" not in prompt
+    assert f"ahead={CALENDAR_LOOKAHEAD_DAYS}d" not in prompt
+
+
+def test_retrieve_calendar_none_lookback_uses_default(fake_calendar_response, tmp_path: Path) -> None:
+    """When lookback_days=None is passed, the configured default must be used."""
+    from manager_os.ingest.workspace_gemini import CALENDAR_LOOKBACK_DAYS, CALENDAR_LOOKAHEAD_DAYS
+
+    result = retrieve_calendar(
+        date.today(),
+        output_dir=str(tmp_path),
+        lookback_days=None,
+        lookahead_days=None,
+    )
+    assert result.ok is True
+
+
 # ------------------------------------------------------------------
 # Tests for retrieve_activity (mocked Gemini)
 # ------------------------------------------------------------------

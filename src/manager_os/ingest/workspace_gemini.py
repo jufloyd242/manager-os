@@ -279,8 +279,8 @@ def retrieve_calendar(
     """
     prompt = CALENDAR_PROMPT_TEMPLATE.format(
         target_date=target_date.isoformat(),
-        lookback_days=lookback_days or CALENDAR_LOOKBACK_DAYS,
-        lookahead_days=lookahead_days or CALENDAR_LOOKAHEAD_DAYS,
+        lookback_days=lookback_days if lookback_days is not None else CALENDAR_LOOKBACK_DAYS,
+        lookahead_days=lookahead_days if lookahead_days is not None else CALENDAR_LOOKAHEAD_DAYS,
     )
 
     result = RetrievalResult(dry_run=dry_run)
@@ -315,10 +315,10 @@ ACTIVITY_PROMPT_TEMPLATE = """\
 You are operating in read-only mode.
 Do not send, edit, delete, or modify any Chat messages or Google Workspace data.
 
-Use the Google Chat API to retrieve the most recent messages from the Chat space with ID AAQA61WgdSs.
+Open this Google Chat space/app URL:
+{chat_url}
 
-List messages for {target_date} (or the most recent within {lookback_days} day(s) if no messages exist for that exact date).
-Summarize the daily activity: who posted, what was discussed, any action items or decisions made.
+Retrieve the daily activity summary and action items for {target_date} (or the most recent within {lookback_days} day(s) if not available).
 
 Return ONLY JSON:
 {{"ok":true,"source":"google_chat_activity_summary","source_url":"{chat_url}","retrieved_at":"ISO8601","summary_date":"YYYY-MM-DD","summary":"str","items":[{{"type":"action_item|mention|doc_update|other","title":"str","description":"str","source_url":"str","requires_attention":true,"assigned_to":"str","due_date":"YYYY-MM-DD|null","entity_type":"str","entity_name":"str","confidence":1.0}}],"action_items":[]}}
