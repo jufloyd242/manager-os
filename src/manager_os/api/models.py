@@ -65,6 +65,28 @@ class ProjectsResponse(BaseModel):
     warnings: list[str] = []
 
 
+class ProjectDocumentEntry(BaseModel):
+    id: str = ""
+    project_id: str = ""
+    opportunity_number: str = ""
+    client: str = ""
+    project_name: str = ""
+    document_type: str = ""
+    title: str = ""
+    url: str = ""
+    source: str = ""
+    retrieved_at: str | None = None
+    search_status: str = ""
+    confidence: float = 0.0
+    why_matched: str = ""
+
+
+class ProjectDocumentsResponse(BaseModel):
+    opportunity_number: str
+    documents: list[ProjectDocumentEntry] = []
+    warnings: list[str] = []
+
+
 class FeedbackResponse(BaseModel):
     candidates: list[dict[str, Any]]
     warnings: list[str] = []

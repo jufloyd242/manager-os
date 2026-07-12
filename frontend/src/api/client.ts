@@ -611,6 +611,35 @@ export function getProjects(): Promise<ApiResult<ProjectsResponse>> {
   )
 }
 
+export interface ProjectDocumentEntry {
+  id: string
+  project_id: string
+  opportunity_number: string
+  client: string
+  project_name: string
+  document_type: string
+  title: string
+  url: string
+  source: string
+  retrieved_at: string | null
+  search_status: string
+  confidence: number
+  why_matched: string
+}
+
+export interface ProjectDocumentsResponse {
+  opportunity_number: string
+  documents: ProjectDocumentEntry[]
+  warnings: string[]
+}
+
+export function getProjectDocuments(opp: string): Promise<ApiResult<ProjectDocumentsResponse>> {
+  return withMockFallback(
+    () => requestJson<ProjectDocumentsResponse>(`/api/projects/${encodeURIComponent(opp)}/documents`),
+    () => ({ opportunity_number: opp, documents: [], warnings: ['Backend unavailable'] }),
+  )
+}
+
 // --- Workspace Context -------------------------------------------------------
 
 export interface WorkspaceContextItem {

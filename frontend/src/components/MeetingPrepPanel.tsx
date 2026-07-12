@@ -1,9 +1,9 @@
-import { useState } from 'react'
 import type { MeetingPrepResponse } from '../api/client'
 
 interface MeetingPrepPanelProps {
   prep: MeetingPrepResponse
   onRegenerate: () => void
+  regenerating?: boolean
 }
 
 function relationshipBadgeColor(rel: string | null): string {
@@ -80,15 +80,29 @@ function sectionTitle(sectionName: string): string {
   }
 }
 
-export function MeetingPrepPanel({ prep, onRegenerate }: MeetingPrepPanelProps) {
-  const [showProvenance, setShowProvenance] = useState(false)
-
+export function MeetingPrepPanel({ prep, onRegenerate, regenerating }: MeetingPrepPanelProps) {
   const sectionNames = Object.keys(prep.sections)
 
+  // Ordered sections: What to know → What changed → Decisions needed → Risks →
+  // Open commitments → Talking points → Questions → Follow-ups
+  const sectionOrder = [
+    'what_to_know', 'prior_notes', 'changes',
+    'decisions_needed', 'decisions',
+    'risks', 'blockers',
+    'commitments', 'actions',
+    'talking_points',
+    'questions',
+    'follow_ups', 'followups',
+  ]
+  const orderedSections = [
+    ...sectionOrder.filter(s => sectionNames.includes(s)),
+    ...sectionNames.filter(s => !sectionOrder.includes(s)),
+  ].filter((v, i, a) => a.indexOf(v) === i) // dedup
+
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-      {/* Header */}
-      <div className="border-b border-slate-100 p-5">
+    <div className="bg-white border border-slate-200">
+      {/* Sticky header */}
+      <div className="sticky top-0 bg-white border-b border-slate-100 p-4 z-10">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <h3 className="text-base font-bold text-slate-900 truncate">{prep.meeting_title}</h3>
@@ -99,9 +113,10 @@ export function MeetingPrepPanel({ prep, onRegenerate }: MeetingPrepPanelProps) 
           </div>
           <button
             onClick={onRegenerate}
-            className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold text-indigo-600 hover:bg-indigo-50 border border-indigo-200 transition-colors cursor-pointer"
+            disabled={regenerating}
+            className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium text-indigo-600 hover:bg-indigo-50 border border-indigo-200 transition-colors cursor-pointer disabled:opacity-50"
           >
-            Regenerate
+            {regenerating ? 'Regenerating...' : 'Regenerate'}
           </button>
         </div>
 
@@ -123,11 +138,11 @@ export function MeetingPrepPanel({ prep, onRegenerate }: MeetingPrepPanelProps) 
 
         {/* Rule match */}
         <div className="mt-3 flex items-center gap-2">
-          <span className="text-xs font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100">
+          <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100">
             {prep.matched_rule_name}
           </span>
           {!prep.prep_required && (
-            <span className="text-xs font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-md">
+            <span className="text-xs font-medium text-slate-400 bg-slate-100 px-2 py-0.5 rounded-md">
               No prep needed
             </span>
           )}
@@ -142,9 +157,9 @@ export function MeetingPrepPanel({ prep, onRegenerate }: MeetingPrepPanelProps) 
       )}
 
       {/* Sections */}
-      {prep.prep_required && sectionNames.length > 0 && (
-        <div className="p-5 space-y-5">
-          {sectionNames.map((sectionName) => {
+      {prep.prep_required && orderedSections.length > 0 && (
+        <div className="p-4 space-y-4">
+          {orderedSections.map((sectionName) => {
             const items = prep.sections[sectionName] as Array<Record<string, unknown>> | undefined
             if (!items || items.length === 0) return null
 
@@ -172,70 +187,70 @@ export function MeetingPrepPanel({ prep, onRegenerate }: MeetingPrepPanelProps) 
 
       {/* AI enrichment indicator */}
       {prep.llm_enriched && (
-        <div className="mx-5 mb-4 rounded-lg bg-indigo-50 border border-indigo-200 px-3 py-2 text-xs text-indigo-700">
+        <div className="mx-4 mb-4 rounded-lg bg-indigo-50 border border-indigo-200 px-3 py-2 text-xs text-indigo-700">
           This preparation was enhanced with AI.
         </div>
       )}
 
-      {/* Provenance section (collapsible) */}
-      <div className="border-t border-slate-100">
-        <button
-          onClick={() => setShowProvenance(!showProvenance)}
-          className="w-full px-5 py-3 flex items-center justify-between text-xs font-bold text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
-        >
-          <span>Why this prep?</span>
-          <svg
-            className={`w-4 h-4 transition-transform ${showProvenance ? 'rotate-180' : ''}`}
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-          </svg>
-        </button>
+      {/* Provenance section (collapsed disclosure) */}
+      <details className="border-t border-slate-100">
+        <summary className="px-4 py-3 flex items-center justify-between text-xs font-medium text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer list-none">
+          <span>Why this prep? — Technical provenance</span>
+        </summary>
 
-        {showProvenance && (
-          <div className="px-5 pb-4 space-y-3 text-xs text-slate-500">
-            <div>
-              <p className="font-bold text-slate-600 mb-1">Matched Rule</p>
-              <p className="text-slate-500">{prep.matched_rule_name} ({prep.matched_rule_id})</p>
-              <p className="text-slate-400 mt-0.5">{prep.why_this_rule_matched}</p>
-            </div>
-
-            {prep.sources_selected.length > 0 && (
-              <div>
-                <p className="font-bold text-slate-600 mb-1">Sources Selected ({prep.sources_selected.length})</p>
-                <div className="space-y-1">
-                  {prep.sources_selected.map((s, i) => (
-                    <div key={i} className="flex items-start gap-2">
-                      <span className="text-slate-500">{s}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {prep.sources_consulted.length > 0 && (
-              <div>
-                <p className="font-bold text-slate-600 mb-1">Sources Consulted ({prep.sources_consulted.length})</p>
-                <div className="space-y-1">
-                  {prep.sources_consulted.map((s, i) => (
-                    <div key={i} className="flex items-start gap-2">
-                      <span className="text-slate-500">{s}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div>
-              <p className="font-bold text-slate-600 mb-1">Generated</p>
-              <p className="text-slate-400">{prep.generated_at}</p>
-              <p className="text-slate-400">AI enrichment: {prep.llm_enriched ? 'Yes' : 'No (deterministic)'}</p>
-            </div>
+        <div className="px-4 pb-4 space-y-3 text-xs text-slate-500">
+          <div>
+            <p className="font-bold text-slate-600 mb-1">Matched Rule</p>
+            <p className="text-slate-500">{prep.matched_rule_name} ({prep.matched_rule_id})</p>
+            <p className="text-slate-400 mt-0.5">{prep.why_this_rule_matched}</p>
           </div>
-        )}
-      </div>
+
+          {prep.sources_selected.length > 0 && (
+            <div>
+              <p className="font-bold text-slate-600 mb-1">Sources Selected ({prep.sources_selected.length})</p>
+              <div className="space-y-1">
+                {prep.sources_selected.map((s, i) => (
+                  <div key={i} className="flex items-start gap-2">
+                    <span className="text-slate-500">{s}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {prep.sources_consulted.length > 0 && (
+            <div>
+              <p className="font-bold text-slate-600 mb-1">Sources Consulted ({prep.sources_consulted.length})</p>
+              <div className="space-y-1">
+                {prep.sources_consulted.map((s, i) => (
+                  <div key={i} className="flex items-start gap-2">
+                    <span className="text-slate-500">{s}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {prep.sources_excluded.length > 0 && (
+            <div>
+              <p className="font-bold text-slate-600 mb-1">Sources Excluded ({prep.sources_excluded.length})</p>
+              <div className="space-y-1">
+                {prep.sources_excluded.map((s, i) => (
+                  <div key={i} className="flex items-start gap-2">
+                    <span className="text-slate-400 line-through">{s}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div>
+            <p className="font-bold text-slate-600 mb-1">Generated</p>
+            <p className="text-slate-400">{prep.generated_at}</p>
+            <p className="text-slate-400">AI enrichment: {prep.llm_enriched ? 'Yes' : 'No (deterministic)'}</p>
+          </div>
+        </div>
+      </details>
     </div>
   )
 }

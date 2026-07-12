@@ -3086,6 +3086,11 @@ def project_docs_fetch(
         raise typer.Exit(0)
 
     if dry_run:
+        from manager_os.ingest.project_doc_retrieval import execute_retrieval, RetrievalStatus
+        result = execute_retrieval(
+            stored_opp, client, project_name,
+            dry_run=True, timeout=timeout, limit=limit,
+        )
         console.print("[bold]Project Docs Fetch — Dry Run[/bold]")
         console.print(f"  Project ID:       {project_id}")
         console.print(f"  Opportunity #:    {stored_opp}")
@@ -3094,47 +3099,97 @@ def project_docs_fetch(
         console.print(f"  Limit:            {limit}")
         console.print(f"  Timeout:          {timeout}s")
         console.print(f"  Force:            {force}")
-        console.print("\n[dim]Would search Google Drive for documents related to this project.[/dim]")
+        console.print(f"\n[bold]Query Plan ({len(result.diagnostics.query_attempts)} queries):[/bold]")
+        for qa in result.diagnostics.query_attempts:
+            console.print(f"  Stage {qa['stage']} ({qa['query_type']}) {qa['term']}")
+        console.print(f"\n  Search variants: {', '.join(result.diagnostics.search_variants)}")
+        console.print("\n[dim]Would search Google Drive using this OPP-first query plan.[/dim]")
         raise typer.Exit(0)
 
     console.print(f"[bold]Fetching Drive docs for {stored_opp} — {project_name} ({client})[/bold]")
-    
-    drive_result = search_drive_for_project_docs(
-        opportunity_number=stored_opp,
-        client=client,
-        project_name=project_name,
-        timeout=timeout,
+
+    from manager_os.ingest.project_doc_retrieval import execute_retrieval, RetrievalStatus
+    from manager_os.ingest.project_drive_docs import ProjectDocument
+    from datetime import datetime as _dt
+
+    result = execute_retrieval(
+        stored_opp, client, project_name,
+        dry_run=False, timeout=timeout, limit=limit,
     )
 
-    if drive_result.warnings and verbose:
-        for warning in drive_result.warnings:
-            console.print(f"[yellow]⚠ {warning}[/yellow]")
-
-    if drive_result.errors:
-        for error in drive_result.errors:
-            console.print(f"[red]✗ {error}[/red]")
+    # Handle error statuses with distinct messages
+    if result.status == RetrievalStatus.OPP_MISSING:
+        console.print("[red]No opportunity number provided.[/red]")
         raise typer.Exit(1)
-
-    if not drive_result.documents:
+    if result.status == RetrievalStatus.TIMEOUT:
+        console.print(f"[red]✗ Gemini CLI timed out after {timeout}s[/red]")
+        if verbose and result.diagnostics.provider_errors:
+            for e in result.diagnostics.provider_errors:
+                console.print(f"[red]  {e}[/red]")
+        raise typer.Exit(1)
+    if result.status == RetrievalStatus.AUTH_FAILURE:
+        console.print("[red]✗ Authentication failure — check Gemini CLI credentials[/red]")
+        raise typer.Exit(1)
+    if result.status == RetrievalStatus.PROVIDER_UNAVAILABLE:
+        console.print("[red]✗ Provider unavailable[/red]")
+        if verbose and result.diagnostics.provider_errors:
+            for e in result.diagnostics.provider_errors:
+                console.print(f"[red]  {e}[/red]")
+        raise typer.Exit(1)
+    if result.status == RetrievalStatus.PARSE_FAILURE:
+        console.print("[red]✗ Failed to parse provider response[/red]")
+        if verbose and result.diagnostics.provider_errors:
+            for e in result.diagnostics.provider_errors:
+                console.print(f"[red]  {e}[/red]")
+        raise typer.Exit(1)
+    if result.status == RetrievalStatus.ZERO_CANDIDATES:
         console.print("[yellow]No documents found in Google Drive.[/yellow]")
+        if verbose:
+            console.print(f"[dim]  Queries attempted: {len(result.diagnostics.query_attempts)}[/dim]")
         raise typer.Exit(0)
 
-    # Set project_id on documents
-    for doc in drive_result.documents:
-        doc.project_id = project_id
+    # Success or partial failure — upsert documents
+    docs_to_upsert = []
+    for cand in result.documents:
+        docs_to_upsert.append(ProjectDocument(
+            project_id=project_id,
+            opportunity_number=stored_opp,
+            client=client,
+            project_name=project_name,
+            document_type=cand.document_type,
+            title=cand.title,
+            url=cand.url,
+            source=cand.source,
+            retrieved_at=_dt.utcnow().isoformat(),
+            search_status="success",
+            confidence=cand.confidence,
+            why_matched=", ".join(cand.match_reasons) if hasattr(cand, 'match_reasons') else cand.why_matched,
+            metadata_json=cand.metadata,
+        ))
 
-    # Limit documents
-    docs_to_upsert = drive_result.documents[:limit]
+    inserted, updated, skipped = upsert_project_documents(conn, docs_to_upsert, force=force)
 
-    inserted, updated = upsert_project_documents(conn, docs_to_upsert, force=force)
-    
-    console.print(f"[green]✓ Found {len(drive_result.documents)} documents[/green]")
-    console.print(f"  Inserted: {inserted}, Updated: {updated}")
-    
+    status_label = "✓" if result.status == RetrievalStatus.SUCCESS else "⚠ (partial)"
+    console.print(f"[green]{status_label} Found {len(result.documents)} documents[/green]")
+    console.print(f"  Inserted: {inserted}, Updated: {updated}, Skipped: {skipped}")
+
+    if result.status == RetrievalStatus.PARTIAL_FAILURE and verbose:
+        for e in result.diagnostics.provider_errors:
+            console.print(f"[yellow]⚠ {e}[/yellow]")
+
     if verbose:
         for doc in docs_to_upsert:
             console.print(f"  - [{doc.document_type}] {doc.title}")
             console.print(f"    {doc.url}")
+        # Diagnostics
+        console.print(f"\n[bold]Diagnostics:[/bold]")
+        console.print(f"  Canonical OPP:   {result.diagnostics.canonical_opp}")
+        console.print(f"  Variants:         {', '.join(result.diagnostics.search_variants)}")
+        console.print(f"  Queries:          {len(result.diagnostics.query_attempts)}")
+        console.print(f"  Deduped:          {result.diagnostics.deduplicated_count}")
+        console.print(f"  Accepted:         {result.diagnostics.accepted_count}")
+        console.print(f"  Rejected:         {result.diagnostics.rejected_count}")
+        console.print(f"  Duration:         {result.diagnostics.execution_duration_ms:.0f}ms")
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ from manager_os.api.models import (
     HealthResponse,
     MeetingsResponse,
     PeopleResponse,
+    ProjectDocumentsResponse,
     ProjectsResponse,
     RunListResponse,
     RunLogsResponse,
@@ -108,6 +109,13 @@ def create_app(frontend_dist: str | Path | None = None) -> FastAPI:
         conn: duckdb.DuckDBPyConnection = Depends(get_db_connection),
     ) -> ProjectsResponse:
         return ProjectsResponse(**services.build_projects(conn))
+
+    @app.get("/api/projects/{opportunity_number}/documents", response_model=ProjectDocumentsResponse)
+    def project_documents(
+        opportunity_number: str,
+        conn: duckdb.DuckDBPyConnection = Depends(get_db_connection),
+    ) -> ProjectDocumentsResponse:
+        return ProjectDocumentsResponse(**services.build_project_documents(conn, opportunity_number))
 
     @app.get("/api/feedback", response_model=FeedbackResponse)
     def feedback(

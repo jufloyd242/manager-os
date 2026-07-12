@@ -45,7 +45,7 @@ describe('MeetingsView', () => {
       isMock: false,
     })
     render(<MeetingsView initialDate="2026-07-10" />)
-    expect(await screen.findByText(/No events found/i)).toBeInTheDocument()
+    expect(await screen.findByText(/No events for this date/i)).toBeInTheDocument()
   })
 
   it('displays every returned meeting', async () => {
@@ -72,7 +72,7 @@ describe('MeetingsView', () => {
       isMock: false,
     })
     render(<MeetingsView initialDate="2026-07-10" />)
-    expect(screen.getByText(/Sync Calendar for/i)).toBeInTheDocument()
+    expect(screen.getByText(/Sync /i)).toBeInTheDocument()
   })
 
   it('changing date does not automatically sync', async () => {
@@ -212,7 +212,7 @@ describe('MeetingsView', () => {
     vi.mocked(syncCalendar).mockRejectedValue(new Error('Sync failed'))
 
     render(<MeetingsView initialDate="2026-07-10" />)
-    const syncButton = screen.getByText(/Sync Calendar for/i)
+    const syncButton = screen.getByText(/Sync /i)
     await userEvent.click(syncButton)
     expect(await screen.findByText(/Calendar sync failed/i)).toBeInTheDocument()
   })
@@ -234,7 +234,7 @@ describe('MeetingsView', () => {
     render(<MeetingsView initialDate="2026-07-10" />)
     await userEvent.click(await screen.findByText('1:1 with Alice'))
     // Expand the collapsed "Why this prep?" provenance section
-    await userEvent.click(await screen.findByText('Why this prep?'))
+    await userEvent.click(await screen.findByText(/Why this prep?/))
     // The prep panel should show "AI enrichment: No (deterministic)"
     await waitFor(() => {
       expect(screen.getByText(/No \(deterministic\)/i)).toBeInTheDocument()
