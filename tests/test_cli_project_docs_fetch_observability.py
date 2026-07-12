@@ -1,7 +1,6 @@
 """Observability tests for the live `manager-os project-docs-fetch` path.
 
-`search_drive_for_project_docs` is mocked in every test here — no live
-Gemini/Workspace calls.
+`execute_retrieval` is mocked in every test here — no live Gemini/Workspace calls.
 """
 
 from __future__ import annotations
@@ -13,7 +12,12 @@ from typer.testing import CliRunner
 
 from manager_os.cli import app
 from manager_os.db import get_connection
-from manager_os.ingest.project_drive_docs import DriveSearchResult, ProjectDocument
+from manager_os.ingest.project_doc_retrieval import (
+    RetrievalResult,
+    RetrievalDiagnostics,
+    RetrievalStatus,
+    RankedCandidate,
+)
 
 runner = CliRunner()
 
@@ -31,24 +35,48 @@ def _seed_project(db_path: str) -> None:
     conn.close()
 
 
+def _make_success_result(docs: list[dict]) -> RetrievalResult:
+    """Build a mock RetrievalResult with SUCCESS status."""
+    candidates = [
+        RankedCandidate(
+            title=d["title"],
+            url=d["url"],
+            document_type=d.get("document_type", "other"),
+            why_matched=d.get("why_matched", ""),
+            source="google_drive",
+            file_id=d.get("file_id", ""),
+            confidence=d.get("confidence", 0.9),
+            score=d.get("score", 80.0),
+            match_reasons=d.get("match_reasons", ["exact OPP in title"]),
+        )
+        for d in docs
+    ]
+    return RetrievalResult(
+        status=RetrievalStatus.SUCCESS,
+        documents=candidates,
+        diagnostics=RetrievalDiagnostics(
+            canonical_opp="OPP0",
+            search_variants=["OPP0"],
+            query_attempts=[{"query_id": "stage1_opp_only", "stage": 1, "term": "OPP_ONLY", "query_type": "opp_only", "candidate_count": len(docs)}],
+            deduplicated_count=len(docs),
+            accepted_count=len(docs),
+            rejected_count=0,
+        ),
+    )
+
+
 def test_live_fetch_with_documents_prints_summary_and_persists(tmp_path):
     db_path = str(tmp_path / "test.duckdb")
     _seed_project(db_path)
 
-    fake_stats = {
-        "status": "success",
-        "raw_count": 1,
-        "parsed_count": 1,
-        "inserted": 1,
-        "updated": 0,
-        "skipped": 0,
-        "errors": []
-    }
+    fake_result = _make_success_result([
+        {"title": "SOW Doc", "url": "http://example.com/sow", "document_type": "sow", "confidence": 0.9},
+    ])
 
     with patch(
-        "manager_os.ingest.project_drive_docs.search_drive_for_project_docs",
-        return_value=fake_stats,
-    ) as mock_search:
+        "manager_os.ingest.project_doc_retrieval.execute_retrieval",
+        return_value=fake_result,
+    ) as mock_exec:
         result = runner.invoke(
             app,
             ["project-docs-fetch", "--opportunity-number", "OPP0", "--limit", "3"],
@@ -56,37 +84,30 @@ def test_live_fetch_with_documents_prints_summary_and_persists(tmp_path):
         )
 
     assert result.exit_code == 0, result.output
-    mock_search.assert_called_once()
+    mock_exec.assert_called_once()
     assert "OPP0" in result.output
-    assert "Raw: 1" in result.output
-    assert "Parsed: 1" in result.output
-    assert "Inserted: 1" in result.output
+    assert "Client Zero" in result.output
+    assert "Found 1 document" in result.output
+    assert "Inserted" in result.output
 
     conn = get_connection(db_path)
-    # The actual database count will be 0 here because search is mocked and didn't actually insert, but the stats report success.
-    # Wait, in the actual implementation, search_drive_for_project_docs might perform the insertion if conn is passed,
-    # or the CLI performs the insertion based on what search_drive returns.
-    # Since we mocked search_drive_for_project_docs to return stats directly, we assert that the CLI handled it and exited 0.
+    count = conn.execute("SELECT COUNT(*) FROM project_documents WHERE opportunity_number = 'OPP0'").fetchone()[0]
     conn.close()
+    assert count == 1
 
 
-def test_live_fetch_no_documents_exits_nonzero_by_default(tmp_path):
+def test_live_fetch_no_documents_prints_message_and_exits_zero(tmp_path):
     db_path = str(tmp_path / "test.duckdb")
     _seed_project(db_path)
 
-    fake_stats = {
-        "status": "empty",
-        "raw_count": 0,
-        "parsed_count": 0,
-        "inserted": 0,
-        "updated": 0,
-        "skipped": 0,
-        "errors": []
-    }
+    fake_result = RetrievalResult(
+        status=RetrievalStatus.ZERO_CANDIDATES,
+        diagnostics=RetrievalDiagnostics(canonical_opp="OPP0", search_variants=["OPP0"]),
+    )
 
     with patch(
-        "manager_os.ingest.project_drive_docs.search_drive_for_project_docs",
-        return_value=fake_stats,
+        "manager_os.ingest.project_doc_retrieval.execute_retrieval",
+        return_value=fake_result,
     ):
         result = runner.invoke(
             app,
@@ -94,63 +115,36 @@ def test_live_fetch_no_documents_exits_nonzero_by_default(tmp_path):
             env={"MANAGER_OS_DB_PATH": db_path},
         )
 
-    assert result.exit_code != 0, result.output
-    assert "Fatal Error" in result.output or "Error" in result.output
-
-
-def test_live_fetch_no_documents_with_allow_empty_exits_zero(tmp_path):
-    db_path = str(tmp_path / "test.duckdb")
-    _seed_project(db_path)
-
-    fake_stats = {
-        "status": "empty",
-        "raw_count": 0,
-        "parsed_count": 0,
-        "inserted": 0,
-        "updated": 0,
-        "skipped": 0,
-        "errors": []
-    }
-
-    with patch(
-        "manager_os.ingest.project_drive_docs.search_drive_for_project_docs",
-        return_value=fake_stats,
-    ):
-        result = runner.invoke(
-            app,
-            ["project-docs-fetch", "--opportunity-number", "OPP0", "--allow-empty"],
-            env={"MANAGER_OS_DB_PATH": db_path},
-        )
-
     assert result.exit_code == 0, result.output
+    assert "No documents found" in result.output
 
 
 def test_live_fetch_errors_are_printed_and_exit_nonzero(tmp_path):
     db_path = str(tmp_path / "test.duckdb")
     _seed_project(db_path)
 
-    fake_stats = {
-        "status": "error",
-        "raw_count": 0,
-        "parsed_count": 0,
-        "inserted": 0,
-        "updated": 0,
-        "skipped": 0,
-        "errors": ["Gemini CLI failed: boom"]
-    }
+    fake_result = RetrievalResult(
+        status=RetrievalStatus.PROVIDER_UNAVAILABLE,
+        error="Gemini CLI failed: boom",
+        diagnostics=RetrievalDiagnostics(
+            canonical_opp="OPP0",
+            search_variants=["OPP0"],
+            provider_errors=["Query stage1_opp_only: Gemini CLI failed: boom"],
+        ),
+    )
 
     with patch(
-        "manager_os.ingest.project_drive_docs.search_drive_for_project_docs",
-        return_value=fake_stats,
+        "manager_os.ingest.project_doc_retrieval.execute_retrieval",
+        return_value=fake_result,
     ):
         result = runner.invoke(
             app,
-            ["project-docs-fetch", "--opportunity-number", "OPP0"],
+            ["project-docs-fetch", "--opportunity-number", "OPP0", "--verbose"],
             env={"MANAGER_OS_DB_PATH": db_path},
         )
 
     assert result.exit_code != 0
-    assert "boom" in result.output
+    assert "Provider unavailable" in result.output
 
 
 def test_project_docs_fetch_dry_run_concurrency_lock(tmp_path):
@@ -159,7 +153,7 @@ def test_project_docs_fetch_dry_run_concurrency_lock(tmp_path):
 
     # Hold an exclusive read-write lock on the database
     lock_conn = get_connection(db_path)
-    
+
     try:
         # Invoke project-docs-fetch in dry-run mode
         result = runner.invoke(
@@ -172,3 +166,24 @@ def test_project_docs_fetch_dry_run_concurrency_lock(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Dry Run" in result.output
+    assert "Query Plan" in result.output
+
+
+def test_dry_run_shows_opp_first_query_plan(tmp_path):
+    """Dry run must show OPP-first query plan with separate keyword queries."""
+    db_path = str(tmp_path / "test.duckdb")
+    _seed_project(db_path)
+
+    result = runner.invoke(
+        app,
+        ["project-docs-fetch", "--opportunity-number", "OPP0", "--dry-run"],
+        env={"MANAGER_OS_DB_PATH": db_path},
+    )
+
+    assert result.exit_code == 0, result.output
+    # Stage 1 OPP_ONLY must appear first
+    assert "opp_only" in result.output
+    # Stage 2 keyword queries must appear
+    assert "opp_plus_keyword" in result.output
+    # Must show search variants
+    assert "Search variants" in result.output

@@ -20,7 +20,7 @@ describe('Sidebar Component', () => {
     expect(screen.getByText('People')).toBeInTheDocument()
     expect(screen.getByText('Projects')).toBeInTheDocument()
     expect(screen.getByText('Data Health')).toBeInTheDocument()
-    expect(screen.getByText('Refresh History')).toBeInTheDocument()
+    expect(screen.getByText('Operation History')).toBeInTheDocument()
   })
 
   it('renders group labels in correct order', () => {

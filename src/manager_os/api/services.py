@@ -110,6 +110,47 @@ def build_projects(conn: duckdb.DuckDBPyConnection, limit: int = 200) -> dict:
     return {"projects": projects, "warnings": warnings}
 
 
+def build_project_documents(conn: duckdb.DuckDBPyConnection, opp: str) -> dict:
+    """Return project documents for a given opportunity number."""
+    warnings: list[str] = []
+    documents: list[dict] = []
+    try:
+        from manager_os.utils import normalize_opp_id
+        normalized = normalize_opp_id(opp)
+        rows = conn.execute(
+            """
+            SELECT id, project_id, opportunity_number, client, project_name,
+                   document_type, title, url, source, retrieved_at,
+                   search_status, confidence, why_matched
+            FROM project_documents
+            WHERE UPPER(TRIM(opportunity_number)) = ?
+            ORDER BY confidence DESC, document_type
+            """,
+            [normalized],
+        ).fetchall()
+        documents = [
+            {
+                "id": r[0] or "",
+                "project_id": r[1] or "",
+                "opportunity_number": r[2] or "",
+                "client": r[3] or "",
+                "project_name": r[4] or "",
+                "document_type": r[5] or "",
+                "title": r[6] or "",
+                "url": r[7] or "",
+                "source": r[8] or "",
+                "retrieved_at": str(r[9]) if r[9] else None,
+                "search_status": r[10] or "",
+                "confidence": r[11] or 0.0,
+                "why_matched": r[12] or "",
+            }
+            for r in rows
+        ]
+    except Exception as exc:
+        warnings.append(f"project_documents: {exc}")
+    return {"opportunity_number": opp, "documents": documents, "warnings": warnings}
+
+
 def build_feedback(conn: duckdb.DuckDBPyConnection) -> dict:
     """Return feedback_learning_candidates rows, degrading gracefully if absent."""
     warnings: list[str] = []

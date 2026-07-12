@@ -61,7 +61,7 @@ function App() {
       case 'people':
         return <PeoplePage />
       case 'projects':
-        return <ProjectsPage />
+        return <ProjectsPage onRunRecorded={handleRunRecorded} />
       case 'data-health':
         return <DataHealthPage />
       case 'refresh-history':

@@ -76,6 +76,6 @@ describe('App', () => {
     vi.mocked(getDaily).mockRejectedValueOnce(new Error('network error'))
 
     render(<App />)
-    expect(await screen.findByText(/Failed to load/i)).toBeInTheDocument()
+    expect(await screen.findByText(/Failed to load daily data/i)).toBeInTheDocument()
   })
 })

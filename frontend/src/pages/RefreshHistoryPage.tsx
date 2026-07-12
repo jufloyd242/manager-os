@@ -19,7 +19,7 @@ export function RefreshHistoryPage() {
       const result = await getRuns(50)
       setRuns(result.data)
     } catch {
-      setError('Failed to load refresh history')
+      setError('Failed to load operation history')
     } finally {
       setLoading(false)
     }
@@ -32,10 +32,13 @@ export function RefreshHistoryPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <PageHeader title="Refresh History" description="What happened during recent refreshes?" />
+      <PageHeader
+        title="Operation History"
+        description="What operations were run recently?"
+      />
       <div className="flex-1 overflow-y-auto p-6">
         {runs.length === 0 ? (
-          <EmptyState message="No refresh history available yet. Run a refresh to see results here." />
+          <EmptyState message="No operation history available yet. Run a command to see results here." />
         ) : (
           <div className="space-y-2">
             {runs.map(run => (
