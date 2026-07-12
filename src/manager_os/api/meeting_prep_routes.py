@@ -520,10 +520,15 @@ def sync_calendar(
 
     This is an explicit external operation — only called when the user
     clicks the Sync Calendar button.
+
+    Returns honest diagnostics: retrieved_count, persisted_count,
+    rejected_count, replaced_count, warnings, errors. Never returns
+    ok:true with zero meetings when retrieval succeeded but all
+    persistence failed.
     """
     from datetime import datetime as _dt
     from manager_os.ingest.workspace_gemini import retrieve_calendar
-    from manager_os.db import get_connection as _get_conn
+    from manager_os.ingest.calendar_persistence import persist_calendar_events
 
     target_date_str = body.get("date", "")
     if not target_date_str:
@@ -545,6 +550,10 @@ def sync_calendar(
             "ok": False,
             "date": target_date_str,
             "meetings": [],
+            "retrieved_count": 0,
+            "persisted_count": 0,
+            "rejected_count": 0,
+            "replaced_count": 0,
             "retrieved_at": _dt.utcnow().isoformat(),
             "source": "gemini_cli",
             "warnings": [],
@@ -556,60 +565,52 @@ def sync_calendar(
             "ok": False,
             "date": target_date_str,
             "meetings": [],
+            "retrieved_count": 0,
+            "persisted_count": 0,
+            "rejected_count": 0,
+            "replaced_count": 0,
             "retrieved_at": _dt.utcnow().isoformat(),
             "source": "gemini_cli",
             "warnings": [],
             "errors": [result.error or "Calendar retrieval returned failure status"],
         }
 
-    # Write calendar events to the meetings table
-    meetings = []
-    for event in result.items:
-        try:
-            meeting_id = event.get("id", f"cal-{target_date_str}-{len(meetings)}")
-            conn.execute(
-                """INSERT OR REPLACE INTO meetings
-                   (id, meeting_date, start_time, end_time, title, attendees,
-                    linked_entities, source, external_id, location,
-                    description_summary, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [
-                    meeting_id,
-                    target_date,
-                    event.get("start_time", ""),
-                    event.get("end_time"),
-                    event.get("title", "Untitled"),
-                    str(event.get("attendees", [])),
-                    str(event.get("linked_entities", [])),
-                    "calendar_sync",
-                    event.get("external_id", meeting_id),
-                    event.get("location"),
-                    event.get("description_summary"),
-                    _dt.utcnow(),
-                ],
-            )
-            meetings.append({
-                "id": meeting_id,
-                "meeting_date": target_date_str,
-                "start_time": event.get("start_time", ""),
-                "end_time": event.get("end_time"),
-                "location": event.get("location"),
-                "description_summary": event.get("description_summary"),
-                "title": event.get("title", "Untitled"),
-                "attendees": event.get("attendees", []),
-                "linked_entities": event.get("linked_entities", []),
-                "source": "calendar_sync",
-                "external_id": event.get("external_id", meeting_id),
-            })
-        except Exception as exc:
-            continue
+    # Persist events using the canonical path
+    retrieved_at = result.retrieved_at or _dt.utcnow().isoformat()
+    persist_result = persist_calendar_events(
+        conn,
+        target_date,
+        result.items,
+        source="calendar_sync",
+        retrieved_at=retrieved_at,
+    )
+
+    # Determine ok/partial based on persistence results
+    retrieved_count = persist_result.retrieved_count
+    persisted_count = persist_result.persisted_count
+
+    if retrieved_count > 0 and persisted_count == 0:
+        # All persistence failed — not ok
+        ok = False
+        partial = False
+    elif persist_result.rejected_count > 0 and persisted_count > 0:
+        ok = True
+        partial = True
+    else:
+        ok = True
+        partial = False
 
     return {
-        "ok": True,
+        "ok": ok,
+        "partial": partial,
         "date": target_date_str,
-        "meetings": meetings,
-        "retrieved_at": _dt.utcnow().isoformat(),
+        "meetings": persist_result.persisted_meetings,
+        "retrieved_count": retrieved_count,
+        "persisted_count": persisted_count,
+        "rejected_count": persist_result.rejected_count,
+        "replaced_count": persist_result.replaced_count,
+        "retrieved_at": retrieved_at,
         "source": "gemini_cli",
-        "warnings": [],
-        "errors": [],
+        "warnings": persist_result.warnings,
+        "errors": persist_result.errors,
     }

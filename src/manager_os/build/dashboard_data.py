@@ -24,6 +24,37 @@ logger = logging.getLogger(__name__)
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
+def _safe_json_list(raw, item_type: type) -> list:
+    """Parse a JSON list field safely, handling malformed legacy values.
+
+    Tries json.loads first. If that fails (e.g. Python-repr style strings
+    from old str() serialization), attempts ast.literal_eval as a fallback.
+    Returns [] on any parse failure and emits a warning.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, item_type)]
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [item for item in parsed if isinstance(item, item_type)]
+            return []
+        except (json.JSONDecodeError, ValueError):
+            # Fallback: try ast.literal_eval for legacy Python-repr strings
+            try:
+                import ast
+                parsed = ast.literal_eval(raw)
+                if isinstance(parsed, list):
+                    logger.warning("Parsed legacy Python-repr JSON field (not valid JSON)")
+                    return [item for item in parsed if isinstance(item, item_type)]
+            except (ValueError, SyntaxError):
+                logger.warning("Could not parse JSON list field, returning empty list")
+            return []
+    return []
+
+
 def _severity_rank(severity: str) -> int:
     return _SEVERITY_ORDER.get(severity, 4)
 
@@ -214,8 +245,9 @@ def get_meetings_for_date(conn, target_date: date) -> list[dict]:
 
     rows = conn.execute(
         """
-        SELECT id, meeting_date, start_time, title, attendees,
-               linked_entities, source, external_id, updated_at
+        SELECT id, meeting_date, start_time, end_time, title, attendees,
+               linked_entities, source, external_id, location,
+               description_summary, updated_at
         FROM meetings WHERE meeting_date = ?
         ORDER BY start_time NULLS LAST
         """,
@@ -224,24 +256,27 @@ def get_meetings_for_date(conn, target_date: date) -> list[dict]:
 
     parsed: list[dict] = []
     for r in rows:
-        attendees_raw = r[4]
-        attendees: list[str] = json.loads(attendees_raw) if isinstance(attendees_raw, str) else (attendees_raw or [])
-        linked_raw = r[5]
-        linked: list[dict] = json.loads(linked_raw) if isinstance(linked_raw, str) else (linked_raw or [])
+        attendees_raw = r[5]
+        attendees: list[str] = _safe_json_list(attendees_raw, str)
+        linked_raw = r[6]
+        linked: list[dict] = _safe_json_list(linked_raw, dict)
         # Skip solo / no-attendee events
         if not attendees:
-            logger.debug("Skipping no-attendee meeting: %s on %s", r[3], r[1])
+            logger.debug("Skipping no-attendee meeting: %s on %s", r[4], r[1])
             continue
         parsed.append({
             "id": r[0],
             "meeting_date": r[1],
             "start_time": r[2] or "",
-            "title": r[3] or "",
+            "end_time": r[3] or "",
+            "title": r[4] or "",
             "attendees": attendees,
             "linked_entities": linked,
-            "source": r[6] or "",
-            "external_id": r[7] or "",
-            "updated_at": r[8],
+            "source": r[7] or "",
+            "external_id": r[8] or "",
+            "location": r[9] or "",
+            "description_summary": r[10] or "",
+            "updated_at": r[11],
         })
 
     # --- Deduplicate ---
