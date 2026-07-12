@@ -394,8 +394,13 @@ export interface MeetingsResponse {
 
 export interface CalendarSyncResponse {
   ok: boolean
+  partial?: boolean
   date: string
   meetings: MeetingEvent[]
+  retrieved_count: number
+  persisted_count: number
+  rejected_count: number
+  replaced_count: number
   retrieved_at: string
   source: string
   warnings: string[]
@@ -444,7 +449,7 @@ export function syncCalendar(date: string): Promise<ApiResult<CalendarSyncRespon
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ date }),
       }),
-    () => ({ ok: true, date, meetings: [], retrieved_at: '', source: '', warnings: [], errors: [] }),
+    () => ({ ok: true, date, meetings: [], retrieved_count: 0, persisted_count: 0, rejected_count: 0, replaced_count: 0, retrieved_at: '', source: '', warnings: [], errors: [] }),
   )
 }
 

@@ -241,3 +241,193 @@ describe('MeetingsView', () => {
     })
   })
 })
+
+describe('MeetingsView — Calendar Sync', () => {
+  it('shows sync success count feedback', async () => {
+    vi.mocked(getMeetings).mockResolvedValue({
+      data: { date: '2026-07-10', meetings: [], warnings: [], sync_info: undefined },
+      isMock: false,
+    })
+    vi.mocked(syncCalendar).mockResolvedValue({
+      data: {
+        ok: true,
+        partial: false,
+        date: '2026-07-10',
+        meetings: [{ id: 'm1', meeting_date: '2026-07-10', start_time: '09:00', end_time: '09:30', title: 'Standup', attendees: ['Alice'], linked_entities: [], source: 'calendar_sync', external_id: 'e1' }],
+        retrieved_count: 1,
+        persisted_count: 1,
+        rejected_count: 0,
+        replaced_count: 0,
+        retrieved_at: '2026-07-10T12:00:00Z',
+        source: 'gemini_cli',
+        warnings: [],
+        errors: [],
+      },
+      isMock: false,
+    })
+
+    render(<MeetingsView initialDate="2026-07-10" />)
+    const syncButton = await screen.findByText(/Sync /i)
+    await userEvent.click(syncButton)
+
+    expect(await screen.findByText(/Retrieved 1 meeting.*Saved 1/i)).toBeInTheDocument()
+  })
+
+  it('shows partial success feedback', async () => {
+    vi.mocked(getMeetings).mockResolvedValue({
+      data: { date: '2026-07-10', meetings: [], warnings: [], sync_info: undefined },
+      isMock: false,
+    })
+    vi.mocked(syncCalendar).mockResolvedValue({
+      data: {
+        ok: true,
+        partial: true,
+        date: '2026-07-10',
+        meetings: [{ id: 'm1', meeting_date: '2026-07-10', start_time: '09:00', title: 'Standup', attendees: ['Alice'], linked_entities: [], source: 'calendar_sync', external_id: 'e1' }],
+        retrieved_count: 4,
+        persisted_count: 3,
+        rejected_count: 1,
+        replaced_count: 0,
+        retrieved_at: '2026-07-10T12:00:00Z',
+        source: 'gemini_cli',
+        warnings: [],
+        errors: ['Event 3: missing title'],
+      },
+      isMock: false,
+    })
+
+    render(<MeetingsView initialDate="2026-07-10" />)
+    const syncButton = await screen.findByText(/Sync /i)
+    await userEvent.click(syncButton)
+
+    expect(await screen.findByText(/Retrieved 4 meetings.*Saved 3.*1 could not be saved/i)).toBeInTheDocument()
+  })
+
+  it('shows total persistence failure feedback', async () => {
+    vi.mocked(getMeetings).mockResolvedValue({
+      data: { date: '2026-07-10', meetings: [], warnings: [], sync_info: undefined },
+      isMock: false,
+    })
+    vi.mocked(syncCalendar).mockResolvedValue({
+      data: {
+        ok: false,
+        partial: false,
+        date: '2026-07-10',
+        meetings: [],
+        retrieved_count: 4,
+        persisted_count: 0,
+        rejected_count: 4,
+        replaced_count: 0,
+        retrieved_at: '2026-07-10T12:00:00Z',
+        source: 'gemini_cli',
+        warnings: [],
+        errors: ['Event 0: database error', 'Event 1: database error'],
+      },
+      isMock: false,
+    })
+
+    render(<MeetingsView initialDate="2026-07-10" />)
+    const syncButton = await screen.findByText(/Sync /i)
+    await userEvent.click(syncButton)
+
+    expect(await screen.findByText(/meetings could not be saved/i)).toBeInTheDocument()
+  })
+
+  it('shows legitimate zero-event feedback', async () => {
+    vi.mocked(getMeetings).mockResolvedValue({
+      data: { date: '2026-07-10', meetings: [], warnings: [], sync_info: undefined },
+      isMock: false,
+    })
+    vi.mocked(syncCalendar).mockResolvedValue({
+      data: {
+        ok: true,
+        partial: false,
+        date: '2026-07-10',
+        meetings: [],
+        retrieved_count: 0,
+        persisted_count: 0,
+        rejected_count: 0,
+        replaced_count: 0,
+        retrieved_at: '2026-07-10T12:00:00Z',
+        source: 'gemini_cli',
+        warnings: [],
+        errors: [],
+      },
+      isMock: false,
+    })
+
+    render(<MeetingsView initialDate="2026-07-10" />)
+    const syncButton = await screen.findByText(/Sync /i)
+    await userEvent.click(syncButton)
+
+    expect(await screen.findByText(/Retrieved 0 meetings.*Saved 0/i)).toBeInTheDocument()
+  })
+
+  it('renders meetings immediately after sync', async () => {
+    vi.mocked(getMeetings).mockResolvedValue({
+      data: { date: '2026-07-10', meetings: [], warnings: [], sync_info: undefined },
+      isMock: false,
+    })
+    vi.mocked(syncCalendar).mockResolvedValue({
+      data: {
+        ok: true,
+        date: '2026-07-10',
+        meetings: [{ id: 'm1', meeting_date: '2026-07-10', start_time: '09:00', end_time: '10:00', title: 'Immediate Sync Meeting', attendees: ['Alice'], linked_entities: [], source: 'calendar_sync', external_id: 'e1' }],
+        retrieved_count: 1,
+        persisted_count: 1,
+        rejected_count: 0,
+        replaced_count: 0,
+        retrieved_at: '2026-07-10T12:00:00Z',
+        source: 'gemini_cli',
+        warnings: [],
+        errors: [],
+      },
+      isMock: false,
+    })
+
+    render(<MeetingsView initialDate="2026-07-10" />)
+    const syncButton = await screen.findByText(/Sync /i)
+    await userEvent.click(syncButton)
+
+    expect(await screen.findByText('Immediate Sync Meeting')).toBeInTheDocument()
+  })
+
+  it('renders end time after sync', async () => {
+    vi.mocked(getMeetings).mockResolvedValue({
+      data: { date: '2026-07-10', meetings: [], warnings: [], sync_info: undefined },
+      isMock: false,
+    })
+    vi.mocked(syncCalendar).mockResolvedValue({
+      data: {
+        ok: true,
+        date: '2026-07-10',
+        meetings: [{ id: 'm1', meeting_date: '2026-07-10', start_time: '09:00', end_time: '10:30', title: 'End Time Meeting', attendees: ['Alice'], linked_entities: [], source: 'calendar_sync', external_id: 'e1' }],
+        retrieved_count: 1,
+        persisted_count: 1,
+        rejected_count: 0,
+        replaced_count: 0,
+        retrieved_at: '2026-07-10T12:00:00Z',
+        source: 'gemini_cli',
+        warnings: [],
+        errors: [],
+      },
+      isMock: false,
+    })
+
+    render(<MeetingsView initialDate="2026-07-10" />)
+    const syncButton = await screen.findByText(/Sync /i)
+    await userEvent.click(syncButton)
+
+    expect(await screen.findByText(/9:00.*10:30/i)).toBeInTheDocument()
+  })
+
+  it('keeps selected date stable as 2026-07-10', async () => {
+    vi.mocked(getMeetings).mockResolvedValue({
+      data: { date: '2026-07-10', meetings: [], warnings: [], sync_info: undefined },
+      isMock: false,
+    })
+    render(<MeetingsView initialDate="2026-07-10" />)
+    const dateInput = await screen.findByDisplayValue('2026-07-10')
+    expect(dateInput).toBeInTheDocument()
+  })
+})

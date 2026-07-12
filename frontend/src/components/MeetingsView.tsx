@@ -45,6 +45,18 @@ function formatSyncDate(d: Date): string {
   return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })
 }
 
+/**
+ * Format a Date as YYYY-MM-DD using the LOCAL timezone.
+ * Avoids toISOString() which converts to UTC and can shift the date
+ * for evening times in negative-offset timezones (e.g. America/Denver).
+ */
+function toLocalDateString(d: Date): string {
+  const year = d.getFullYear()
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
 interface MeetingsViewProps {
   initialDate?: string
   initialMeetingId?: string
@@ -68,7 +80,7 @@ export function MeetingsView({ initialDate, initialMeetingId }: MeetingsViewProp
   const [prepError, setPrepError] = useState<string | null>(null)
   const prevMeetingsRef = useRef<MeetingEvent[]>([])
 
-  const dateStr = selectedDate.toISOString().split('T')[0]
+  const dateStr = toLocalDateString(selectedDate)
 
   const loadMeetings = useCallback(async () => {
     setLoading(true)
@@ -174,7 +186,7 @@ export function MeetingsView({ initialDate, initialMeetingId }: MeetingsViewProp
     }
   }
 
-  const isToday = dateStr === new Date().toISOString().split('T')[0]
+  const isToday = dateStr === toLocalDateString(new Date())
   const selectedMeeting = selectedMeetingId ? meetings.find(m => m.id === selectedMeetingId) : null
 
   // Date-specific sync language
@@ -257,7 +269,31 @@ export function MeetingsView({ initialDate, initialMeetingId }: MeetingsViewProp
 
         {syncResult && !syncResult.ok && (
           <div className="mt-2 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
-            Sync failed: {syncResult.errors?.join('; ') || 'Unknown error'}
+            {syncResult.retrieved_count > 0
+              ? 'Calendar retrieval succeeded, but meetings could not be saved.'
+              : `Sync failed: ${syncResult.errors?.join('; ') || 'Unknown error'}`}
+            {syncResult.errors?.length > 0 && (
+              <details className="mt-1">
+                <summary className="cursor-pointer text-xs text-red-500 hover:text-red-700">Diagnostics</summary>
+                <ul className="mt-1 space-y-0.5 text-xs text-red-600">
+                  {syncResult.errors.map((e, i) => <li key={i}>{e}</li>)}
+                </ul>
+              </details>
+            )}
+          </div>
+        )}
+        {syncResult && syncResult.ok && (
+          <div className="mt-2 rounded-lg bg-green-50 border border-green-200 px-3 py-2 text-sm text-green-700">
+            Retrieved {syncResult.retrieved_count} meeting{syncResult.retrieved_count !== 1 ? 's' : ''} · Saved {syncResult.persisted_count}
+            {syncResult.rejected_count > 0 && ` · ${syncResult.rejected_count} could not be saved`}
+            {syncResult.partial && (
+              <details className="mt-1">
+                <summary className="cursor-pointer text-xs text-amber-600 hover:text-amber-800">Partial success details</summary>
+                <ul className="mt-1 space-y-0.5 text-xs text-amber-700">
+                  {syncResult.errors.map((e, i) => <li key={i}>{e}</li>)}
+                </ul>
+              </details>
+            )}
           </div>
         )}
         {error && !syncResult && (

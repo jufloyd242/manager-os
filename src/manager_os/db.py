@@ -96,15 +96,18 @@ CREATE TABLE IF NOT EXISTS staffing_forecast (
 );
 
 CREATE TABLE IF NOT EXISTS meetings (
-    id              VARCHAR PRIMARY KEY,
-    meeting_date    DATE NOT NULL,
-    start_time      VARCHAR,
-    title           VARCHAR NOT NULL,
-    attendees       JSON,
-    linked_entities JSON,
-    source          VARCHAR,
-    external_id     VARCHAR,
-    updated_at      TIMESTAMP NOT NULL
+    id                   VARCHAR PRIMARY KEY,
+    meeting_date         DATE NOT NULL,
+    start_time           VARCHAR,
+    end_time             VARCHAR,
+    title                VARCHAR NOT NULL,
+    attendees            JSON,
+    linked_entities      JSON,
+    source               VARCHAR,
+    external_id          VARCHAR,
+    location             VARCHAR,
+    description_summary  VARCHAR,
+    updated_at           TIMESTAMP NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS notes (
@@ -287,8 +290,7 @@ CREATE TABLE IF NOT EXISTS projects (
     industry VARCHAR,
     short_description VARCHAR,
     source_row INTEGER,
-    summary_is_generated BOOLEAN DEFAULT FALSE,
-    document_status VARCHAR DEFAULT NULL
+    summary_is_generated BOOLEAN DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS project_documents (
@@ -340,8 +342,7 @@ CREATE TABLE IF NOT EXISTS projects (
     source_note_ids_json JSON,
     source_doc_ids_json JSON,
     created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    document_status VARCHAR DEFAULT NULL
+    updated_at TIMESTAMP NOT NULL
 );
 ALTER TABLE action_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;
 ALTER TABLE action_items ADD COLUMN IF NOT EXISTS feedback_rating VARCHAR;
@@ -424,6 +425,9 @@ CREATE TABLE IF NOT EXISTS command_runs (
     affected_tables_json    JSON
 );
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS document_status VARCHAR DEFAULT NULL;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS end_time VARCHAR;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS location VARCHAR;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS description_summary VARCHAR;
 """
 
 _ALL_TABLES = [
