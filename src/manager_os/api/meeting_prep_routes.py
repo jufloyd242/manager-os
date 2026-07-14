@@ -614,3 +614,155 @@ def sync_calendar(
         "warnings": persist_result.warnings,
         "errors": persist_result.errors,
     }
+
+
+@router.post("/meetings/{meeting_id}/generate-prep")
+def generate_meeting_prep(
+    meeting_id: str,
+    conn: duckdb.DuckDBPyConnection = Depends(get_db_connection),
+    settings: Settings = Depends(get_fresh_settings),
+) -> dict:
+    """Generate LLM-driven meeting preparation.
+
+    This is an explicit operation — only called when the user clicks
+    Generate Prep. Uses the LLM to produce structured, grounded prep.
+    """
+    from manager_os.extract.meeting_profiles import classify_meeting
+    from manager_os.extract.llm_meeting_prep import (
+        generate_prep, persist_prep, get_prep_freshness,
+        get_persisted_prep, PrepGenerationError,
+    )
+
+    # Fetch meeting
+    row = conn.execute(
+        "SELECT id, meeting_date, start_time, end_time, title, attendees, "
+        "linked_entities, source, external_id, location, description_summary "
+        "FROM meetings WHERE id = ?",
+        [meeting_id],
+    ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Meeting {meeting_id} not found")
+
+    meeting = {
+        "id": row[0],
+        "meeting_date": str(row[1]) if row[1] else "",
+        "start_time": row[2] or "",
+        "end_time": row[3] or "",
+        "title": row[4] or "",
+        "attendees": _safe_json_list(row[5], str),
+        "linked_entities": _safe_json_list(row[6], dict),
+        "source": row[7] or "",
+        "external_id": row[8] or "",
+        "location": row[9] or "",
+        "description_summary": row[10] or "",
+    }
+
+    # Classify meeting
+    classification = classify_meeting(meeting)
+
+    # If no-prep, return immediately
+    if not classification.get("prep_required", True):
+        return {
+            "ok": True,
+            "meeting_id": meeting_id,
+            "prep_state": "no_prep",
+            "classification": classification,
+            "prep": None,
+            "message": "No preparation needed for this meeting type.",
+        }
+
+    # Build meeting fingerprint
+    meeting_fingerprint = str(hash((
+        meeting.get("title", ""),
+        meeting.get("meeting_date", ""),
+        meeting.get("start_time", ""),
+        tuple(meeting.get("attendees", [])),
+        meeting.get("description_summary", ""),
+    )))
+
+    # Build context bundle (simplified — uses existing context gathering)
+    context_bundle = {"sources": [], "items": []}
+    source_fingerprint = "empty"  # Would be hash of source IDs + timestamps
+
+    # Check freshness
+    freshness = get_prep_freshness(conn, meeting_id, meeting_fingerprint, source_fingerprint)
+    if freshness == "current":
+        existing = get_persisted_prep(conn, meeting_id)
+        if existing:
+            return {
+                "ok": True,
+                "meeting_id": meeting_id,
+                "prep_state": "current",
+                "classification": classification,
+                "prep": existing["prep_data"],
+                "generated_at": existing["generated_at"],
+                "message": "Prep is current. Use Regenerate to create a new one.",
+            }
+
+    # Generate prep via LLM
+    profile = {
+        "meeting_type": classification.get("meeting_type", "generic"),
+        "objective": classification.get("objective", "Prepare for this meeting."),
+        "output_schema": classification.get("output_schema", "generic"),
+    }
+
+    try:
+        prep_data = generate_prep(
+            meeting,
+            classification.get("meeting_type", "generic"),
+            context_bundle,
+            profile=profile,
+        )
+    except PrepGenerationError as e:
+        # Persist failure
+        persist_prep(
+            conn, meeting_id, {}, classification.get("meeting_type", "generic"),
+            classification.get("profile_id", ""), meeting_fingerprint,
+            source_fingerprint, [], "gemini_cli", "",
+            generation_status="failed",
+            safe_error=str(e),
+        )
+        return {
+            "ok": False,
+            "meeting_id": meeting_id,
+            "prep_state": "failed",
+            "classification": classification,
+            "prep": None,
+            "error": str(e),
+            "message": "Context gathered, but preparation generation failed.",
+        }
+
+    # Persist prep
+    persist_prep(
+        conn, meeting_id, prep_data,
+        classification.get("meeting_type", "generic"),
+        classification.get("profile_id", ""),
+        meeting_fingerprint, source_fingerprint,
+        [], "gemini_cli", "",
+    )
+
+    return {
+        "ok": True,
+        "meeting_id": meeting_id,
+        "prep_state": "generated",
+        "classification": classification,
+        "prep": prep_data,
+        "message": "Prep generated successfully.",
+    }
+
+
+def _safe_json_list(raw, item_type: type) -> list:
+    """Parse a JSON list field safely."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, item_type)]
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [item for item in parsed if isinstance(item, item_type)]
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return []

@@ -100,6 +100,9 @@ CREATE TABLE IF NOT EXISTS meetings (
     meeting_date         DATE NOT NULL,
     start_time           VARCHAR,
     end_time             VARCHAR,
+    start_at             TIMESTAMP,
+    end_at               TIMESTAMP,
+    is_all_day           BOOLEAN DEFAULT FALSE,
     title                VARCHAR NOT NULL,
     attendees            JSON,
     linked_entities      JSON,
@@ -107,6 +110,9 @@ CREATE TABLE IF NOT EXISTS meetings (
     external_id          VARCHAR,
     location             VARCHAR,
     description_summary  VARCHAR,
+    organizer            VARCHAR,
+    conference_url       VARCHAR,
+    recurring_event_id   VARCHAR,
     updated_at           TIMESTAMP NOT NULL
 );
 
@@ -175,10 +181,22 @@ CREATE TABLE IF NOT EXISTS daily_briefs (
 );
 
 CREATE TABLE IF NOT EXISTS meeting_prep (
-    id           VARCHAR PRIMARY KEY,
-    meeting_id   VARCHAR NOT NULL,
-    content      VARCHAR NOT NULL,
-    generated_at TIMESTAMP NOT NULL
+    id                      VARCHAR PRIMARY KEY,
+    meeting_id              VARCHAR NOT NULL,
+    content                 VARCHAR NOT NULL,
+    generated_at            TIMESTAMP NOT NULL,
+    meeting_fingerprint     VARCHAR,
+    classification          VARCHAR,
+    profile_id              VARCHAR,
+    source_fingerprint      VARCHAR,
+    structured_prep_json    JSON,
+    source_references_json  JSON,
+    generator_version       VARCHAR,
+    llm_provider            VARCHAR,
+    llm_model               VARCHAR,
+    live_enrichment_used    BOOLEAN DEFAULT FALSE,
+    generation_status       VARCHAR DEFAULT 'success',
+    safe_error              VARCHAR
 );
 
 CREATE TABLE IF NOT EXISTS extraction_failures (
@@ -428,6 +446,24 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS document_status VARCHAR DEFAULT NU
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS end_time VARCHAR;
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS location VARCHAR;
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS description_summary VARCHAR;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS start_at TIMESTAMP;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS end_at TIMESTAMP;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS is_all_day BOOLEAN DEFAULT FALSE;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS organizer VARCHAR;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS conference_url VARCHAR;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS recurring_event_id VARCHAR;
+ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS meeting_fingerprint VARCHAR;
+ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS classification VARCHAR;
+ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS profile_id VARCHAR;
+ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS source_fingerprint VARCHAR;
+ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS structured_prep_json JSON;
+ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS source_references_json JSON;
+ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS generator_version VARCHAR;
+ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS llm_provider VARCHAR;
+ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS llm_model VARCHAR;
+ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS live_enrichment_used BOOLEAN DEFAULT FALSE;
+ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS generation_status VARCHAR DEFAULT 'success';
+ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS safe_error VARCHAR;
 """
 
 _ALL_TABLES = [

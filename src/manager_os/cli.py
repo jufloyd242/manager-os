@@ -6079,6 +6079,16 @@ def start(
         "--no-setup",
         help="Skip automatic setup steps (venv, pip install, npm install, build).",
     ),
+    refresh_calendar: bool = typer.Option(
+        False,
+        "--refresh-calendar",
+        help="Force a calendar sync for the current week on startup.",
+    ),
+    no_calendar_sync: bool = typer.Option(
+        False,
+        "--no-calendar-sync",
+        help="Skip calendar sync on startup.",
+    ),
 ) -> None:
     """Start the Manager OS production dashboard.
 
@@ -6176,7 +6186,39 @@ def start(
             terminate_process(proc)
             raise typer.Exit(1)
 
-        console.print(f"[green]Manager OS is running at {url}[/green]")
+        console.print(f"[green]✓ Manager OS ready[/green]")
+
+        # Sync current week calendar
+        if not no_calendar_sync:
+            from manager_os.config import get_settings as _get_settings
+            from manager_os.startup_calendar import sync_current_week, calculate_week_range
+            from datetime import date as _date
+            _settings = _get_settings()
+            _week_start, _week_end = calculate_week_range(_date.today())
+            _week_label = f"{_week_start.strftime('%B %-d')}–{_week_end.strftime('%-d')}"
+            console.print(f"[cyan]↻ Syncing Calendar for {_week_label}[/cyan]")
+            try:
+                _sync_result = sync_current_week(
+                    _settings.db_path,
+                    force=refresh_calendar,
+                    no_sync=no_calendar_sync,
+                )
+                if _sync_result["status"] == "synced":
+                    console.print(
+                        f"[green]  ✓ Synced {_sync_result.get('persisted_count', 0)} meeting(s)"
+                        f" for {_week_label}[/green]"
+                    )
+                elif _sync_result["status"] == "fresh":
+                    console.print(f"[dim]  ✓ Calendar already current for {_week_label}[/dim]")
+                elif _sync_result["status"] == "skipped":
+                    console.print(f"[dim]  ✓ Calendar sync skipped[/dim]")
+                else:
+                    _err = _sync_result.get("error", "unknown")
+                    console.print(f"[yellow]  ⚠ Calendar sync failed: {_err}[/yellow]")
+            except Exception as _exc:
+                console.print(f"[yellow]  ⚠ Calendar sync error: {_exc}[/yellow]")
+        else:
+            console.print("[dim]  Calendar sync skipped (--no-calendar-sync)[/dim]")
 
         if not no_browser:
             try:

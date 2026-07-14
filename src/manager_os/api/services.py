@@ -99,6 +99,56 @@ def build_meetings(conn: duckdb.DuckDBPyConnection, target_date: date) -> dict:
     }
 
 
+def build_meetings_for_week(conn: duckdb.DuckDBPyConnection, week_start_str: str) -> dict:
+    """Return meetings for a full week (Mon-Sun), chronologically ordered."""
+    from datetime import date as _date, timedelta
+    warnings: list[str] = []
+    try:
+        week_start = _date.fromisoformat(week_start_str)
+        week_end = week_start + timedelta(days=6)
+        rows = conn.execute(
+            """SELECT id, meeting_date, start_time, end_time, title, attendees,
+                      linked_entities, source, external_id, location,
+                      description_summary, updated_at
+               FROM meetings
+               WHERE meeting_date BETWEEN ? AND ?
+               ORDER BY meeting_date, start_time NULLS LAST""",
+            [week_start, week_end],
+        ).fetchall()
+        from manager_os.build.dashboard_data import _safe_json_list, sort_meetings_chronological
+        meetings = []
+        for r in rows:
+            attendees = _safe_json_list(r[5], str)
+            linked = _safe_json_list(r[6], dict)
+            if not attendees:
+                continue
+            meetings.append({
+                "id": r[0],
+                "meeting_date": str(r[1]) if r[1] else "",
+                "start_time": r[2] or "",
+                "end_time": r[3] or "",
+                "title": r[4] or "",
+                "attendees": attendees,
+                "linked_entities": linked,
+                "source": r[7] or "",
+                "external_id": r[8] or "",
+                "location": r[9] or "",
+                "description_summary": r[10] or "",
+                "updated_at": str(r[11]) if r[11] else "",
+            })
+        meetings = sort_meetings_chronological(meetings)
+    except Exception as exc:
+        warnings.append(f"meetings_week: {exc}")
+        meetings = []
+
+    return {
+        "date": week_start_str,
+        "meetings": meetings,
+        "warnings": warnings,
+        "sync_info": None,
+    }
+
+
 def build_projects(conn: duckdb.DuckDBPyConnection, limit: int = 200) -> dict:
     """Return project index records, degrading to an empty list on failure."""
     warnings: list[str] = []
