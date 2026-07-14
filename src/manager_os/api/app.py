@@ -99,8 +99,11 @@ def create_app(frontend_dist: str | Path | None = None) -> FastAPI:
     @app.get("/api/meetings", response_model=MeetingsResponse)
     def meetings(
         date: str | None = Query(default=None),
+        week_start: str | None = Query(default=None),
         conn: duckdb.DuckDBPyConnection = Depends(get_db_connection),
     ) -> MeetingsResponse:
+        if week_start:
+            return MeetingsResponse(**services.build_meetings_for_week(conn, week_start))
         target_date = _parse_date(date)
         return MeetingsResponse(**services.build_meetings(conn, target_date))
 

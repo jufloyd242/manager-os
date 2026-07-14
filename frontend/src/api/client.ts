@@ -441,6 +441,55 @@ export function getMeetings(date: string): Promise<ApiResult<MeetingsResponse>> 
   )
 }
 
+export function getMeetingsForWeek(weekStart: string): Promise<ApiResult<MeetingsResponse>> {
+  return withMockFallback(
+    () => requestJson<MeetingsResponse>(`/api/meetings?week_start=${encodeURIComponent(weekStart)}`),
+    () => ({ date: weekStart, meetings: [], warnings: [] }),
+  )
+}
+
+export function syncCalendarWeek(weekStart: string): Promise<ApiResult<CalendarSyncResponse>> {
+  return withMockFallback(
+    () =>
+      requestJson<CalendarSyncResponse>('/api/meetings/sync-calendar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ week_start: weekStart }),
+      }),
+    () => ({ ok: true, date: weekStart, meetings: [], retrieved_count: 0, persisted_count: 0, rejected_count: 0, replaced_count: 0, retrieved_at: '', source: '', warnings: [], errors: [] }),
+  )
+}
+
+export interface GeneratePrepResponse {
+  ok: boolean
+  meeting_id: string
+  prep_state: 'generated' | 'current' | 'no_prep' | 'failed'
+  classification: {
+    meeting_type: string
+    confidence: number
+    reasoning_summary: string[]
+    recommended_profile: string
+    classification_source: string
+    prep_required: boolean
+    profile_id: string | null
+    objective?: string
+  }
+  prep: Record<string, unknown> | null
+  generated_at?: string
+  error?: string
+  message: string
+}
+
+export function generatePrep(meetingId: string): Promise<ApiResult<GeneratePrepResponse>> {
+  return withMockFallback(
+    () =>
+      requestJson<GeneratePrepResponse>(`/api/meetings/${encodeURIComponent(meetingId)}/generate-prep`, {
+        method: 'POST',
+      }),
+    () => ({ ok: false, meeting_id: meetingId, prep_state: 'failed', classification: { meeting_type: 'generic', confidence: 0, reasoning_summary: [], recommended_profile: 'generic', classification_source: 'heuristic', prep_required: true, profile_id: null }, prep: null, message: 'Backend unavailable' }),
+  )
+}
+
 export function syncCalendar(date: string): Promise<ApiResult<CalendarSyncResponse>> {
   return withMockFallback(
     () =>

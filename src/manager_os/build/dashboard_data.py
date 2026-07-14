@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+from datetime import date, datetime
 
 from manager_os.schemas import (
     ActionItem,
@@ -22,6 +22,67 @@ from manager_os.schemas import (
 logger = logging.getLogger(__name__)
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def _parse_timestamp(raw) -> datetime | None:
+    """Parse a timestamp value into a datetime, handling ISO strings, None, etc."""
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw
+    s = str(raw).strip()
+    if not s:
+        return None
+    # Try ISO format
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        pass
+    # Try HH:MM format (time only, no date)
+    if len(s) <= 8 and ":" in s:
+        try:
+            parts = s.split(":")
+            h = int(parts[0])
+            m = int(parts[1]) if len(parts) > 1 else 0
+            return datetime(2000, 1, 1, h, m)  # dummy date for ordering
+        except (ValueError, IndexError):
+            pass
+    return None
+
+
+def sort_meetings_chronological(meetings: list[dict]) -> list[dict]:
+    """Sort meetings chronologically using normalized timestamps.
+
+    Ordering rules:
+    1. Timed events ordered by start_at (normalized timestamp)
+    2. Same-start events ordered by end_at
+    3. All-day events in a clearly labeled group (after timed events)
+    4. Missing or malformed times placed last
+    5. Stable normalized-title comparison as the final tie-breaker
+    """
+    def sort_key(m: dict) -> tuple:
+        is_all_day = m.get("is_all_day", False)
+        start_raw = m.get("start_at") or m.get("start_time")
+        end_raw = m.get("end_at") or m.get("end_time")
+        start_dt = _parse_timestamp(start_raw)
+        end_dt = _parse_timestamp(end_raw)
+        title = (m.get("title") or "").lower().strip()
+
+        # Group: 0 = timed, 1 = all-day, 2 = missing time
+        if is_all_day:
+            group = 1
+        elif start_dt is None:
+            group = 2
+        else:
+            group = 0
+
+        # Use min datetime for ordering within group 0
+        min_dt = datetime.min if start_dt is None else start_dt
+        end_for_sort = datetime.min if end_dt is None else end_dt
+
+        return (group, min_dt, end_for_sort, title)
+
+    return sorted(meetings, key=sort_key)
 
 
 def _safe_json_list(raw, item_type: type) -> list:

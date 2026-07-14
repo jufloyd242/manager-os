@@ -308,6 +308,57 @@ def retrieve_calendar(
     return result
 
 
+CALENDAR_RANGE_PROMPT_TEMPLATE = """\
+[Read-only] Get calendar events from {start_date} through {end_date} (inclusive).
+Return ALL events in this date range, including recurring events.
+For each event include: title, start_time (ISO), end_time (ISO), attendees (list of email/name), location, description_summary, external_id, organizer, is_all_day (boolean), recurring_event_id, conference_url.
+Return ONLY JSON:
+{{"ok":true,"source":"google_calendar_gemini","retrieved_at":"ISO8601","events":[{{"title":"str","start_time":"ISO","end_time":"ISO","attendees":["str"],"location":"str","description_summary":"str","external_id":"str","organizer":"str","is_all_day":false,"recurring_event_id":"str","conference_url":"str"}}]}}
+Fail: {{"ok":false,"error":"str"}}
+"""
+
+
+def retrieve_calendar_range(
+    start_date: date,
+    end_date: date,
+    use_yolo: bool = True,
+    timeout: int = 300,
+    dry_run: bool = False,
+    output_dir: str | None = None,
+) -> RetrievalResult:
+    """Retrieve calendar events for a date range via Gemini CLI.
+
+    Makes ONE Gemini call for the entire range (e.g. a full week).
+    """
+    prompt = CALENDAR_RANGE_PROMPT_TEMPLATE.format(
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+    )
+
+    result = RetrievalResult(dry_run=dry_run)
+
+    if dry_run:
+        result.json_text = f"{_READ_ONLY_PREFIX}\n\n{prompt}"
+        return result
+
+    try:
+        raw, cmd = _run_gemini_retrieval(prompt, use_yolo=use_yolo, timeout=timeout)
+        data = _parse_retrieval_json(raw)
+        result.ok = data.get("ok", False)
+        result.error = data.get("error", "")
+        result.retrieved_at = data.get("retrieved_at", datetime.utcnow().isoformat())
+        result.items = data.get("events", data.get("items", []))
+        result.json_text = raw
+        if result.ok:
+            path = _write_snapshot(data, "calendar_range", start_date, output_dir)
+            result.written_to = path
+    except Exception as exc:
+        result.ok = False
+        result.error = str(exc)
+
+    return result
+
+
 # ------------------------------------------------------------------
 # 3. Workspace activity retrieval (Google Chat summary)
 # ------------------------------------------------------------------
