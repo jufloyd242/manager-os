@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS meetings (
     organizer            VARCHAR,
     conference_url       VARCHAR,
     recurring_event_id   VARCHAR,
+    timezone             VARCHAR,
     updated_at           TIMESTAMP NOT NULL
 );
 
@@ -452,6 +453,7 @@ ALTER TABLE meetings ADD COLUMN IF NOT EXISTS is_all_day BOOLEAN DEFAULT FALSE;
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS organizer VARCHAR;
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS conference_url VARCHAR;
 ALTER TABLE meetings ADD COLUMN IF NOT EXISTS recurring_event_id VARCHAR;
+ALTER TABLE meetings ADD COLUMN IF NOT EXISTS timezone VARCHAR;
 ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS meeting_fingerprint VARCHAR;
 ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS classification VARCHAR;
 ALTER TABLE meeting_prep ADD COLUMN IF NOT EXISTS profile_id VARCHAR;

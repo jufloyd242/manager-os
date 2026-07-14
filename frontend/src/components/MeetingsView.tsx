@@ -25,20 +25,44 @@ function formatDateShort(d: Date): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
-function formatTime(t: string): string {
-  if (!t) return ''
+/**
+ * Format a meeting timestamp for display in America/Denver timezone.
+ * Uses Intl.DateTimeFormat — never manual string splitting.
+ * Handles UTC timestamps, offset timestamps, and all-day events.
+ */
+function formatMeetingTime(
+  timestamp: string | null | undefined,
+  timeZone: string = 'America/Denver',
+): string {
+  if (!timestamp) return ''
+  // Try parsing as a Date (handles RFC3339, ISO, etc.)
   try {
-    const parts = t.split('T')
-    const timePart = parts.length > 1 ? parts[1] : t
-    const [h, m] = timePart.split(':')
-    if (!h) return t
-    const hour = parseInt(h, 10)
-    const ampm = hour >= 12 ? 'PM' : 'AM'
-    const hour12 = hour % 12 || 12
-    return `${hour12}:${m || '00'} ${ampm}`
+    const dt = new Date(timestamp)
+    if (!isNaN(dt.getTime())) {
+      return new Intl.DateTimeFormat('en-US', {
+        timeZone,
+        hour: 'numeric',
+        minute: '2-digit',
+      }).format(dt)
+    }
   } catch {
-    return t
+    // Fall through to plain time handling
   }
+  // Fallback: plain HH:MM or HH:MM:SS (no timezone info)
+  const match = timestamp.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/)
+  if (match) {
+    const h = parseInt(match[1], 10)
+    const m = match[2]
+    const ampm = h >= 12 ? 'PM' : 'AM'
+    const hour12 = h % 12 || 12
+    return `${hour12}:${m} ${ampm}`
+  }
+  return ''
+}
+
+// Keep formatTime as an alias for backward compatibility with existing tests
+function formatTime(t: string): string {
+  return formatMeetingTime(t)
 }
 
 function formatSyncDate(d: Date): string {
