@@ -681,9 +681,19 @@ def generate_meeting_prep(
         meeting.get("description_summary", ""),
     )))
 
-    # Build context bundle (simplified — uses existing context gathering)
-    context_bundle = {"sources": [], "items": []}
-    source_fingerprint = "empty"  # Would be hash of source IDs + timestamps
+    # Build context bundle using the profile-driven retrieval planner
+    from manager_os.extract.meeting_context import retrieve_meeting_context
+    meeting_type_for_context = classification.get("meeting_type", "generic")
+    context_result = retrieve_meeting_context(conn, meeting, meeting_type_for_context)
+    context_bundle = {
+        "sources": context_result.sources,
+        "items": [{"source_id": i.source_id, "source_type": i.source_type,
+                    "title": i.title, "date": str(i.date) if i.date else "",
+                    "entity": i.entity, "excerpt_or_fact": i.excerpt_or_fact,
+                    "relevance_reason": i.relevance_reason, "confidence": i.confidence}
+                  for i in context_result.items],
+    }
+    source_fingerprint = str(hash(tuple(s.get("source_id", "") for s in context_result.sources)))
 
     # Check freshness
     freshness = get_prep_freshness(conn, meeting_id, meeting_fingerprint, source_fingerprint)

@@ -3,12 +3,13 @@ import {
   getMeetings,
   syncCalendar,
   getMeetingPrep,
-  regeneratePrep,
+  generatePrep,
 } from '../api/client'
 import type {
   MeetingEvent,
   MeetingPrepResponse,
   CalendarSyncResponse,
+  GeneratePrepResponse,
 } from '../api/client'
 import { MeetingPrepPanel } from './MeetingPrepPanel'
 
@@ -190,21 +191,42 @@ export function MeetingsView({ initialDate, initialMeetingId }: MeetingsViewProp
     setSelectedMeetingId(m.id)
   }
 
-  const handleRegeneratePrep = async () => {
+  const handleGeneratePrep = async () => {
     if (!selectedMeetingId) return
     setPrepLoading(true)
     setPrepError(null)
-    // Preserve existing prep on regeneration failure
-    const existingPrep = prep
     try {
-      const result = await regeneratePrep(selectedMeetingId)
-      setPrep(result.data)
-    } catch {
-      setPrepError('Failed to regenerate preparation. Previous prep retained.')
-      // Keep existing prep usable
-      if (!existingPrep) {
-        setPrep(null)
+      const result = await generatePrep(selectedMeetingId)
+      const data: GeneratePrepResponse = result.data
+      if (data.ok && data.prep) {
+        // Transform GeneratePrepResponse into MeetingPrepResponse shape for rendering
+        setPrep({
+          meeting_id: data.meeting_id,
+          meeting_title: selectedMeeting?.title || '',
+          meeting_date: selectedMeeting?.meeting_date || null,
+          meeting_time: selectedMeeting?.start_time || '',
+          attendees: selectedMeeting?.attendees || [],
+          resolved_attendees: [],
+          matched_rule_id: data.classification?.recommended_profile || '',
+          matched_rule_name: data.classification?.meeting_type || '',
+          meeting_type: data.classification?.meeting_type || '',
+          prep_required: data.classification?.prep_required ?? true,
+          why_this_rule_matched: (data.classification?.reasoning_summary || []).join('; '),
+          sections: data.prep as Record<string, unknown[]>,
+          sources_consulted: [],
+          sources_selected: [],
+          sources_excluded: [],
+          missing_context_warnings: (data.prep as Record<string, unknown[]>)?.missing_context as string[] || [],
+          llm_enriched: true,
+          generated_at: data.generated_at || new Date().toISOString(),
+        })
+      } else if (data.prep_state === 'no_prep') {
+        setPrepError('No preparation needed for this meeting type.')
+      } else {
+        setPrepError(data.error || data.message || 'Prep generation failed.')
       }
+    } catch {
+      setPrepError('Prep generation failed. Is Gemini CLI configured?')
     } finally {
       setPrepLoading(false)
     }
@@ -430,9 +452,20 @@ export function MeetingsView({ initialDate, initialMeetingId }: MeetingsViewProp
           ) : prep ? (
             <MeetingPrepPanel
               prep={prep}
-              onRegenerate={handleRegeneratePrep}
+              onRegenerate={handleGeneratePrep}
               regenerating={prepLoading}
             />
+          ) : selectedMeeting ? (
+            <div className="p-8 text-center text-sm text-slate-400 h-full flex flex-col items-center justify-center">
+              <p className="font-medium text-slate-500 mb-2">No prep generated yet</p>
+              <button
+                onClick={handleGeneratePrep}
+                disabled={prepLoading}
+                className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 cursor-pointer"
+              >
+                {prepLoading ? 'Generating...' : 'Generate Prep'}
+              </button>
+            </div>
           ) : null}
         </div>
       </div>

@@ -171,7 +171,15 @@ def normalize_calendar_event_time(
                 local_date = target_date or date.today()
                 warnings.append("Invalid start_date for all-day event, using fallback date")
         else:
-            local_date = target_date or date.today()
+            # Try to extract date from start_time if present
+            start_raw_for_date = str(event.get("start_time", ""))
+            if start_raw_for_date and len(start_raw_for_date) >= 10:
+                try:
+                    local_date = date.fromisoformat(start_raw_for_date[:10])
+                except (ValueError, TypeError):
+                    local_date = target_date or date.today()
+            else:
+                local_date = target_date or date.today()
 
         return NormalizedCalendarTime(
             start_raw=str(event.get("start_time", "")) or None,
