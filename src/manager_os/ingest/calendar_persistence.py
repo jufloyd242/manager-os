@@ -95,6 +95,8 @@ def persist_calendar_events(
     result = CalendarPersistenceResult(retrieved_count=len(events))
     now = datetime.utcnow()
 
+    from manager_os.ingest.calendar_time import normalize_calendar_event_time
+
     for i, event in enumerate(events):
         if not isinstance(event, dict):
             result.rejected_count += 1
@@ -108,16 +110,36 @@ def persist_calendar_events(
             result.errors.append(f"Event {i}: missing title")
             continue
 
-        start_time = str(event.get("start_time", "")).strip()
-        if not start_time:
+        # Check for all-day events (they may not have start_time)
+        is_all_day = bool(event.get("is_all_day", False))
+        start_date_str = event.get("start_date", "")
+        has_start_time = bool(str(event.get("start_time", "")).strip())
+
+        if not has_start_time and not is_all_day and not start_date_str:
             result.rejected_count += 1
             result.errors.append(f"Event {i}: missing start_time")
             continue
 
-        # Normalize optional fields
-        end_time = event.get("end_time")
-        end_time = str(end_time).strip() if end_time else None
+        # Normalize time using the canonical normalizer
+        normalized = normalize_calendar_event_time(
+            event,
+            target_date=target_date,
+        )
 
+        # Collect warnings
+        for w in normalized.warnings:
+            result.warnings.append(f"Event {i}: {w}")
+
+        # Use normalized fields
+        meeting_date = normalized.local_start_date
+        start_time_raw = normalized.start_raw or ""
+        end_time_raw = normalized.end_raw or ""
+        start_at = normalized.start_at_utc
+        end_at = normalized.end_at_utc
+        event_timezone = normalized.event_timezone
+        is_all_day_final = normalized.is_all_day
+
+        # Normalize other fields
         attendees = _normalize_attendees(event.get("attendees"))
         linked_entities = _normalize_linked_entities(event.get("linked_entities"))
 
@@ -126,12 +148,18 @@ def persist_calendar_events(
         location = str(location).strip() if location else None
         description_summary = event.get("description_summary")
         description_summary = str(description_summary).strip() if description_summary else None
+        organizer = event.get("organizer")
+        organizer = str(organizer).strip() if organizer else None
+        conference_url = event.get("conference_url")
+        conference_url = str(conference_url).strip() if conference_url else None
+        recurring_event_id = event.get("recurring_event_id")
+        recurring_event_id = str(recurring_event_id).strip() if recurring_event_id else None
 
-        # Generate stable ID
+        # Generate stable ID — use external_id + normalized start date for dedup
         if external_id:
-            meeting_id = content_hash(f"calendar::{external_id}::{target_date.isoformat()}")
+            meeting_id = content_hash(f"calendar::{external_id}::{meeting_date.isoformat()}")
         else:
-            meeting_id = content_hash(f"calendar::{title}::{start_time}::{target_date.isoformat()}")
+            meeting_id = content_hash(f"calendar::{title}::{start_time_raw}::{meeting_date.isoformat()}")
 
         # Check if exists (for replaced_count)
         existing = conn.execute(
@@ -141,15 +169,19 @@ def persist_calendar_events(
         try:
             conn.execute(
                 """INSERT OR REPLACE INTO meetings
-                   (id, meeting_date, start_time, end_time, title, attendees,
-                    linked_entities, source, external_id, location,
-                    description_summary, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (id, meeting_date, start_time, end_time, start_at, end_at,
+                    is_all_day, title, attendees, linked_entities, source,
+                    external_id, location, description_summary, organizer,
+                    conference_url, recurring_event_id, timezone, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     meeting_id,
-                    target_date,
-                    start_time,
-                    end_time,
+                    meeting_date,
+                    start_time_raw or None,
+                    end_time_raw or None,
+                    start_at,
+                    end_at,
+                    is_all_day_final,
                     title,
                     json.dumps(attendees),
                     json.dumps(linked_entities),
@@ -157,6 +189,10 @@ def persist_calendar_events(
                     external_id or meeting_id,
                     location,
                     description_summary,
+                    organizer,
+                    conference_url,
+                    recurring_event_id,
+                    event_timezone,
                     now,
                 ],
             )
@@ -165,9 +201,13 @@ def persist_calendar_events(
                 result.replaced_count += 1
             result.persisted_meetings.append({
                 "id": meeting_id,
-                "meeting_date": target_date.isoformat(),
-                "start_time": start_time,
-                "end_time": end_time,
+                "meeting_date": meeting_date.isoformat(),
+                "start_time": start_time_raw or "",
+                "end_time": end_time_raw or "",
+                "start_at": start_at.isoformat() if start_at else None,
+                "end_at": end_at.isoformat() if end_at else None,
+                "is_all_day": is_all_day_final,
+                "timezone": event_timezone,
                 "title": title,
                 "attendees": attendees,
                 "linked_entities": linked_entities,
@@ -178,7 +218,6 @@ def persist_calendar_events(
             })
         except Exception as exc:
             result.rejected_count += 1
-            # Don't include private event content in error
             result.errors.append(f"Event {i} (title={title[:20]}...): database error: {type(exc).__name__}")
 
     return result

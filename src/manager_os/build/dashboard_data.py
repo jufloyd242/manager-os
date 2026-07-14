@@ -306,38 +306,52 @@ def get_meetings_for_date(conn, target_date: date) -> list[dict]:
 
     rows = conn.execute(
         """
-        SELECT id, meeting_date, start_time, end_time, title, attendees,
+        SELECT id, meeting_date, start_time, end_time, start_at, end_at,
+               is_all_day, timezone, title, attendees,
                linked_entities, source, external_id, location,
                description_summary, updated_at
         FROM meetings WHERE meeting_date = ?
-        ORDER BY start_time NULLS LAST
+        ORDER BY
+            meeting_date,
+            CASE
+                WHEN is_all_day THEN 1
+                WHEN start_at IS NULL THEN 2
+                ELSE 0
+            END,
+            start_at NULLS LAST,
+            end_at NULLS LAST,
+            LOWER(title)
         """,
         [target_date],
     ).fetchall()
 
     parsed: list[dict] = []
     for r in rows:
-        attendees_raw = r[5]
+        attendees_raw = r[9]
         attendees: list[str] = _safe_json_list(attendees_raw, str)
-        linked_raw = r[6]
+        linked_raw = r[10]
         linked: list[dict] = _safe_json_list(linked_raw, dict)
         # Skip solo / no-attendee events
         if not attendees:
-            logger.debug("Skipping no-attendee meeting: %s on %s", r[4], r[1])
+            logger.debug("Skipping no-attendee meeting: %s on %s", r[8], r[1])
             continue
         parsed.append({
             "id": r[0],
-            "meeting_date": r[1],
+            "meeting_date": str(r[1]) if r[1] else "",
             "start_time": r[2] or "",
             "end_time": r[3] or "",
-            "title": r[4] or "",
+            "start_at": str(r[4]) if r[4] else None,
+            "end_at": str(r[5]) if r[5] else None,
+            "is_all_day": bool(r[6]) if r[6] else False,
+            "timezone": r[7] or "America/Denver",
+            "title": r[8] or "",
             "attendees": attendees,
             "linked_entities": linked,
-            "source": r[7] or "",
-            "external_id": r[8] or "",
-            "location": r[9] or "",
-            "description_summary": r[10] or "",
-            "updated_at": r[11],
+            "source": r[11] or "",
+            "external_id": r[12] or "",
+            "location": r[13] or "",
+            "description_summary": r[14] or "",
+            "updated_at": str(r[15]) if r[15] else "",
         })
 
     # --- Deduplicate ---

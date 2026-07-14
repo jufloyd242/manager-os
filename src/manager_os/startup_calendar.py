@@ -20,11 +20,15 @@ logger = logging.getLogger(__name__)
 CALENDAR_SYNC_FRESHNESS_HOURS = 6
 
 
-def calculate_week_range(target_date: date) -> tuple[date, date]:
+def calculate_week_range(target_date: date | None = None) -> tuple[date, date]:
     """Calculate Monday-Sunday for the week containing target_date.
 
     Uses ISO week definition: Monday is day 0.
+    If target_date is None, uses current date in America/Denver.
     """
+    if target_date is None:
+        from zoneinfo import ZoneInfo
+        target_date = datetime.now(ZoneInfo("America/Denver")).date()
     weekday = target_date.weekday()  # Monday=0, Sunday=6
     monday = target_date - timedelta(days=weekday)
     sunday = monday + timedelta(days=6)
@@ -75,7 +79,7 @@ def sync_current_week(
     Returns:
         Dict with status, week_start, week_end, and sync result info.
     """
-    target_date = date.today()
+    target_date = None  # Use current Denver date
     week_start, week_end = calculate_week_range(target_date)
 
     if no_sync:
@@ -121,17 +125,12 @@ def sync_current_week(
     total_rejected = 0
     errors: list[str] = []
 
-    # Group events by date
+    # Group events by normalized local date
+    from manager_os.ingest.calendar_time import normalize_calendar_event_time
     events_by_date: dict[date, list[dict]] = {}
     for event in result.items:
-        start_raw = event.get("start_time", event.get("start_at", ""))
-        if start_raw:
-            try:
-                event_date = date.fromisoformat(str(start_raw)[:10])
-            except (ValueError, TypeError):
-                event_date = target_date
-        else:
-            event_date = target_date
+        normalized = normalize_calendar_event_time(event)
+        event_date = normalized.local_start_date
         events_by_date.setdefault(event_date, []).append(event)
 
     for event_date, events in events_by_date.items():

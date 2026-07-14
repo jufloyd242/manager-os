@@ -258,8 +258,11 @@ def retrieve_forecast(
 
 CALENDAR_PROMPT_TEMPLATE = """\
 [Read-only] Get calendar for {target_date}; lookback={lookback_days}d ahead={lookahead_days}d.
+For timed events, return start_time and end_time as RFC3339 timestamps with a numeric UTC offset or Z (e.g. 2026-07-13T09:00:00-06:00 or 2026-07-13T15:00:00Z).
+Also return timezone as an IANA timezone name when available (e.g. America/Denver).
+For all-day events, return start_date and end_date as YYYY-MM-DD and set is_all_day: true.
 Return ONLY JSON:
-{{"ok":true,"source":"google_calendar_gemini","retrieved_at":"ISO8601","events":[{{"title":"str","start_time":"ISO","end_time":"ISO","attendees":["str"],"location":"str","description_summary":"str","external_id":"str"}}]}}
+{{"ok":true,"source":"google_calendar_gemini","retrieved_at":"ISO8601","events":[{{"title":"str","start_time":"RFC3339|null","end_time":"RFC3339|null","start_date":"YYYY-MM-DD|null","end_date":"YYYY-MM-DD|null","timezone":"America/Denver","is_all_day":false,"attendees":["str"],"location":"str","description_summary":"str","external_id":"str","organizer":"str","recurring_event_id":"str","conference_url":"str"}}]}}
 Fail: {{"ok":false,"error":"str"}}
 """
 
@@ -311,9 +314,12 @@ def retrieve_calendar(
 CALENDAR_RANGE_PROMPT_TEMPLATE = """\
 [Read-only] Get calendar events from {start_date} through {end_date} (inclusive).
 Return ALL events in this date range, including recurring events.
-For each event include: title, start_time (ISO), end_time (ISO), attendees (list of email/name), location, description_summary, external_id, organizer, is_all_day (boolean), recurring_event_id, conference_url.
+For timed events, return start_time and end_time as RFC3339 timestamps with a numeric UTC offset or Z (e.g. 2026-07-13T09:00:00-06:00 or 2026-07-13T15:00:00Z).
+Also return timezone as an IANA timezone name when available (e.g. America/Denver).
+For all-day events, return start_date and end_date as YYYY-MM-DD and set is_all_day: true.
+For each event include: title, start_time, end_time, start_date, end_date, timezone, is_all_day, attendees, location, description_summary, external_id, organizer, recurring_event_id, conference_url.
 Return ONLY JSON:
-{{"ok":true,"source":"google_calendar_gemini","retrieved_at":"ISO8601","events":[{{"title":"str","start_time":"ISO","end_time":"ISO","attendees":["str"],"location":"str","description_summary":"str","external_id":"str","organizer":"str","is_all_day":false,"recurring_event_id":"str","conference_url":"str"}}]}}
+{{"ok":true,"source":"google_calendar_gemini","retrieved_at":"ISO8601","events":[{{"title":"str","start_time":"RFC3339|null","end_time":"RFC3339|null","start_date":"YYYY-MM-DD|null","end_date":"YYYY-MM-DD|null","timezone":"America/Denver","is_all_day":false,"attendees":["str"],"location":"str","description_summary":"str","external_id":"str","organizer":"str","recurring_event_id":"str","conference_url":"str"}}]}}
 Fail: {{"ok":false,"error":"str"}}
 """
 
