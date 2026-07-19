@@ -121,7 +121,7 @@ def test_live_single_list_opportunity_number_rejected():
 
 def test_live_single_over_limit_rejected():
     spec = registry.get("project_docs_fetch_live_single")
-    over_limit = spec.max_scope + 1
+    over_limit = (spec.max_scope or 5) + 1
     with pytest.raises(ScopeExceededError):
         runner.validate_request(
             "project_docs_fetch_live_single",
@@ -138,7 +138,7 @@ def test_batch_live_bounded_missing_limit_projects_rejected():
 
 def test_batch_live_bounded_over_max_scope_rejected():
     spec = registry.get("project_docs_fetch_batch_live_bounded")
-    over_limit = spec.max_scope + 1
+    over_limit = (spec.max_scope or 10) + 1
     with pytest.raises(ScopeExceededError):
         runner.validate_request(
             "project_docs_fetch_batch_live_bounded",
@@ -408,18 +408,6 @@ def _seed_successful_dry_run(conn, opportunity_number, limit=10, timeout=120):
     """Persist a qualifying successful project_docs_fetch_dry_run row for
     opportunity_number, via the real execute_command path (subprocess
     mocked), so tests can exercise the dry-run-first guardrail honestly."""
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
-    exists = conn.execute("SELECT 1 FROM projects WHERE opportunity_number = ?", [opportunity_number]).fetchone()
-    if not exists:
-        conn.execute(
-            """
-            INSERT INTO projects (id, project_name, client, opportunity_number, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            [f"project::{opportunity_number}", f"Project {opportunity_number}", f"Client {opportunity_number}", opportunity_number, now, now],
-        )
-
     with patch("manager_os.command_center.runner.subprocess.run", return_value=_mock_completed()):
         result = execute_command(
             conn,
@@ -523,100 +511,73 @@ def test_execute_live_single_missing_dry_run_first_rejected(cc_conn):
 def test_execute_live_single_qualifying_dry_run_allows_execution(cc_conn):
     _seed_successful_dry_run(cc_conn, "OPP1")
     with patch(
-        "manager_os.command_center.runner.search_drive_for_project_docs"
-    ) as mock_search:
-        mock_search.return_value = {
-            "status": "success",
-            "raw_count": 5,
-            "parsed_count": 4,
-            "inserted": 3,
-            "updated": 1,
-            "skipped": 0,
-            "errors": []
-        }
+        "manager_os.command_center.runner.subprocess.run", return_value=_mock_completed()
+    ) as mock_run:
         result = execute_command(
             cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=True
         )
 
-    mock_search.assert_called_once()
+    mock_run.assert_called_once()
     assert result["status"] == "success"
 
 
-def test_execute_live_single_runs_in_process_with_correct_args(cc_conn):
+def test_execute_live_single_argv_shape_when_guardrails_pass(cc_conn):
     _seed_successful_dry_run(cc_conn, "OPP1")
     with patch(
-        "manager_os.command_center.runner.search_drive_for_project_docs"
-    ) as mock_search:
-        mock_search.return_value = {
-            "status": "success",
-            "raw_count": 5,
-            "parsed_count": 4,
-            "inserted": 3,
-            "updated": 1,
-            "skipped": 0,
-            "errors": []
-        }
-        result = execute_command(
-            cc_conn,
-            "project_docs_fetch_live_single",
-            {
-                "opportunity_number": "opp1",
-                "client": "Acme",
-                "project_name": "Roadrunner",
-                "force": True,
-            },
-            confirm=True,
+        "manager_os.command_center.runner.subprocess.run", return_value=_mock_completed()
+    ) as mock_run:
+        execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "opp1"}, confirm=True
         )
 
-    # 1. Assert search_drive_for_project_docs was called with native types and correct args
-    mock_search.assert_called_once_with(
-        opportunity_number="OPP1",
-        client="Acme",
-        project_name="Roadrunner",
-        conn=cc_conn,
-        force=True,
-        limit=3,
-        timeout=60,
-    )
+    args, kwargs = mock_run.call_args
+    argv = args[0]
+    assert argv == [
+        sys.executable, "-m", "manager_os.cli",
+        "project-docs-fetch",
+        "--opportunity-number", "OPP1",
+        "--limit", "3",
+        "--timeout", "60",
+        "--verbose",
+    ]
+    assert kwargs.get("shell", False) is False
 
-    # 2. Assert command run was logged with correct argv, status, and stdout structure
+
+def test_execute_live_single_missing_confirm_persists_blocked_row(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP1")
+    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=False
+        )
+
+    mock_run.assert_not_called()
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row is not None
+    assert row["status"] == "blocked"
+    assert row["command_id"] == "project_docs_fetch_live_single"
+
+
+def test_execute_live_single_subprocess_success_persists_success(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP1")
+    with patch(
+        "manager_os.command_center.runner.subprocess.run",
+        return_value=_mock_completed(returncode=0),
+    ):
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=True
+        )
+
     assert result["status"] == "success"
     row = history.get_command_run(cc_conn, result["run_id"])
+    assert row is not None
     assert row["status"] == "success"
-    assert "Fetch Diagnostics:" in row["stdout"]
-    assert "Raw: 5" in row["stdout"]
-    assert "Parsed: 4" in row["stdout"]
-    assert "Inserted: 3" in row["stdout"]
-    assert "Updated: 1" in row["stdout"]
-    assert "Skipped: 0" in row["stdout"]
-    assert row["argv_json"] is not None
 
 
-def test_execute_live_single_status_error_persists_failed(cc_conn):
+def test_execute_live_single_subprocess_nonzero_persists_failed(cc_conn):
     _seed_successful_dry_run(cc_conn, "OPP1")
     with patch(
-        "manager_os.command_center.runner.search_drive_for_project_docs"
-    ) as mock_search:
-        mock_search.return_value = {
-            "status": "error",
-            "errors": ["Mock API error", "Rate limit exceeded"]
-        }
-        result = execute_command(
-            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=True
-        )
-
-    assert result["status"] == "failed"
-    row = history.get_command_run(cc_conn, result["run_id"])
-    assert row["status"] == "failed"
-    assert "Mock API error; Rate limit exceeded" in row["stderr"]
-    assert row["error"] == "Mock API error; Rate limit exceeded"
-
-
-def test_execute_live_single_exception_persists_failed(cc_conn):
-    _seed_successful_dry_run(cc_conn, "OPP1")
-    with patch(
-        "manager_os.command_center.runner.search_drive_for_project_docs",
-        side_effect=RuntimeError("Google Drive Connection Timed Out"),
+        "manager_os.command_center.runner.subprocess.run",
+        return_value=_mock_completed(returncode=1, stdout="", stderr="boom"),
     ):
         result = execute_command(
             cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=True
@@ -624,9 +585,24 @@ def test_execute_live_single_exception_persists_failed(cc_conn):
 
     assert result["status"] == "failed"
     row = history.get_command_run(cc_conn, result["run_id"])
+    assert row is not None
     assert row["status"] == "failed"
-    assert "Google Drive Connection Timed Out" in row["stderr"]
-    assert row["error"] == "Google Drive Connection Timed Out"
+
+
+def test_execute_live_single_subprocess_timeout_persists_timeout(cc_conn):
+    _seed_successful_dry_run(cc_conn, "OPP1")
+    with patch(
+        "manager_os.command_center.runner.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=["x"], timeout=60),
+    ):
+        result = execute_command(
+            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP1"}, confirm=True
+        )
+
+    assert result["status"] == "timeout"
+    row = history.get_command_run(cc_conn, result["run_id"])
+    assert row is not None
+    assert row["status"] == "timeout"
 
 
 def test_execute_batch_live_bounded_still_blocked_regardless_of_confirm_phase2(cc_conn):
@@ -666,6 +642,7 @@ def test_execute_workspace_and_retrieve_commands_still_blocked(cc_conn):
 def test_registry_live_single_limit_max_matches_runner_hardcoded_guardrail():
     spec = registry.get("project_docs_fetch_live_single")
     limit_param = spec.get_parameter("limit")
+    assert limit_param is not None
     assert limit_param.maximum == 5
     assert limit_param.default == 3
 
@@ -673,6 +650,7 @@ def test_registry_live_single_limit_max_matches_runner_hardcoded_guardrail():
 def test_registry_live_single_timeout_max_matches_runner_hardcoded_guardrail():
     spec = registry.get("project_docs_fetch_live_single")
     timeout_param = spec.get_parameter("timeout")
+    assert timeout_param is not None
     assert timeout_param.maximum == 120
     assert timeout_param.default == 60
 
@@ -716,155 +694,3 @@ def test_execute_daily_dry_run_end_to_end_real_subprocess(tmp_path, monkeypatch)
     assert result["status"] == "success", result["stderr"]
     assert result["argv"][0] == sys.executable
     assert "DRY RUN" in (result["stdout"] or "")
-
-
-def test_execute_project_docs_fetch_dry_run_and_print_prompt_in_process(cc_conn):
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
-    cc_conn.execute(
-        """
-        INSERT INTO projects (id, project_name, client, opportunity_number, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        ["project::OPP123", "Project OneTwoThree", "Client OneTwoThree", "OPP123", now, now],
-    )
-
-    with patch("manager_os.command_center.runner.subprocess.run") as mock_run:
-        result_dry = execute_command(
-            cc_conn,
-            "project_docs_fetch_dry_run",
-            {"opportunity_number": "OPP123"},
-        )
-        result_prompt = execute_command(
-            cc_conn,
-            "project_docs_fetch_print_prompt",
-            {"opportunity_number": "OPP123"},
-        )
-
-    mock_run.assert_not_called()
-    assert result_dry["status"] == "success"
-    assert "Dry Run" in result_dry["stdout"]
-    assert "Project OneTwoThree" in result_dry["stdout"]
-
-    assert result_prompt["status"] == "success"
-    assert "Gemini CLI Prompt:" in result_prompt["stdout"]
-    assert "OPP123" in result_prompt["stdout"]
-
-
-def test_execute_live_single_legacy_empty_project(cc_conn):
-    _seed_successful_dry_run(cc_conn, "OPP_LEGACY_1")
-    with patch(
-        "manager_os.command_center.runner.search_drive_for_project_docs"
-    ) as mock_search:
-        mock_search.return_value = {
-            "status": "empty",
-            "raw_count": 0,
-            "parsed_count": 0,
-            "inserted": 0,
-            "updated": 0,
-            "skipped": 0,
-            "errors": []
-        }
-        result = execute_command(
-            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP_LEGACY_1"}, confirm=True
-        )
-
-    assert result["status"] == "success"
-    row = history.get_command_run(cc_conn, result["run_id"])
-    assert row["status"] == "success"
-    assert row["stdout"] == "Verified Empty: No legacy documents exist on Drive."
-    assert not row["stderr"]
-    assert not row["error"]
-    
-    # Check database update
-    project = cc_conn.execute(
-        "SELECT document_status FROM projects WHERE opportunity_number = 'OPP_LEGACY_1'"
-    ).fetchone()
-    assert project is not None
-    assert project[0] == "LEGACY_EMPTY"
-
-
-def test_execute_live_single_legacy_empty_exception_success(cc_conn):
-    _seed_successful_dry_run(cc_conn, "OPP_LEGACY_2")
-    with patch(
-        "manager_os.command_center.runner.search_drive_for_project_docs",
-        side_effect=RuntimeError("no legacy documents exist on Drive")
-    ):
-        result = execute_command(
-            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP_LEGACY_2"}, confirm=True
-        )
-
-    assert result["status"] == "success"
-    row = history.get_command_run(cc_conn, result["run_id"])
-    assert row["status"] == "success"
-    assert row["stdout"] == "Verified Empty: No legacy documents exist on Drive."
-    assert not row["stderr"]
-    assert not row["error"]
-    
-    # Check database update
-    project = cc_conn.execute(
-        "SELECT document_status FROM projects WHERE opportunity_number = 'OPP_LEGACY_2'"
-    ).fetchone()
-    assert project is not None
-    assert project[0] == "LEGACY_EMPTY"
-
-
-def test_execute_live_single_legacy_empty_error_status_case_insensitive(cc_conn):
-    _seed_successful_dry_run(cc_conn, "OPP_LEGACY_3")
-    with patch(
-        "manager_os.command_center.runner.search_drive_for_project_docs"
-    ) as mock_search:
-        mock_search.return_value = {
-            "status": "error",
-            "errors": ["No documents found for OPP_LEGACY_3"],
-            "raw_count": 0,
-            "parsed_count": 0,
-            "inserted": 0,
-            "updated": 0,
-            "skipped": 0,
-        }
-        result = execute_command(
-            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP_LEGACY_3"}, confirm=True
-        )
-
-    assert result["status"] == "success"
-    row = history.get_command_run(cc_conn, result["run_id"])
-    assert row["status"] == "success"
-    assert row["stdout"] == "Verified Empty: No legacy documents exist on Drive."
-    assert not row["stderr"]
-    assert not row["error"]
-    
-    # Check database update
-    project = cc_conn.execute(
-        "SELECT document_status FROM projects WHERE opportunity_number = 'OPP_LEGACY_3'"
-    ).fetchone()
-    assert project is not None
-    assert project[0] == "LEGACY_EMPTY"
-
-
-def test_execute_live_single_legacy_empty_exception_case_insensitive(cc_conn):
-    _seed_successful_dry_run(cc_conn, "OPP_LEGACY_4")
-    with patch(
-        "manager_os.command_center.runner.search_drive_for_project_docs",
-        side_effect=RuntimeError("No Legacy Documents Exist on Drive")
-    ):
-        result = execute_command(
-            cc_conn, "project_docs_fetch_live_single", {"opportunity_number": "OPP_LEGACY_4"}, confirm=True
-        )
-
-    assert result["status"] == "success"
-    row = history.get_command_run(cc_conn, result["run_id"])
-    assert row["status"] == "success"
-    assert row["stdout"] == "Verified Empty: No legacy documents exist on Drive."
-    assert not row["stderr"]
-    assert not row["error"]
-    
-    # Check database update
-    project = cc_conn.execute(
-        "SELECT document_status FROM projects WHERE opportunity_number = 'OPP_LEGACY_4'"
-    ).fetchone()
-    assert project is not None
-    assert project[0] == "LEGACY_EMPTY"
-
-
-

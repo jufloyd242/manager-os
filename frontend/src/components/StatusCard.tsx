@@ -4,7 +4,7 @@ const FRESHNESS_STYLES: Record<StatusCardData['freshness'], string> = {
   fresh: 'text-emerald-600',
   stale: 'text-amber-600',
   missing: 'text-red-600',
-  unknown: 'text-slate-500',
+  unknown: 'text-slate-400',
 }
 
 const FRESHNESS_LABELS: Record<StatusCardData['freshness'], string> = {
