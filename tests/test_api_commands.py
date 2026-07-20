@@ -430,20 +430,7 @@ def test_run_live_single_succeeds_after_qualifying_dry_run(tmp_path, monkeypatch
     for an OppID, followed by project_docs_fetch_live_single/run with
     confirm=true and no dry_run_run_id, picks up that recent dry run
     automatically (history.find_recent_successful_dry_run) and executes."""
-    client, db_path = _client(tmp_path, monkeypatch)
-
-    from manager_os.db import get_connection
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
-    conn = get_connection(db_path)
-    conn.execute(
-        """
-        INSERT INTO projects (id, project_name, client, opportunity_number, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        ["project::OPP031267", "Project OPP031267", "Client OPP031267", "OPP031267", now, now],
-    )
-    conn.close()
+    client, _ = _client(tmp_path, monkeypatch)
 
     with patch(
         "manager_os.command_center.runner.subprocess.run",
@@ -456,17 +443,9 @@ def test_run_live_single_succeeds_after_qualifying_dry_run(tmp_path, monkeypatch
     assert dry_resp.json()["status"] == "success", dry_resp.text
 
     with patch(
-        "manager_os.command_center.runner.search_drive_for_project_docs"
-    ) as mock_search, patch("manager_os.ingest.workspace_gemini._run_gemini_retrieval") as mock_gemini:
-        mock_search.return_value = {
-            "status": "success",
-            "raw_count": 5,
-            "parsed_count": 4,
-            "inserted": 3,
-            "updated": 1,
-            "skipped": 0,
-            "errors": []
-        }
+        "manager_os.command_center.runner.subprocess.run",
+        return_value=_mock_completed(stdout="live ok\n"),
+    ) as mock_run, patch("manager_os.ingest.workspace_gemini._run_gemini_retrieval") as mock_gemini:
         live_resp = client.post(
             "/api/commands/project_docs_fetch_live_single/run",
             json={
@@ -475,7 +454,7 @@ def test_run_live_single_succeeds_after_qualifying_dry_run(tmp_path, monkeypatch
             },
         )
 
-    mock_search.assert_called_once()
+    mock_run.assert_called_once()
     mock_gemini.assert_not_called()
     assert live_resp.status_code == 200, live_resp.text
     body = live_resp.json()

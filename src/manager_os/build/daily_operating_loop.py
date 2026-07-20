@@ -17,7 +17,7 @@ warning is recorded instead of crashing the whole loop.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date
 from typing import Any
 
 from manager_os.build.dashboard_data import (
@@ -94,7 +94,6 @@ def _document_gaps(conn, warnings: list[str]) -> list[dict]:
             FROM projects p
             LEFT JOIN project_documents d ON d.project_id = p.id
             WHERE p.opportunity_number != ''
-              AND (p.document_status IS NULL OR p.document_status != 'LEGACY_EMPTY')
             GROUP BY p.opportunity_number, p.project_name, p.client
             HAVING COUNT(d.id) = 0
             ORDER BY p.opportunity_number
@@ -246,87 +245,8 @@ def build_daily_operating_loop(conn, target_date: date, settings=None) -> dict[s
     document_gaps = _document_gaps(conn, warnings)
     feedback_learning = _feedback_learning(conn, warnings)
     recommended_actions = _recommended_actions(people_staffing, meetings, document_gaps)
-    
-    # Exclude low-priority, informational-only, stale-source and dismissed/noisy/wrong/etc.
-    suppressed_ids = set()
-    try:
-        # Check feedback_events table
-        rows = conn.execute(
-            "SELECT DISTINCT item_id FROM feedback_events WHERE rating IN ('noisy', 'stale', 'wrong', 'dismissed', 'resolved', 'not-relevant', 'not-mine')"
-        ).fetchall()
-        suppressed_ids = {r[0] for r in rows}
-    except Exception:
-        pass
-
-    try:
-        # Check signals table for dismissed or resolved signals
-        rows = conn.execute("SELECT id FROM signals WHERE status IN ('dismissed', 'resolved', 'noisy', 'wrong', 'not-relevant', 'not-mine')").fetchall()
-        for r in rows:
-            suppressed_ids.add(r[0])
-            suppressed_ids.add(f"signal:{r[0]}")
-    except Exception:
-        pass
-
-    # Find stale sources
-    stale_sources = set()
-    for table in ["projects", "people", "meetings", "signals", "staffing_forecast"]:
-        col = "ingested_at" if table == "staffing_forecast" else "updated_at"
-        try:
-            res = conn.execute(f"SELECT MAX({col}) FROM {table}").fetchone()
-            if res and res[0]:
-                val = res[0]
-                if isinstance(val, str):
-                    val = datetime.fromisoformat(val)
-                elif isinstance(val, date) and not isinstance(val, datetime):
-                    val = datetime.combine(val, datetime.min.time())
-                if datetime.now() - val > timedelta(hours=24):
-                    stale_sources.add(table)
-        except Exception:
-            pass
-
-    filtered_actions = []
-    seen_titles = set()
-
-    for act in recommended_actions:
-        priority = act.get("priority", "medium")
-        
-        # 1. Exclude low priority
-        if priority == "low":
-            continue
-            
-        # 2. Exclude informational-only (must have primary_command or be actionable)
-        if not act.get("primary_command"):
-            continue
-            
-        # 3. Exclude suppressed/dismissed ids
-        act_id = act.get("id")
-        if act_id in suppressed_ids:
-            continue
-        title_id = f"action:{act['title'].replace(' ', '_')}"
-        if title_id in suppressed_ids:
-            continue
-            
-        # 4. Suppress duplicates
-        title = act.get("title")
-        if title in seen_titles:
-            continue
-            
-        # 5. Exclude stale source items unless explicitly "refresh stale source"
-        source = act.get("source")
-        if source in stale_sources and "refresh" not in title.lower():
-            continue
-            
-        # Passed filtering! Add explanation
-        act["explanation"] = f"Passed: priority={priority}, has actionable primary command, source ({source}) is fresh, and has no feedback suppressions."
-        filtered_actions.append(act)
-        seen_titles.add(title)
-        
-        # Limit default attention list to five
-        if len(filtered_actions) >= 5:
-            break
-
-    action_summary = build_action_summary(filtered_actions)
-    action_groups = build_action_groups(filtered_actions)
+    action_summary = build_action_summary(recommended_actions)
+    action_groups = build_action_groups(recommended_actions)
 
     return {
         "date": target_date.isoformat(),
@@ -335,8 +255,7 @@ def build_daily_operating_loop(conn, target_date: date, settings=None) -> dict[s
         "projects_deals": projects_deals,
         "document_gaps": document_gaps,
         "feedback_learning": feedback_learning,
-        "recommended_actions": filtered_actions,
-        "unfiltered_recommended_actions": recommended_actions,
+        "recommended_actions": recommended_actions,
         "action_summary": action_summary,
         "action_groups": action_groups,
         "warnings": warnings,
